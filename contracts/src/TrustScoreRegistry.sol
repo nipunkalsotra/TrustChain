@@ -35,7 +35,6 @@ pragma solidity ^0.8.20;
  */
 
 contract TrustScoreRegistry {
-
     // ─────────────────────────────────────────────
     // STRUCTS
     // ─────────────────────────────────────────────
@@ -45,21 +44,20 @@ contract TrustScoreRegistry {
      *      Lets the frontend render a sparkline of score changes over time.
      */
     struct ScoreUpdate {
-        uint256 score;       // the new score value (0–100)
-        uint256 timestamp;   // block.timestamp when updated
-        string  reason;      // e.g. "web_search_complete", "validation_passed"
+        uint256 score; // the new score value (0–100)
+        uint256 timestamp; // block.timestamp when updated
+        string reason; // e.g. "web_search_complete", "validation_passed"
     }
 
     /**
      * @dev Return type for getScoreFull() — everything the UI needs in one call.
      */
     struct ScoreRecord {
-        uint256 currentScore;    // latest score for this agent in this run
-        uint256 updateCount;     // how many times score was updated this run
-        uint256 lastUpdatedAt;   // timestamp of most recent update
-        bool    hasScore;        // false if no score recorded yet for this run
+        uint256 currentScore; // latest score for this agent in this run
+        uint256 updateCount; // how many times score was updated this run
+        uint256 lastUpdatedAt; // timestamp of most recent update
+        bool hasScore; // false if no score recorded yet for this run
     }
-
 
     // ─────────────────────────────────────────────
     // STATE VARIABLES
@@ -98,7 +96,6 @@ contract TrustScoreRegistry {
     /// @notice Ordered list of all runIds — for UI pagination.
     string[] public allRunIds;
 
-
     // ─────────────────────────────────────────────
     // EVENTS
     // ─────────────────────────────────────────────
@@ -109,33 +106,20 @@ contract TrustScoreRegistry {
      *      agentId + runId are indexed for fast filtering.
      */
     event ScoreUpdated(
-        string  indexed agentId,
-        string  indexed runId,
-        uint256         newScore,
-        uint256         timestamp,
-        string          reason
+        string indexed agentId, string indexed runId, uint256 newScore, uint256 timestamp, string reason
     );
 
     /**
      * @dev Emitted when a new runId is seen for the first time.
      *      Lets the frontend know a fresh demo run has started.
      */
-    event RunStarted(
-        string  indexed runId,
-        uint256         timestamp
-    );
+    event RunStarted(string indexed runId, uint256 timestamp);
 
     /**
      * @dev Emitted when the safety rail is hit (score > 100 was attempted).
      *      Helps you debug a Python-side bug during the demo.
      */
-    event ScoreClampedWarning(
-        string  indexed agentId,
-        string  indexed runId,
-        uint256         attemptedScore,
-        uint256         timestamp
-    );
-
+    event ScoreClampedWarning(string indexed agentId, string indexed runId, uint256 attemptedScore, uint256 timestamp);
 
     // ─────────────────────────────────────────────
     // MODIFIERS
@@ -146,10 +130,7 @@ contract TrustScoreRegistry {
      *      update scores.  Anyone else gets an immediate revert.
      */
     modifier onlyOwner() {
-        require(
-            msg.sender == owner,
-            "TrustScoreRegistry: caller is not the owner"
-        );
+        require(msg.sender == owner, "TrustScoreRegistry: caller is not the owner");
         _;
     }
 
@@ -159,10 +140,9 @@ contract TrustScoreRegistry {
      */
     modifier validIds(string calldata agentId, string calldata runId) {
         require(bytes(agentId).length > 0, "TrustScoreRegistry: agentId cannot be empty");
-        require(bytes(runId).length  > 0,  "TrustScoreRegistry: runId cannot be empty");
+        require(bytes(runId).length > 0, "TrustScoreRegistry: runId cannot be empty");
         _;
     }
-
 
     // ─────────────────────────────────────────────
     // CONSTRUCTOR
@@ -175,7 +155,6 @@ contract TrustScoreRegistry {
     constructor() {
         owner = msg.sender;
     }
-
 
     // ─────────────────────────────────────────────
     // WRITE FUNCTIONS  (cost gas — called by FastAPI via Web3.py)
@@ -200,12 +179,11 @@ contract TrustScoreRegistry {
      *           .build_transaction({from: account.address, gas: 150000, nonce: nonce})
      */
     function updateScore(
-        string  calldata agentId,
-        string  calldata runId,
-        uint256          score,
-        string  calldata reason
+        string calldata agentId,
+        string calldata runId,
+        uint256 score,
+        string calldata reason
     ) external onlyOwner validIds(agentId, runId) {
-
         // ── Safety rail: clamp score to 100, never revert ──────────────────
         uint256 safeScore = score;
         if (score > 100) {
@@ -226,16 +204,12 @@ contract TrustScoreRegistry {
         }
 
         // ── Store the score ────────────────────────────────────────────────
-        scores[agentId][runId]        = safeScore;
+        scores[agentId][runId] = safeScore;
         lastUpdatedAt[agentId][runId] = block.timestamp;
-        hasScore[agentId][runId]      = true;
+        hasScore[agentId][runId] = true;
 
         // ── Append to history (for sparkline chart) ────────────────────────
-        scoreHistory[agentId][runId].push(ScoreUpdate({
-            score:     safeScore,
-            timestamp: block.timestamp,
-            reason:    reason
-        }));
+        scoreHistory[agentId][runId].push(ScoreUpdate({score: safeScore, timestamp: block.timestamp, reason: reason}));
 
         emit ScoreUpdated(agentId, runId, safeScore, block.timestamp, reason);
     }
@@ -251,22 +225,18 @@ contract TrustScoreRegistry {
      *
      * @param runId   The run to reset.
      */
-    function resetRun(
-        string calldata runId
-    ) external onlyOwner {
-
+    function resetRun(string calldata runId) external onlyOwner {
         require(runExists[runId], "TrustScoreRegistry: runId does not exist");
 
         string[] storage agents = runAgents[runId];
         for (uint256 i = 0; i < agents.length; i++) {
             string memory agentId = agents[i];
-            scores[agentId][runId]        = 0;
+            scores[agentId][runId] = 0;
             lastUpdatedAt[agentId][runId] = 0;
-            hasScore[agentId][runId]      = false;
+            hasScore[agentId][runId] = false;
             delete scoreHistory[agentId][runId];
         }
     }
-
 
     // ─────────────────────────────────────────────
     // READ / VIEW FUNCTIONS  (free — no gas)
@@ -281,10 +251,7 @@ contract TrustScoreRegistry {
      * @param runId    e.g. "run_20240115_001"
      * @return uint256  Current score (0–100).  Returns 0 if not yet scored.
      */
-    function getScore(
-        string calldata agentId,
-        string calldata runId
-    ) external view returns (uint256) {
+    function getScore(string calldata agentId, string calldata runId) external view returns (uint256) {
         return scores[agentId][runId];
     }
 
@@ -297,15 +264,12 @@ contract TrustScoreRegistry {
      * @param runId    e.g. "run_20240115_001"
      * @return ScoreRecord struct
      */
-    function getScoreFull(
-        string calldata agentId,
-        string calldata runId
-    ) external view returns (ScoreRecord memory) {
+    function getScoreFull(string calldata agentId, string calldata runId) external view returns (ScoreRecord memory) {
         return ScoreRecord({
-            currentScore:  scores[agentId][runId],
-            updateCount:   scoreHistory[agentId][runId].length,
+            currentScore: scores[agentId][runId],
+            updateCount: scoreHistory[agentId][runId].length,
             lastUpdatedAt: lastUpdatedAt[agentId][runId],
-            hasScore:      hasScore[agentId][runId]
+            hasScore: hasScore[agentId][runId]
         });
     }
 
@@ -318,10 +282,11 @@ contract TrustScoreRegistry {
      * @param runId    e.g. "run_20240115_001"
      * @return ScoreUpdate[]  Array of {score, timestamp, reason}
      */
-    function getScoreHistory(
-        string calldata agentId,
-        string calldata runId
-    ) external view returns (ScoreUpdate[] memory) {
+    function getScoreHistory(string calldata agentId, string calldata runId)
+        external
+        view
+        returns (ScoreUpdate[] memory)
+    {
         return scoreHistory[agentId][runId];
     }
 
@@ -334,20 +299,19 @@ contract TrustScoreRegistry {
      * @return agentIds  Array of agentId strings
      * @return agentScores  Corresponding scores (same index)
      */
-    function getRunLeaderboard(
-        string calldata runId
-    ) external view returns (
-        string[] memory agentIds,
-        uint256[] memory agentScores
-    ) {
+    function getRunLeaderboard(string calldata runId)
+        external
+        view
+        returns (string[] memory agentIds, uint256[] memory agentScores)
+    {
         string[] storage agents = runAgents[runId];
         uint256 count = agents.length;
 
-        agentIds    = new string[](count);
+        agentIds = new string[](count);
         agentScores = new uint256[](count);
 
         for (uint256 i = 0; i < count; i++) {
-            agentIds[i]    = agents[i];
+            agentIds[i] = agents[i];
             agentScores[i] = scores[agents[i]][runId];
         }
 

@@ -5,21 +5,20 @@ pragma solidity ^0.8.20;
 /// @notice Immutable on-chain black box — every AI agent action permanently recorded
 /// @dev Deploy AFTER TrustScoreRegistry and AgentIdentityRegistry
 contract AgentAuditLog {
-
     // ─────────────────────────────────────────────
     // STRUCT
     // ─────────────────────────────────────────────
 
     struct ActionRecord {
-        string  runId;        // "run-a3f9c2b1" — groups all steps of one demo run
-        string  agentId;      // "researcher" | "validator" | "scorer" | "reporter"
-        string  action;       // "SEARCH" | "FACTCHECK" | "SCORE" | "REPORT"
-        bytes32 inputHash;    // keccak256 of THIS agent's actual input
-        bytes32 outputHash;   // keccak256 of THIS agent's actual output
-        uint256 timestamp;    // block.timestamp — set by Monad, cannot be faked
-        uint256 stepIndex;    // 0 | 1 | 2 | 3
-        string  metadata;     // optional JSON string — human readable summary
-        address txSender;     // msg.sender — auto set, proves wallet origin
+        string runId; // "run-a3f9c2b1" — groups all steps of one demo run
+        string agentId; // "researcher" | "validator" | "scorer" | "reporter"
+        string action; // "SEARCH" | "FACTCHECK" | "SCORE" | "REPORT"
+        bytes32 inputHash; // keccak256 of THIS agent's actual input
+        bytes32 outputHash; // keccak256 of THIS agent's actual output
+        uint256 timestamp; // block.timestamp — set by Monad, cannot be faked
+        uint256 stepIndex; // 0 | 1 | 2 | 3
+        string metadata; // optional JSON string — human readable summary
+        address txSender; // msg.sender — auto set, proves wallet origin
     }
 
     // ─────────────────────────────────────────────
@@ -42,14 +41,14 @@ contract AgentAuditLog {
     // ─────────────────────────────────────────────
 
     event ActionLogged(
-        string  indexed runId,
-        string  indexed agentId,
-        string          action,
-        uint256         stepIndex,
-        bytes32         inputHash,
-        bytes32         outputHash,
-        uint256         timestamp,
-        uint256         recordIndex  // position in records[] array
+        string indexed runId,
+        string indexed agentId,
+        string action,
+        uint256 stepIndex,
+        bytes32 inputHash,
+        bytes32 outputHash,
+        uint256 timestamp,
+        uint256 recordIndex // position in records[] array
     );
 
     // ─────────────────────────────────────────────
@@ -91,31 +90,30 @@ contract AgentAuditLog {
     /// @param stepIndex  Position in pipeline: 0 | 1 | 2 | 3
     /// @param metadata   Optional JSON string for human readable context
     function logAction(
-        string  calldata runId,
-        string  calldata agentId,
-        string  calldata action,
-        bytes32          inputHash,
-        bytes32          outputHash,
-        uint256          stepIndex,
-        string  calldata metadata
+        string calldata runId,
+        string calldata agentId,
+        string calldata action,
+        bytes32 inputHash,
+        bytes32 outputHash,
+        uint256 stepIndex,
+        string calldata metadata
     ) external onlyOwner returns (uint256 recordIndex) {
-
         // Basic validation
-        if (bytes(runId).length    == 0) revert EmptyRunId();
-        if (bytes(agentId).length  == 0) revert EmptyAgentId();
-        if (bytes(action).length   == 0) revert InvalidAction();
+        if (bytes(runId).length == 0) revert EmptyRunId();
+        if (bytes(agentId).length == 0) revert EmptyAgentId();
+        if (bytes(action).length == 0) revert InvalidAction();
 
         // Build the record
         ActionRecord memory record = ActionRecord({
-            runId:       runId,
-            agentId:     agentId,
-            action:      action,
-            inputHash:   inputHash,
-            outputHash:  outputHash,
-            timestamp:   block.timestamp,
-            stepIndex:   stepIndex,
-            metadata:    metadata,
-            txSender:    msg.sender
+            runId: runId,
+            agentId: agentId,
+            action: action,
+            inputHash: inputHash,
+            outputHash: outputHash,
+            timestamp: block.timestamp,
+            stepIndex: stepIndex,
+            metadata: metadata,
+            txSender: msg.sender
         });
 
         // Append to master list
@@ -128,16 +126,7 @@ contract AgentAuditLog {
         // Track per-agent action count
         agentActionCount[agentId]++;
 
-        emit ActionLogged(
-            runId,
-            agentId,
-            action,
-            stepIndex,
-            inputHash,
-            outputHash,
-            block.timestamp,
-            recordIndex
-        );
+        emit ActionLogged(runId, agentId, action, stepIndex, inputHash, outputHash, block.timestamp, recordIndex);
     }
 
     // ─────────────────────────────────────────────
@@ -151,26 +140,18 @@ contract AgentAuditLog {
 
     /// @notice Get all record indices belonging to a specific run
     /// @dev Python calls this first, then fetches each record by index
-    function getRunRecordIndices(string calldata runId)
-        external view returns (uint256[] memory)
-    {
+    function getRunRecordIndices(string calldata runId) external view returns (uint256[] memory) {
         return runRecords[runId];
     }
 
     /// @notice Get a single record by its index in the master array
-    function getRecord(uint256 index)
-        external view
-        returns (ActionRecord memory)
-    {
+    function getRecord(uint256 index) external view returns (ActionRecord memory) {
         return records[index];
     }
 
     /// @notice Get multiple records at once — saves RPC round trips
     /// @dev Pass indices from getRunRecordIndices()
-    function getRecordsBatch(uint256[] calldata indices)
-        external view
-        returns (ActionRecord[] memory batch)
-    {
+    function getRecordsBatch(uint256[] calldata indices) external view returns (ActionRecord[] memory batch) {
         batch = new ActionRecord[](indices.length);
         for (uint256 i = 0; i < indices.length; i++) {
             batch[i] = records[indices[i]];
@@ -182,13 +163,13 @@ contract AgentAuditLog {
     /// @param index       Record index to verify
     /// @param rawInput    Original input string to rehash
     /// @param rawOutput   Original output string to rehash
-    function verifyRecord(
-        uint256 index,
-        string  calldata rawInput,
-        string  calldata rawOutput
-    ) external view returns (bool inputMatch, bool outputMatch) {
+    function verifyRecord(uint256 index, string calldata rawInput, string calldata rawOutput)
+        external
+        view
+        returns (bool inputMatch, bool outputMatch)
+    {
         ActionRecord memory record = records[index];
-        inputMatch  = (keccak256(bytes(rawInput))  == record.inputHash);
+        inputMatch = (keccak256(bytes(rawInput)) == record.inputHash);
         outputMatch = (keccak256(bytes(rawOutput)) == record.outputHash);
     }
 }

@@ -40,7 +40,6 @@ pragma solidity ^0.8.20;
  */
 
 contract AgentIdentityRegistry {
-
     // ─────────────────────────────────────────────
     // STRUCTS
     // ─────────────────────────────────────────────
@@ -50,13 +49,13 @@ contract AgentIdentityRegistry {
      *      Stored in agentRecords mapping, looked up by agentId string.
      */
     struct AgentRecord {
-        string   agentId;          // e.g. "researcher", "validator", "scorer", "reporter"
-        bytes32  codeHash;         // keccak256 of the agent config dict (see above)
-        address  registeredBy;     // wallet that called registerAgent() — always owner
-        uint256  registeredAt;     // block.timestamp at registration time
-        bool     isActive;         // false = revoked, verifyAgent() will return false
-        string   modelName;        // stored for UI display only, e.g. "gpt-4o"
-        string   modelVersion;     // stored for UI display only, e.g. "2024-11-20"
+        string agentId; // e.g. "researcher", "validator", "scorer", "reporter"
+        bytes32 codeHash; // keccak256 of the agent config dict (see above)
+        address registeredBy; // wallet that called registerAgent() — always owner
+        uint256 registeredAt; // block.timestamp at registration time
+        bool isActive; // false = revoked, verifyAgent() will return false
+        string modelName; // stored for UI display only, e.g. "gpt-4o"
+        string modelVersion; // stored for UI display only, e.g. "2024-11-20"
     }
 
     /**
@@ -64,15 +63,14 @@ contract AgentIdentityRegistry {
      *      enough detail to render the "Verify Integrity" panel.
      */
     struct VerificationResult {
-        bool    isValid;            // true only if active AND hashes match
-        bool    isActive;           // false if agent was revoked
-        bool    hashMatches;        // false if codeHash has changed
-        bytes32 storedHash;         // what was registered on-chain
-        bytes32 providedHash;       // what the caller computed right now
-        uint256 registeredAt;       // when agent was first registered
-        string  agentId;
+        bool isValid; // true only if active AND hashes match
+        bool isActive; // false if agent was revoked
+        bool hashMatches; // false if codeHash has changed
+        bytes32 storedHash; // what was registered on-chain
+        bytes32 providedHash; // what the caller computed right now
+        uint256 registeredAt; // when agent was first registered
+        string agentId;
     }
-
 
     // ─────────────────────────────────────────────
     // STATE VARIABLES
@@ -100,7 +98,6 @@ contract AgentIdentityRegistry {
     /// @notice List of all registered agentIds — for iteration in the UI.
     string[] public registeredAgentIds;
 
-
     // ─────────────────────────────────────────────
     // EVENTS
     // ─────────────────────────────────────────────
@@ -110,33 +107,19 @@ contract AgentIdentityRegistry {
      *      Web3.py listens for this to confirm startup registration.
      *      Indexed fields: agentId and registeredBy — most common filters.
      */
-    event AgentRegistered(
-        string  indexed agentId,
-        bytes32         codeHash,
-        address indexed registeredBy,
-        uint256         timestamp
-    );
+    event AgentRegistered(string indexed agentId, bytes32 codeHash, address indexed registeredBy, uint256 timestamp);
 
     /**
      * @dev Emitted when an agent's codeHash is updated (re-registration).
      *      Lets you track the full history of hash changes on-chain.
      */
-    event AgentUpdated(
-        string  indexed agentId,
-        bytes32         oldCodeHash,
-        bytes32         newCodeHash,
-        uint256         timestamp
-    );
+    event AgentUpdated(string indexed agentId, bytes32 oldCodeHash, bytes32 newCodeHash, uint256 timestamp);
 
     /**
      * @dev Emitted when an agent is revoked.
      *      After this, verifyAgent() returns false for this agentId.
      */
-    event AgentRevoked(
-        string  indexed agentId,
-        address indexed revokedBy,
-        uint256         timestamp
-    );
+    event AgentRevoked(string indexed agentId, address indexed revokedBy, uint256 timestamp);
 
     /**
      * @dev Emitted when verifyAgent() is called with a mismatching hash.
@@ -144,12 +127,11 @@ contract AgentIdentityRegistry {
      *      and push an alert to the frontend immediately.
      */
     event IntegrityViolation(
-        string  indexed agentId,
-        bytes32         expectedHash,    // what was registered
-        bytes32         providedHash,    // what was just computed
-        uint256         timestamp
+        string indexed agentId,
+        bytes32 expectedHash, // what was registered
+        bytes32 providedHash, // what was just computed
+        uint256 timestamp
     );
-
 
     // ─────────────────────────────────────────────
     // MODIFIERS
@@ -161,10 +143,7 @@ contract AgentIdentityRegistry {
      *      Reverts with a clear message so Web3.py can surface the error.
      */
     modifier onlyOwner() {
-        require(
-            msg.sender == owner,
-            "AgentIdentityRegistry: caller is not the owner"
-        );
+        require(msg.sender == owner, "AgentIdentityRegistry: caller is not the owner");
         _;
     }
 
@@ -173,13 +152,9 @@ contract AgentIdentityRegistry {
      *      lookups.  Prevents silent failures on typos in agentId.
      */
     modifier agentExists(string calldata agentId) {
-        require(
-            isRegistered[agentId],
-            "AgentIdentityRegistry: agent not registered"
-        );
+        require(isRegistered[agentId], "AgentIdentityRegistry: agent not registered");
         _;
     }
-
 
     // ─────────────────────────────────────────────
     // CONSTRUCTOR
@@ -193,7 +168,6 @@ contract AgentIdentityRegistry {
     constructor() {
         owner = msg.sender;
     }
-
 
     // ─────────────────────────────────────────────
     // WRITE FUNCTIONS  (cost gas — called by FastAPI via Web3.py)
@@ -217,40 +191,38 @@ contract AgentIdentityRegistry {
      *           .build_transaction({...})
      */
     function registerAgent(
-        string  calldata agentId,
-        bytes32          codeHash,
-        string  calldata modelName,
-        string  calldata modelVersion
+        string calldata agentId,
+        bytes32 codeHash,
+        string calldata modelName,
+        string calldata modelVersion
     ) external onlyOwner {
-
-        require(bytes(agentId).length > 0,   "AgentIdentityRegistry: agentId cannot be empty");
-        require(codeHash != bytes32(0),        "AgentIdentityRegistry: codeHash cannot be zero");
+        require(bytes(agentId).length > 0, "AgentIdentityRegistry: agentId cannot be empty");
+        require(codeHash != bytes32(0), "AgentIdentityRegistry: codeHash cannot be zero");
 
         if (isRegistered[agentId]) {
             // Agent exists — update the codeHash and emit AgentUpdated
             bytes32 oldHash = agentHashes[agentId];
 
-            agentRecords[agentId].codeHash     = codeHash;
-            agentRecords[agentId].modelName    = modelName;
+            agentRecords[agentId].codeHash = codeHash;
+            agentRecords[agentId].modelName = modelName;
             agentRecords[agentId].modelVersion = modelVersion;
-            agentHashes[agentId]               = codeHash;
+            agentHashes[agentId] = codeHash;
 
             emit AgentUpdated(agentId, oldHash, codeHash, block.timestamp);
-
         } else {
             // New agent — create full record
             agentRecords[agentId] = AgentRecord({
-                agentId:        agentId,
-                codeHash:       codeHash,
-                registeredBy:   msg.sender,
-                registeredAt:   block.timestamp,
-                isActive:       true,
-                modelName:      modelName,
-                modelVersion:   modelVersion
+                agentId: agentId,
+                codeHash: codeHash,
+                registeredBy: msg.sender,
+                registeredAt: block.timestamp,
+                isActive: true,
+                modelName: modelName,
+                modelVersion: modelVersion
             });
 
-            agentHashes[agentId]    = codeHash;
-            isRegistered[agentId]   = true;
+            agentHashes[agentId] = codeHash;
+            isRegistered[agentId] = true;
             registeredAgentIds.push(agentId);
 
             emit AgentRegistered(agentId, codeHash, msg.sender, block.timestamp);
@@ -265,20 +237,13 @@ contract AgentIdentityRegistry {
      *
      * @param agentId  The agent to revoke.
      */
-    function revokeAgent(
-        string calldata agentId
-    ) external onlyOwner agentExists(agentId) {
-
-        require(
-            agentRecords[agentId].isActive,
-            "AgentIdentityRegistry: agent already revoked"
-        );
+    function revokeAgent(string calldata agentId) external onlyOwner agentExists(agentId) {
+        require(agentRecords[agentId].isActive, "AgentIdentityRegistry: agent already revoked");
 
         agentRecords[agentId].isActive = false;
 
         emit AgentRevoked(agentId, msg.sender, block.timestamp);
     }
-
 
     // ─────────────────────────────────────────────
     // READ / VIEW FUNCTIONS  (free — no gas)
@@ -299,14 +264,10 @@ contract AgentIdentityRegistry {
      * @param currentHash   keccak256 of the agent config dict, computed right now in Python.
      * @return bool         true = agent is legit. false = tampered or revoked.
      */
-    function verifyAgent(
-        string  calldata agentId,
-        bytes32          currentHash
-    ) external view returns (bool) {
-
-        if (!isRegistered[agentId])               return false;
-        if (!agentRecords[agentId].isActive)      return false;
-        if (agentHashes[agentId] != currentHash)  return false;
+    function verifyAgent(string calldata agentId, bytes32 currentHash) external view returns (bool) {
+        if (!isRegistered[agentId]) return false;
+        if (!agentRecords[agentId].isActive) return false;
+        if (agentHashes[agentId] != currentHash) return false;
 
         return true;
     }
@@ -321,11 +282,7 @@ contract AgentIdentityRegistry {
      * @param currentHash   keccak256 of live config dict.
      * @return bool         true = all clear.
      */
-    function verifyAgentAndLog(
-        string  calldata agentId,
-        bytes32          currentHash
-    ) external returns (bool) {
-
+    function verifyAgentAndLog(string calldata agentId, bytes32 currentHash) external returns (bool) {
         if (!isRegistered[agentId] || !agentRecords[agentId].isActive) {
             return false;
         }
@@ -352,28 +309,28 @@ contract AgentIdentityRegistry {
      * @param currentHash  keccak256 of the live config dict from Python.
      * @return result      VerificationResult struct — decoded by Web3.py.
      */
-    function verifyAgentFull(
-        string  calldata agentId,
-        bytes32          currentHash
-    ) external view returns (VerificationResult memory result) {
-
-        result.agentId       = agentId;
-        result.providedHash  = currentHash;
+    function verifyAgentFull(string calldata agentId, bytes32 currentHash)
+        external
+        view
+        returns (VerificationResult memory result)
+    {
+        result.agentId = agentId;
+        result.providedHash = currentHash;
 
         if (!isRegistered[agentId]) {
-            result.isValid      = false;
-            result.isActive     = false;
-            result.hashMatches  = false;
+            result.isValid = false;
+            result.isActive = false;
+            result.hashMatches = false;
             return result;
         }
 
         AgentRecord storage rec = agentRecords[agentId];
 
-        result.isActive        = rec.isActive;
-        result.storedHash      = rec.codeHash;
-        result.registeredAt    = rec.registeredAt;
-        result.hashMatches     = (rec.codeHash == currentHash);
-        result.isValid         = rec.isActive && result.hashMatches;
+        result.isActive = rec.isActive;
+        result.storedHash = rec.codeHash;
+        result.registeredAt = rec.registeredAt;
+        result.hashMatches = (rec.codeHash == currentHash);
+        result.isValid = rec.isActive && result.hashMatches;
 
         return result;
     }
@@ -386,9 +343,7 @@ contract AgentIdentityRegistry {
      * @param agentId  The agent to look up.
      * @return AgentRecord struct — all fields.
      */
-    function getAgent(
-        string calldata agentId
-    ) external view agentExists(agentId) returns (AgentRecord memory) {
+    function getAgent(string calldata agentId) external view agentExists(agentId) returns (AgentRecord memory) {
         return agentRecords[agentId];
     }
 
@@ -407,9 +362,7 @@ contract AgentIdentityRegistry {
      * @param agentId  The agent to look up.
      * @return bytes32  Stored codeHash, or bytes32(0) if not registered.
      */
-    function getCodeHash(
-        string calldata agentId
-    ) external view returns (bytes32) {
+    function getCodeHash(string calldata agentId) external view returns (bytes32) {
         return agentHashes[agentId];
     }
 }
