@@ -1,0 +1,42 @@
+# ── Foundry ──────────────────────────────────────────────────────────────────
+cache/
+contracts/cache/
+out/
+contracts/out/
+.logs/
+.ignore/
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+docs/
+
+# ── Environment files ─────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ───────────────────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Frontend (Next.js) ───────────────────────────────────────────────────────
+node_modules/
+.next/
+build/
+dist/
+.eslintcache
+
+# ── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.code-workspace

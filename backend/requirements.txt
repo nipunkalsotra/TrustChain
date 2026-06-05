@@ -1,0 +1,5 @@
+# Blockchain
+web3
+
+# core -packages
+python-dotenv
