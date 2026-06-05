@@ -178,12 +178,11 @@ contract TrustScoreRegistry {
      *   contract.functions.updateScore("researcher", run_id, 87, "web_search_complete")
      *           .build_transaction({from: account.address, gas: 150000, nonce: nonce})
      */
-    function updateScore(
-        string calldata agentId,
-        string calldata runId,
-        uint256 score,
-        string calldata reason
-    ) external onlyOwner validIds(agentId, runId) {
+    function updateScore(string calldata agentId, string calldata runId, uint256 score, string calldata reason)
+        external
+        onlyOwner
+        validIds(agentId, runId)
+    {
         // ── Safety rail: clamp score to 100, never revert ──────────────────
         uint256 safeScore = score;
         if (score > 100) {
