@@ -1,12 +1,9 @@
 name: CI
-
 permissions: {}
-
 on:
   push:
   pull_request:
   workflow_dispatch:
-
 jobs:
   check:
     name: Foundry project
@@ -18,18 +15,16 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
-
       - name: Show Forge version
         run: forge --version
-
       - name: Run Forge fmt
         run: forge fmt --check
-
+        working-directory: contracts
       - name: Run Forge build
         run: forge build --sizes
-
+        working-directory: contracts
       - name: Run Forge tests
         run: forge test -vvv
+        working-directory: contracts
