@@ -12,3 +12,7 @@ langgraph
 # FastApi Backend
 fastapi
 uvicorn
+
+# MCP Servers
+fastmcp
+langchain-mcp-adapters

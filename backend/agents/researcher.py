@@ -1,47 +1,48 @@
 """
 agents/researcher.py  —  Agent 1: Researcher
 
-Fixed from review:
-  - Skips LLM synthesis if search failed (no point synthesising an error msg)
-  - Logs full text hash, not truncated snippet
-  - Proper type hint on bridge parameter
+Responsibilities:
+  - Takes the user task
+  - Runs web_search via MCP tool (http://localhost:8001)
+  - Produces structured research output
+  - Logs every step to AgentAuditLog on Monad
 """
 
 import logging
-from typing import Any, Optional
-
-from langchain_tavily import TavilySearch
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.base import AgentState, get_llm, log_step, search_failed
+from agents.base import AgentState, get_llm, log_step
 
 logger = logging.getLogger(__name__)
 
 
-def get_search_tool() -> TavilySearch:
-    return TavilySearch(max_results=5)
-
-
-async def researcher_node(state: AgentState, bridge: Optional[Any] = None) -> AgentState:
+async def researcher_node(state: AgentState, bridge=None, tools: list = None) -> AgentState:
     """
-    LangGraph node — Researcher agent.
+    LangGraph node for the Researcher agent.
 
     Steps:
-      0. task_received   — log run start on-chain
-      1. web_search      — Tavily search
-      2. synthesise      — Groq LLM synthesis (skipped if search failed)
+      0. Announce start
+      1. Run web_search via MCP tool
+      2. Synthesise findings with Groq LLM
+      3. Log both steps on-chain
     """
     task   = state["task"]
     run_id = state["run_id"]
     llm    = get_llm()
-    search = get_search_tool()
 
-    tx_hashes:  list[str]  = list(state.get("tx_hashes",  []))
-    sse_events: list[dict] = list(state.get("sse_events", []))
+    # Resolve search_web from injected MCP tools
+    search_tool = None
+    if tools:
+        search_tool = next((t for t in tools if t.name == "search_web"), None)
+    if search_tool is None:
+        raise RuntimeError("search_web MCP tool not found — is web_search server running on port 8001?")
 
-    logger.info("[Researcher] Starting — task: %s", task)
+    tx_hashes  = list(state.get("tx_hashes",  []))
+    sse_events = list(state.get("sse_events", []))
 
-    # ── Step 0: log task receipt ──────────────────────────────────────────
+    logger.info("[Researcher] Starting task: %s", task)
+
+    # ── Step 0: log task receipt ───────────────────────────────────────────
     tx, evt = await log_step(
         bridge=bridge,
         agent_id="researcher",
@@ -55,29 +56,31 @@ async def researcher_node(state: AgentState, bridge: Optional[Any] = None) -> Ag
     tx_hashes.append(tx)
     sse_events.append(evt)
 
-    # ── Step 1: web search ────────────────────────────────────────────────
-    logger.info("[Researcher] Running Tavily search...")
-    search_ok = True
+    # ── Step 1: web search via MCP ─────────────────────────────────────────
+    logger.info("[Researcher] Running web_search via MCP...")
     try:
-        results = await search.ainvoke({"query": task})
-        if isinstance(results, list):
+        result = await search_tool.ainvoke({"query": task, "max_results": 5})
+        # MCP tool returns dict: { query, results: [{title, url, content, score}], answer }
+        if isinstance(result, dict):
+            items = result.get("results", [])
             raw_search = "\n\n".join(
                 f"Source: {r.get('url', 'unknown')}\n{r.get('content', '')}"
-                for r in results[:5]
+                for r in items[:5]
             )
+            if result.get("answer"):
+                raw_search = f"Summary: {result['answer']}\n\n{raw_search}"
         else:
-            raw_search = str(results)
+            raw_search = str(result)
     except Exception as e:
-        logger.warning("[Researcher] Tavily error: %s", e)
+        logger.warning("[Researcher] MCP search_web error: %s", e)
         raw_search = f"Search unavailable: {e}"
-        search_ok  = False
 
     tx, evt = await log_step(
         bridge=bridge,
         agent_id="researcher",
         action="web_search",
         input_text=task,
-        output_text=raw_search,          # full text hashed — not truncated
+        output_text=raw_search[:500],
         step_index=1,
         run_id=run_id,
         trust_score=25,
@@ -85,36 +88,31 @@ async def researcher_node(state: AgentState, bridge: Optional[Any] = None) -> Ag
     tx_hashes.append(tx)
     sse_events.append(evt)
 
-    # ── Step 2: synthesise (skip if search failed) ────────────────────────
-    if not search_ok or search_failed(raw_search):
-        logger.warning("[Researcher] Skipping synthesis — search failed")
-        research_output = (
-            f"Research incomplete: web search failed for task '{task}'. "
-            "Validator will flag this."
-        )
-    else:
-        logger.info("[Researcher] Synthesising with LLM...")
-        response = await llm.ainvoke([
-            SystemMessage(content=(
-                "You are the Researcher agent in TrustChain, a blockchain-verified multi-agent AI system. "
-                "Synthesise web search results into clear, factual findings. "
-                "Be concise and structured. Cite sources. "
-                "Output 3-5 key findings as a numbered list."
-            )),
-            HumanMessage(content=(
-                f"Task: {task}\n\n"
-                f"Web search results:\n{raw_search}\n\n"
-                "Key findings:"
-            )),
-        ])
-        research_output = response.content
+    # ── Step 2: synthesise with LLM ───────────────────────────────────────
+    logger.info("[Researcher] Synthesising with LLM...")
+    synthesis_prompt = [
+        SystemMessage(content=(
+            "You are the Researcher agent in a multi-agent AI system called TrustChain. "
+            "Your job is to synthesise web search results into clear, factual research findings. "
+            "Be concise, structured, and cite sources where possible. "
+            "Output 3-5 key findings as a numbered list."
+        )),
+        HumanMessage(content=(
+            f"Task: {task}\n\n"
+            f"Web search results:\n{raw_search}\n\n"
+            "Synthesise the key findings:"
+        )),
+    ]
+
+    response = await llm.ainvoke(synthesis_prompt)
+    research_output = response.content
 
     tx, evt = await log_step(
         bridge=bridge,
         agent_id="researcher",
-        action="synthesis_complete",
-        input_text=raw_search,           # full text hashed
-        output_text=research_output,     # full output hashed
+        action="synthesise_findings",
+        input_text=raw_search[:300],
+        output_text=research_output[:500],
         step_index=2,
         run_id=run_id,
         trust_score=50,
@@ -122,7 +120,7 @@ async def researcher_node(state: AgentState, bridge: Optional[Any] = None) -> Ag
     tx_hashes.append(tx)
     sse_events.append(evt)
 
-    logger.info("[Researcher] Done — 3 steps logged on-chain")
+    logger.info("[Researcher] Complete. %d steps logged.", 3)
 
     return {
         **state,

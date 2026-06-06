@@ -4,6 +4,11 @@ agents/pipeline.py  —  LangGraph pipeline
 Wires 4 agents in sequence:
   researcher → validator → scorer → reporter
 
+MCP tools are loaded once at run start and injected into each node.
+Both MCP servers must be running:
+  web_search  → http://localhost:8001
+  blockchain  → http://localhost:8002
+
 Usage from FastAPI:
     from agents.pipeline import run_pipeline
     async for event in run_pipeline(task, run_id, bridge):
@@ -14,6 +19,7 @@ import logging
 from typing import AsyncGenerator, Optional, Any
 
 from langgraph.graph import StateGraph, END
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from agents.base import AgentState, make_run_id
 from agents.researcher import researcher_node
@@ -23,18 +29,47 @@ from agents.reporter    import reporter_node
 
 logger = logging.getLogger(__name__)
 
+MCP_SERVERS = {
+    "web_search": {
+        "url":       "http://localhost:8001/mcp",
+        "transport": "streamable_http",
+    },
+    "blockchain": {
+        "url":       "http://localhost:8002/mcp",
+        "transport": "streamable_http",
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Load MCP tools
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def load_mcp_tools() -> list:
+    """
+    Connect to both MCP servers and return all tools as a flat list.
+    Called once per pipeline run.
+    """
+    client = MultiServerMCPClient(MCP_SERVERS)
+    tools  = await client.get_tools()
+    logger.info(
+        "MCP tools loaded (%d): %s",
+        len(tools), [t.name for t in tools]
+    )
+    return tools
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Build the graph
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_graph(bridge: Optional[Any] = None):
+def build_graph(bridge: Optional[Any] = None, tools: list = None):
     """
     Compile the LangGraph StateGraph.
-    bridge is injected via closure so nodes stay pure functions.
+    bridge and tools are injected via closure so nodes stay pure functions.
     """
-    async def _researcher(state): return await researcher_node(state, bridge)
-    async def _validator(state):  return await validator_node(state,  bridge)
+    async def _researcher(state): return await researcher_node(state, bridge, tools)
+    async def _validator(state):  return await validator_node(state,  bridge, tools)
     async def _scorer(state):     return await scorer_node(state,     bridge)
     async def _reporter(state):   return await reporter_node(state,   bridge)
 
@@ -78,6 +113,14 @@ async def run_pipeline(
 
     yield {"type": "run_started", "runId": run_id, "task": task}
 
+    # ── Load MCP tools once for this run ──────────────────────────────────
+    try:
+        tools = await load_mcp_tools()
+    except Exception as e:
+        logger.error("[Pipeline] Failed to load MCP tools: %s", e)
+        yield {"type": "error", "runId": run_id, "message": f"MCP connection failed: {e}"}
+        return
+
     initial_state: AgentState = {
         "task":       task,
         "run_id":     run_id,
@@ -91,7 +134,7 @@ async def run_pipeline(
     }
 
     try:
-        graph = build_graph(bridge=bridge)
+        graph = build_graph(bridge=bridge, tools=tools)
         prev_event_count = 0
 
         async for chunk in graph.astream(initial_state):
@@ -108,8 +151,6 @@ async def run_pipeline(
                     yield evt
 
                 prev_event_count = len(new_events)
-
-                # Keep tracking latest state
                 initial_state = {**initial_state, **node_state}
 
         final = initial_state

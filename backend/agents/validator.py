@@ -3,7 +3,7 @@ agents/validator.py  —  Agent 2: Validator
 
 Responsibilities:
   - Receives Researcher output
-  - Fact-checks key claims via second Tavily search
+  - Fact-checks key claims via MCP fact_check tool (http://localhost:8001)
   - Produces validation verdict: PASS / PARTIAL / FAIL
   - Logs all steps to AgentAuditLog on Monad
 """
@@ -11,7 +11,6 @@ Responsibilities:
 import logging
 from typing import Any, Optional
 
-from langchain_tavily import TavilySearch
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.base import AgentState, get_llm, log_step, search_failed
@@ -19,25 +18,27 @@ from agents.base import AgentState, get_llm, log_step, search_failed
 logger = logging.getLogger(__name__)
 
 
-def get_search_tool() -> TavilySearch:
-    return TavilySearch(max_results=3)
-
-
-async def validator_node(state: AgentState, bridge: Optional[Any] = None) -> AgentState:
+async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools: list = None) -> AgentState:
     """
     LangGraph node — Validator agent.
 
     Steps:
       0. research_received  — log receipt on-chain
       1. extract_claims     — LLM pulls top 2 verifiable claims
-      2. fact_check         — Tavily search to verify claims
+      2. fact_check         — MCP fact_check tool to verify claims
       3. validation_report  — LLM produces PASS/PARTIAL/FAIL verdict
     """
     task       = state["task"]
     research   = state["research"]
     run_id     = state["run_id"]
     llm        = get_llm()
-    search     = get_search_tool()
+
+    # Resolve fact_check from injected MCP tools
+    fact_check_tool = None
+    if tools:
+        fact_check_tool = next((t for t in tools if t.name == "fact_check"), None)
+    if fact_check_tool is None:
+        raise RuntimeError("fact_check MCP tool not found — is web_search server running on port 8001?")
 
     tx_hashes:  list[str]  = list(state.get("tx_hashes",  []))
     sse_events: list[dict] = list(state.get("sse_events", []))
@@ -69,22 +70,32 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None) -> Age
     ])
     claims_text = claims_response.content
 
-    # ── Step 2: fact-check search ─────────────────────────────────────────
-    logger.info("[Validator] Fact-checking claims...")
+    # ── Step 2: fact-check via MCP ────────────────────────────────────────
+    logger.info("[Validator] Fact-checking via MCP fact_check tool...")
     search_ok = True
     try:
-        fact_results = await search.ainvoke(
-            {"query": f"verify: {task} {claims_text[:150]}"}
-        )
-        if isinstance(fact_results, list):
-            fact_raw = "\n\n".join(
-                f"Source: {r.get('url', 'unknown')}\n{r.get('content', '')}"
-                for r in fact_results[:3]
+        # Use the first extracted claim as the primary claim to check
+        primary_claim = claims_text.split("\n")[0].lstrip("1. ").strip()
+        result = await fact_check_tool.ainvoke({
+            "claim":   primary_claim,
+            "context": task,
+        })
+        # MCP tool returns: { claim, verdict, confidence, evidence, summary }
+        verdict    = result.get("verdict", "unverified")
+        confidence = result.get("confidence", 0.5)
+        evidence   = result.get("evidence", [])
+        summary    = result.get("summary", "")
+
+        fact_raw = (
+            f"Verdict: {verdict} (confidence: {confidence:.0%})\n"
+            f"Summary: {summary}\n\n"
+            + "\n\n".join(
+                f"Source: {e.get('url', 'unknown')}\n{e.get('content', '')}"
+                for e in evidence[:3]
             )
-        else:
-            fact_raw = str(fact_results)
+        )
     except Exception as e:
-        logger.warning("[Validator] Fact-check search error: %s", e)
+        logger.warning("[Validator] MCP fact_check error: %s", e)
         fact_raw  = f"Search unavailable: {e}"
         search_ok = False
 
@@ -104,7 +115,6 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None) -> Age
     # ── Step 3: validation report ─────────────────────────────────────────
     logger.info("[Validator] Generating validation report...")
 
-    # If fact-check search failed, note it in the prompt
     fact_context = (
         fact_raw if search_ok
         else "Fact-check search unavailable — validation based on research quality only."
