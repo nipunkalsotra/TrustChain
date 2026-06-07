@@ -91,8 +91,9 @@ async def log_step(
         from blockchain.client import get_bridge
         bridge = get_bridge()
 
-    # Full text is hashed on-chain — no truncation
+    # FIX: pass run_id as first argument — new log_action() signature requires it
     tx_hash = await bridge.log_action(
+        run_id=run_id,
         agent_id=agent_id,
         action=action,
         input_text=input_text,
