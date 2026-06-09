@@ -16,3 +16,4 @@ uvicorn
 # MCP Servers
 fastmcp
 langchain-mcp-adapters
+tavily-python
