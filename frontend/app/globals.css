@@ -123,3 +123,17 @@ select {
   border: 1px solid #0a2a2a;
   border-radius: 8px;
 }
+
+@keyframes logo-glow {
+
+  0%,
+  100% {
+    filter: drop-shadow(0 0 8px #00ffcc44) drop-shadow(0 0 20px #00ffcc22);
+    transform: scale(1);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 24px #00ffccaa) drop-shadow(0 0 48px #00ffcc66) drop-shadow(0 0 80px #00ffcc33);
+    transform: scale(1.06);
+  }
+}

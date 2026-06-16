@@ -14,7 +14,6 @@ Each tx hash is clickable — immutable proof nothing was tampered with.
 
 ## Contracts (Monad Testnet)
 | Contract | Address |
-|---|---|
 | AgentAuditLog | `0xcf15079dbf148205516aee935c3cc5cdd4ceb4b9` |
 | TrustScoreRegistry | `0xc0e3ab853587e0bb039249ef47aade7b055c58fd` |
 | AgentIdentityRegistry | `0x68f7fd16e99b640cb7b9a957ac12b4f13fa792ed` |
