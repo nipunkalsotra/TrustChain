@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import Image from "next/image"
 import { C, AGENT_COLORS, MOCK_RUNS, fmtDate } from "@/lib/constants"
 import { Dot } from "@/components/ui/TrustChainUI"
 
@@ -11,13 +12,22 @@ export default function LandingPage() {
       {/* ── Hero ── */}
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "80px 32px 60px", textAlign: "center" }}>
         <div style={{ marginBottom: 24 }}>
-          <span style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 11, letterSpacing: "0.3em", color: C.green, opacity: 0.7, display: "block", marginBottom: 16 }}>
-            ◈ ◈ ◈
-          </span>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 32 }}>
+            <Image
+              src="/logo_transparent.png"
+              alt="TrustChain Logo"
+              width={160}
+              height={160}
+              style={{
+                animation: "logo-glow 4s ease-in-out infinite",
+                transition: "all 0.3s ease",
+              }}
+            />
+          </div>
           <h1 style={{
-            fontFamily: "'Share Tech Mono',monospace", fontSize: 64, fontWeight: 400,
+            fontFamily: "var(--font-sans)", fontSize: 64, fontWeight: 800,
             letterSpacing: "0.12em", color: C.green, lineHeight: 1,
-            textShadow: `0 0 30px ${C.green}66, 0 0 60px ${C.green}33`,
+            textShadow: "0 0 15px #00ffcc, 0 0 30px #00ffccaa, 0 0 45px #00ffcc44",
             marginBottom: 8,
           }}>
             TRUSTCHAIN
@@ -125,7 +135,7 @@ export default function LandingPage() {
           ].map(({ label, value, sub }) => (
             <div key={label} className="card" style={{ padding: 20, textAlign: "center" }}>
               <div style={{ fontSize: 9, letterSpacing: "0.12em", color: C.muted, marginBottom: 8 }}>{label}</div>
-              <div style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 36, color: C.green, textShadow: `0 0 20px ${C.green}44`, lineHeight: 1 }}>{value}</div>
+              <div style={{ fontFamily: "var(--font-sans)", fontSize: 36, fontWeight: 700, color: C.green, textShadow: `0 0 20px ${C.green}44`, lineHeight: 1 }}>{value}</div>
               <div style={{ fontSize: 9, color: C.dim, marginTop: 6, letterSpacing: "0.08em" }}>{sub}</div>
             </div>
           ))}
