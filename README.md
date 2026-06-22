@@ -31,18 +31,6 @@
 
 ---
 
-## 🎬 Live Demo
-
-<div align="center">
-<img src="https://raw.githubusercontent.com/nipunkalsotra/TrustChain/main/docs/demo.gif" width="800" alt="TrustChain demo" />
-
-<sub>*(Replace with your own screen recording — task input → live agent feed → on-chain tx links)*</sub>
-</div>
-
-<br/>
-
----
-
 ## 🧠 The Problem
 
 AI agents are increasingly trusted to act autonomously — but their internal reasoning is a black box. If an agent makes a decision, **there's no way to independently verify** it wasn't tampered with, hallucinated, or silently altered after the fact.
