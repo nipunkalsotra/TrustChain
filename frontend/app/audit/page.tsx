@@ -6,7 +6,10 @@ import { getAuditLog } from "@/lib/api"
 import type { AuditEntry } from "@/lib/types"
 
 // ─── Correct Monad testnet explorer URL ──────────────────────────────────────
-const MONAD_TX = (hash: string) => `https://testnet.monadexplorer.com/tx/${hash}`
+const MONAD_TX = (hash: string) => {
+    if (!hash || hash === "—" || hash.trim() === "") return "#"
+    return `https://testnet.monadexplorer.com/tx/${hash}`
+}
 
 export default function AuditPage() {
     const [entries, setEntries] = useState<AuditEntry[]>([])
@@ -342,23 +345,27 @@ export default function AuditPage() {
                                                 {fmtTime(e.timestamp)}
                                             </td>
                                             <td style={{ padding: "10px 14px" }}>
-                                                <a
-                                                    href={MONAD_TX(e.txHash)}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    onClick={ev => ev.stopPropagation()}
-                                                    style={{
-                                                        color: C.green,
-                                                        fontSize: 10,
-                                                        textDecoration: "none",
-                                                        opacity: 0.6,
-                                                        transition: "opacity 0.15s",
-                                                    }}
-                                                    onMouseEnter={ev => (ev.currentTarget.style.opacity = "1")}
-                                                    onMouseLeave={ev => (ev.currentTarget.style.opacity = "0.6")}
-                                                >
-                                                    {shortHash(e.txHash)} ↗
-                                                </a>
+                                                {e.txHash && e.txHash !== "—" ? (
+                                                    <a
+                                                        href={MONAD_TX(e.txHash)}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        onClick={ev => ev.stopPropagation()}
+                                                        style={{
+                                                            color: C.green,
+                                                            fontSize: 10,
+                                                            textDecoration: "none",
+                                                            opacity: 0.6,
+                                                            transition: "opacity 0.15s",
+                                                        }}
+                                                        onMouseEnter={ev => (ev.currentTarget.style.opacity = "1")}
+                                                        onMouseLeave={ev => (ev.currentTarget.style.opacity = "0.6")}
+                                                    >
+                                                        {shortHash(e.txHash)} ↗
+                                                    </a>
+                                                ) : (
+                                                    <span style={{ fontSize: 10, color: C.dim }}>—</span>
+                                                )}
                                             </td>
                                         </tr>
 
@@ -391,27 +398,29 @@ export default function AuditPage() {
                                                             </div>
                                                         ))}
                                                     </div>
-                                                    <a
-                                                        href={MONAD_TX(e.txHash)}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        style={{
-                                                            display: "inline-flex",
-                                                            alignItems: "center",
-                                                            gap: 6,
-                                                            fontSize: 11,
-                                                            color: C.green,
-                                                            textDecoration: "none",
-                                                            border: `1px solid ${C.green}44`,
-                                                            padding: "5px 12px",
-                                                            borderRadius: 4,
-                                                            transition: "all 0.15s",
-                                                        }}
-                                                        onMouseEnter={ev => (ev.currentTarget.style.background = `${C.green}11`)}
-                                                        onMouseLeave={ev => (ev.currentTarget.style.background = "transparent")}
-                                                    >
-                                                        ⛓ VIEW ON MONAD EXPLORER ↗
-                                                    </a>
+                                                    {e.txHash && e.txHash !== "—" && (
+                                                        <a
+                                                            href={MONAD_TX(e.txHash)}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            style={{
+                                                                display: "inline-flex",
+                                                                alignItems: "center",
+                                                                gap: 6,
+                                                                fontSize: 11,
+                                                                color: C.green,
+                                                                textDecoration: "none",
+                                                                border: `1px solid ${C.green}44`,
+                                                                padding: "5px 12px",
+                                                                borderRadius: 4,
+                                                                transition: "all 0.15s",
+                                                            }}
+                                                            onMouseEnter={ev => (ev.currentTarget.style.background = `${C.green}11`)}
+                                                            onMouseLeave={ev => (ev.currentTarget.style.background = "transparent")}
+                                                        >
+                                                            ⛓ VIEW ON MONAD EXPLORER ↗
+                                                        </a>
+                                                    )}
                                                 </td>
                                             </tr>
                                         )}
