@@ -170,7 +170,7 @@ TrustChain/
 
 <div align="center">
 
-### Built by [Nipun Kalsotra](https://github.com/nipunkalsotra)
+### Built by [Nipun Kalsotra](https://github.com/nipunkalsotra) & [Shreshtha](https://github.com/Shreshtha280407)
 
 <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=14&pause=1500&color=836EF9&center=true&vCenter=true&width=500&lines=If+you+can't+verify+it%2C+you+can't+trust+it." />
 
