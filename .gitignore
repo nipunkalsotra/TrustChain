@@ -28,6 +28,11 @@ __pycache__/
 htmlcov/
 *.log
 
+# ── SQLite (users/runs persistence) ─────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
 # ── Frontend (Next.js) ───────────────────────────────────────────────────────
 node_modules/
 .next/

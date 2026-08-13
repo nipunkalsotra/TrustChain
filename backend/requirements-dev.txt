@@ -1,0 +1,3 @@
+# Test-only dependencies — not needed to run the app, only to run pytest.
+-r requirements.txt
+pytest==9.1.1

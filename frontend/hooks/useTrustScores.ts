@@ -8,13 +8,19 @@ export function useTrustScores(runId: string | null, status: string) {
     const [scores, setScores] = useState<TrustScore[]>([])
     const intervalRef = useRef<NodeJS.Timeout | null>(null)
 
+    // Reset synchronously during render when runId changes — avoids a
+    // setState-at-effect-start that would otherwise trigger a stale-scores
+    // flash for one extra render before the effect below clears it.
+    const [prevRunId, setPrevRunId] = useState(runId)
+    if (runId !== prevRunId) {
+        setPrevRunId(runId)
+        setScores([])
+    }
+
     useEffect(() => {
         if (intervalRef.current) clearInterval(intervalRef.current)
 
-        if (!runId) {
-            setScores([])
-            return
-        }
+        if (!runId) return
 
         const fetchScores = async () => {
             try {

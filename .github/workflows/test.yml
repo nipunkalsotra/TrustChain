@@ -5,7 +5,7 @@ on:
   pull_request:
   workflow_dispatch:
 jobs:
-  check:
+  contracts:
     name: Foundry project
     runs-on: ubuntu-latest
     permissions:
@@ -28,3 +28,57 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
         working-directory: contracts
+
+  backend:
+    name: Backend (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Run pytest
+        run: pytest
+        working-directory: backend
+
+  frontend:
+    name: Frontend (Next.js)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Type-check
+        run: npx tsc --noEmit
+        working-directory: frontend
+      - name: Lint
+        # Non-blocking: pre-existing react-hooks/set-state-in-effect debt
+        # (localStorage/network sync-on-mount effects) not yet cleaned up.
+        # tsc + build above are the hard gates; this stays visible but non-fatal.
+        run: npm run lint
+        working-directory: frontend
+        continue-on-error: true
+      - name: Build
+        run: npm run build
+        working-directory: frontend

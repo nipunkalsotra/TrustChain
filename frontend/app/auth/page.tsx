@@ -3,6 +3,9 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { C } from "@/lib/constants"
+import { signup as apiSignup, login as apiLogin } from "@/lib/api"
+import { getSession, setSession } from "@/lib/auth"
+import { errorMessage } from "@/lib/utils"
 
 type Mode = "login" | "signup"
 
@@ -14,37 +17,6 @@ interface FormState {
 }
 
 const EMPTY: FormState = { name: "", email: "", password: "", confirm: "" }
-
-// ─── Simple client-side auth (localStorage) ───────────────────────────────────
-// For a real project: swap saveUser/findUser with API calls to your backend.
-
-function saveUser(name: string, email: string, password: string) {
-    const users = JSON.parse(localStorage.getItem("tc_users") || "[]")
-    if (users.find((u: any) => u.email === email)) return false
-    users.push({ name, email, password: btoa(password) })
-    localStorage.setItem("tc_users", JSON.stringify(users))
-    return true
-}
-
-function findUser(email: string, password: string) {
-    const users = JSON.parse(localStorage.getItem("tc_users") || "[]")
-    return users.find((u: any) => u.email === email && u.password === btoa(password)) || null
-}
-
-function setSession(user: any) {
-    localStorage.setItem("tc_session", JSON.stringify({ name: user.name, email: user.email, ts: Date.now() }))
-}
-
-export function getSession() {
-    try {
-        const s = localStorage.getItem("tc_session")
-        return s ? JSON.parse(s) : null
-    } catch { return null }
-}
-
-export function clearSession() {
-    localStorage.removeItem("tc_session")
-}
 
 // ─── Input component ──────────────────────────────────────────────────────────
 function CyberInput({
@@ -89,14 +61,21 @@ export default function AuthPage() {
     const [message, setMessage] = useState("")
     const [typed, setTyped] = useState("")
 
-    // Typewriter effect
+    // Typewriter effect. Reset synchronously during render when `mode`
+    // changes (not in the effect below) — that's the setState call React's
+    // set-state-in-effect rule wants moved out of the effect body; the
+    // interval's own setTyped calls are inside a timer callback, not flagged.
     const tagline = mode === "login" ? "AUTHENTICATE TO ACCESS THE BLACK BOX" : "CREATE YOUR AGENT IDENTITY"
-    useEffect(() => {
+    const [prevMode, setPrevMode] = useState(mode)
+    if (mode !== prevMode) {
+        setPrevMode(mode)
         setTyped("")
+    }
+    useEffect(() => {
         let i = 0
         const t = setInterval(() => { setTyped(tagline.slice(0, i + 1)); i++; if (i >= tagline.length) clearInterval(t) }, 40)
         return () => clearInterval(t)
-    }, [mode])
+    }, [mode, tagline])
 
     // Redirect if already logged in
     useEffect(() => {
@@ -109,7 +88,7 @@ export default function AuthPage() {
         const e: Partial<FormState> = {}
         if (mode === "signup" && !form.name.trim()) e.name = "Name is required"
         if (!form.email.match(/^[^@]+@[^@]+\.[^@]+$/)) e.email = "Valid email required"
-        if (form.password.length < 6) e.password = "Minimum 6 characters"
+        if (form.password.length < 8) e.password = "Minimum 8 characters"
         if (mode === "signup" && form.password !== form.confirm) e.confirm = "Passwords do not match"
         setErrors(e)
         return Object.keys(e).length === 0
@@ -120,32 +99,25 @@ export default function AuthPage() {
         setStatus("loading")
         setMessage("")
 
-        // Simulate network delay for realism
-        await new Promise(r => setTimeout(r, 900))
+        try {
+            const auth = mode === "signup"
+                ? await apiSignup(form.name.trim(), form.email.trim(), form.password)
+                : await apiLogin(form.email.trim(), form.password)
 
-        if (mode === "signup") {
-            const ok = saveUser(form.name.trim(), form.email.trim(), form.password)
-            if (!ok) {
+            setSession({ name: auth.name, email: auth.email, token: auth.token })
+            setStatus("success")
+            setMessage(mode === "signup" ? "IDENTITY REGISTERED" : "ACCESS GRANTED")
+            setTimeout(() => router.replace("/dashboard"), mode === "signup" ? 1200 : 1000)
+        } catch (e: unknown) {
+            const msg = errorMessage(e, "Request failed — is the backend running?")
+            if (mode === "signup" && /already registered/i.test(msg)) {
                 setErrors({ email: "Email already registered" })
-                setStatus("error")
-                return
-            }
-            const user = findUser(form.email.trim(), form.password)
-            setSession(user)
-            setStatus("success")
-            setMessage("IDENTITY REGISTERED ON-CHAIN")
-            setTimeout(() => router.replace("/dashboard"), 1200)
-        } else {
-            const user = findUser(form.email.trim(), form.password)
-            if (!user) {
+            } else if (mode === "login") {
                 setErrors({ password: "Invalid credentials" })
-                setStatus("error")
-                return
+            } else {
+                setErrors({ email: msg })
             }
-            setSession(user)
-            setStatus("success")
-            setMessage("ACCESS GRANTED")
-            setTimeout(() => router.replace("/dashboard"), 1000)
+            setStatus("error")
         }
     }
 

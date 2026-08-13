@@ -214,6 +214,22 @@ TRUST_SCORE_ABI = [
         ],
     },
     {
+        "name": "getRunCount",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs":  [],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        # Auto-generated getter for the public `string[] allRunIds` array —
+        # allRunIds(index) returns the runId at that index.
+        "name": "allRunIds",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs":  [{"name": "", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "string"}],
+    },
+    {
         "name": "ScoreUpdated",
         "type": "event",
         "inputs": [
@@ -537,6 +553,50 @@ class BlockchainBridge:
             for agent_id in agents
         }
 
+    async def get_leaderboard(self, max_runs: int = 50) -> dict:
+        """
+        Aggregates TrustScoreRegistry.getRunLeaderboard() across the most
+        recent `max_runs` runs into a per-agent ranking (avg/best score,
+        runs counted). No caching — recomputed fresh on every call.
+        """
+        total_runs = await asyncio.to_thread(
+            self.trust_score.functions.getRunCount().call
+        )
+        runs_considered = min(total_runs, max_runs)
+        start_index = total_runs - runs_considered  # most recent `max_runs` runs
+
+        run_ids = await asyncio.gather(*[
+            asyncio.to_thread(self.trust_score.functions.allRunIds(i).call)
+            for i in range(start_index, total_runs)
+        ])
+
+        leaderboards = await asyncio.gather(*[
+            asyncio.to_thread(self.trust_score.functions.getRunLeaderboard(run_id).call)
+            for run_id in run_ids
+        ])
+
+        scores_by_agent: dict[str, list[int]] = {}
+        for agent_ids, agent_scores in leaderboards:
+            for agent_id, score in zip(agent_ids, agent_scores):
+                scores_by_agent.setdefault(agent_id, []).append(int(score))
+
+        agents = [
+            {
+                "agentId":   agent_id,
+                "avgScore":  round(sum(scores) / len(scores)),
+                "bestScore": max(scores),
+                "runsCount": len(scores),
+            }
+            for agent_id, scores in scores_by_agent.items()
+        ]
+        agents.sort(key=lambda a: a["avgScore"], reverse=True)
+
+        return {
+            "agents":         agents,
+            "totalRuns":      total_runs,
+            "runsConsidered": runs_considered,
+        }
+
     async def get_latest_run_id(self) -> str:
         return await asyncio.to_thread(
             self.trust_score.functions.getLatestRunId().call
@@ -581,6 +641,32 @@ class BlockchainBridge:
             "matches":  matches,
             "exists":   exists,
             "verified": matches and exists,
+        }
+
+    async def tamper_demo(self, agent_id: str) -> dict:
+        """
+        Non-destructive proof that the substitution detector actually works:
+        computes the hash of the agent's REAL config, and of a deliberately
+        mutated config (simulating a silently swapped model), then checks
+        both against the on-chain record. No on-chain writes — both checks
+        are read-only verifyAgent calls, so this costs no gas.
+        """
+        config = _AGENT_CONFIGS.get(agent_id)
+        if config is None:
+            raise ValueError(f"unknown agentId '{agent_id}'")
+
+        tampered_config = {**config, "model": "gpt-3.5-turbo"}  # simulate a silent model swap
+
+        real_hash     = compute_hash(config)
+        tampered_hash = compute_hash(tampered_config)
+
+        real_result     = await self.verify_integrity(agent_id, real_hash)
+        tampered_result = await self.verify_integrity(agent_id, tampered_hash)
+
+        return {
+            "agentId":  agent_id,
+            "real":     {**real_result,     "hash": real_hash,     "simulatedModel": config["model"]},
+            "tampered": {**tampered_result, "hash": tampered_hash, "simulatedModel": tampered_config["model"]},
         }
 
     async def verify_run(self, run_id: str) -> dict:

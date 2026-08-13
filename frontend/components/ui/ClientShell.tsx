@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useRouter, usePathname } from "next/navigation"
 import Link from "next/link"
 import { getChainStatus } from "@/lib/api"
+import { getSession, clearSession, type Session } from "@/lib/auth"
 import { Dot, Ticker } from "@/components/ui/TrustChainUI"
 import { C } from "@/lib/constants"
 import type { ChainStatus } from "@/lib/types"
@@ -11,7 +12,9 @@ import type { ChainStatus } from "@/lib/types"
 const NAV_ITEMS = [
     { href: "/", label: "HOME", icon: "◈" },
     { href: "/dashboard", label: "DASHBOARD", icon: "⬡" },
-    { href: "/audit", label: "AUDIT LOG", icon: "◷" },
+    { href: "/history", label: "HISTORY", icon: "◷" },
+    { href: "/leaderboard", label: "LEADERBOARD", icon: "▲" },
+    { href: "/audit", label: "AUDIT LOG", icon: "☰" },
     { href: "/trust-scores", label: "TRUST SCORES", icon: "◎" },
     { href: "/verify", label: "VERIFY", icon: "◆" },
 ]
@@ -24,7 +27,7 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     const pathname = usePathname()
 
     const [chain, setChain] = useState<ChainStatus | null>(null)
-    const [session, setSession] = useState<any>(null)
+    const [session, setLocalSession] = useState<Session | null>(null)
     const [ready, setReady] = useState(false)
 
     // ── Chain status — polls the real backend, no simulated ticking ────────
@@ -36,21 +39,25 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     }, [])
 
     // ── Auth guard ────────────────────────────────────────────────────────
+    // Tried the useSyncExternalStore rewrite this rule nudges toward — it
+    // introduced a real bug: on a hard navigation, the hydration-time server
+    // snapshot (always null) could reach this effect before the real client
+    // snapshot synced, firing a spurious redirect-then-bounce-back loop.
+    // Reading getSession() fresh inside a plain effect (below) doesn't have
+    // that window — verified in a real browser — so this stays as-is.
     useEffect(() => {
-        try {
-            const s = localStorage.getItem("tc_session")
-            const parsed = s ? JSON.parse(s) : null
-            setSession(parsed)
-            if (!parsed && !PUBLIC_PATHS.includes(pathname)) {
-                router.replace("/auth")
-            }
-        } catch { }
+        const s = getSession()
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setLocalSession(s)
+        if (!s && !PUBLIC_PATHS.includes(pathname)) {
+            router.replace("/auth")
+        }
         setReady(true)
     }, [pathname])
 
     const logout = () => {
-        localStorage.removeItem("tc_session")
-        setSession(null)
+        clearSession()
+        setLocalSession(null)
         router.replace("/auth")
     }
 

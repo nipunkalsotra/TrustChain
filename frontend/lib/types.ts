@@ -53,6 +53,25 @@ export interface TrustScore {
     score: number
 }
 
+// ── Run record — matches GET /runs and GET /runs/{runId} response ────────────
+export interface RunRecord {
+    runId:       string
+    task:        string | null
+    userEmail:   string | null
+    status:      "running" | "complete" | "error"
+    result:      Record<string, unknown> | null
+    createdAt:   number | null
+    completedAt: number | null
+}
+
+// ── Leaderboard entry — matches GET /leaderboard response ────────────────────
+export interface LeaderboardEntry {
+    agentId:   string
+    avgScore:  number
+    bestScore: number
+    runsCount: number
+}
+
 // ── Score history point — matches GET /trust-scores/history response ────────
 export interface ScoreHistoryPoint {
     score: number
@@ -66,6 +85,53 @@ export interface VerifyResult {
     matches: boolean
     exists: boolean
     verified: boolean
+}
+
+// ── Identity verify — matches POST /verify response (the full payload) ───────
+export interface IdentityAgentVerify {
+    agentId:        string
+    exists:         boolean
+    matches:        boolean
+    verified:       boolean
+    registeredHash: string
+}
+
+export interface IdentityVerifyResult {
+    runId:    string
+    allMatch: boolean
+    agents:   IdentityAgentVerify[]
+}
+
+// ── Audit verify — matches GET /verify-audit response ─────────────────────────
+export interface AuditVerifyEntry {
+    entryId:      number
+    agentId:      string
+    action:       string
+    actionMatch:  boolean
+    inputMatch:   boolean
+    outputMatch:  boolean
+    txHash:       string | null
+}
+
+export interface AuditVerifyResult {
+    runId:    string
+    allMatch: boolean
+    entries:  AuditVerifyEntry[]
+}
+
+// ── Tamper demo — matches GET /verify/tamper-demo response ───────────────────
+export interface TamperCheck {
+    matches:        boolean
+    exists:         boolean
+    verified:       boolean
+    hash:           string
+    simulatedModel: string
+}
+
+export interface TamperDemoResult {
+    agentId:  string
+    real:     TamperCheck
+    tampered: TamperCheck
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

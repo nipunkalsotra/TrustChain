@@ -1,9 +1,11 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useSearchParams } from "next/navigation"
 import { C, AGENT_IDS, AGENT_COLORS, AGENT_LABELS, MOCK_SCORE_HISTORY, fmtTime } from "@/lib/constants"
 import { GaugeCircle, ScoreChart, TxLink } from "@/components/ui/TrustChainUI"
 import { getTrustScores, getAuditLog, getTrustScoreHistory } from "@/lib/api"
+import { errorMessage } from "@/lib/utils"
 import type { TrustScore, AuditEntry, ScoreHistoryPoint } from "@/lib/types"
 
 // Per-agent score arrays derived from the shared mock timeline, used ONLY
@@ -14,8 +16,11 @@ const MOCK_HISTORY_BY_AGENT: Record<string, number[]> = Object.fromEntries(
 )
 
 export default function TrustScoresPage() {
+    const searchParams = useSearchParams()
+    const runParam = searchParams.get("run")
+
     const [runId, setRunId] = useState("")
-    const [inputRunId, setInputRunId] = useState("")
+    const [inputRunId, setInputRunId] = useState(runParam ?? "")
     const [scores, setScores] = useState<TrustScore[]>([])
     const [entries, setEntries] = useState<AuditEntry[]>([])
     const [history, setHistory] = useState<Record<string, ScoreHistoryPoint[]>>({})
@@ -52,12 +57,21 @@ export default function TrustScoresPage() {
             setUsingMockHistory(!hasRealHistory)
 
             setRunId(rid)
-        } catch (e: any) {
-            setError(e.message ?? "Failed to fetch data")
+        } catch (e: unknown) {
+            setError(errorMessage(e, "Failed to fetch data"))
         } finally {
             setLoading(false)
         }
     }
+
+    // Prefill + auto-load when arriving from a link like /trust-scores?run=...
+    // Genuine data-fetching effect (network I/O + loading/error state) —
+    // unlike a prop-to-state mirror, this can't be moved to render time
+    // without firing the fetch during render, which React disallows.
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        if (runParam) fetchData(runParam)
+    }, [runParam])
 
     return (
         <div className="page-enter" style={{ padding: "24px", maxWidth: 1200, margin: "0 auto" }}>
@@ -170,7 +184,7 @@ export default function TrustScoresPage() {
                             display: "flex", alignItems: "center", gap: 8,
                         }}>
                             <span style={{ color: C.yellow }}>◎</span>
-                            PREVIEW MODE — sparklines below show sample data. This run doesn't have enough on-chain
+                            PREVIEW MODE — sparklines below show sample data. This run doesn&apos;t have enough on-chain
                             score history yet (TrustScoreRegistry.getScoreHistory).
                         </div>
                     )}

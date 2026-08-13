@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { C, AGENT_IDS, AGENT_COLORS, AGENT_LABELS, shortHash, txLink, fmtTime } from "@/lib/constants"
+import { C, AGENT_IDS, AGENT_COLORS, AGENT_LABELS, shortHash, fmtTime } from "@/lib/constants"
 import { GaugeCircle, TxLink } from "@/components/ui/TrustChainUI"
 import { useAgentStream } from "@/hooks/useAgentStream"
 import { useTrustScores } from "@/hooks/useTrustScores"

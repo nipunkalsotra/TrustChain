@@ -18,14 +18,17 @@ import asyncio
 import os
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
+import auth
+import db
 from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
 from agents.base import make_run_id
@@ -114,6 +117,51 @@ class VerifyRequest(BaseModel):
                  # Backend must accept runId and verify all 4 agents itself.
 
 
+class SignupRequest(BaseModel):
+    name:     str = Field(min_length=1, max_length=100)
+    email:    EmailStr
+    password: str = Field(min_length=8, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email:    EmailStr
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    name:  str
+    email: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /auth/signup, POST /auth/login
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/signup", response_model=AuthResponse)
+async def signup(body: SignupRequest):
+    try:
+        user = await db.create_user(
+            email=body.email, name=body.name, password=body.password,
+            created_at=int(time.time()),
+        )
+    except ValueError:
+        raise HTTPException(status_code=409, detail="email already registered")
+
+    token = auth.create_token(email=user["email"], name=user["name"])
+    return AuthResponse(token=token, name=user["name"], email=user["email"])
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(body: LoginRequest):
+    user = await db.authenticate_user(email=body.email, password=body.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid email or password")
+
+    token = auth.create_token(email=user["email"], name=user["name"])
+    return AuthResponse(token=token, name=user["name"], email=user["email"])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Background pipeline runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,9 +174,11 @@ async def _run_pipeline_background(task: str, run_id: str):
             await queue.put(event)
             if event.get("type") == "run_complete":
                 _run_results[run_id] = event
+                await db.complete_run(run_id, event, int(time.time()))
     except Exception as e:
         logger.error("[Pipeline] Background error for %s: %s", run_id, e)
         await queue.put({"type": "error", "runId": run_id, "message": str(e)})
+        await db.fail_run(run_id, str(e), int(time.time()))
     finally:
         await queue.put(None)   # sentinel — closes the SSE stream
 
@@ -138,14 +188,15 @@ async def _run_pipeline_background(task: str, run_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/run-agent", response_model=RunAgentResponse)
-async def run_agent(body: RunAgentRequest):
+async def run_agent(body: RunAgentRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     if not body.task.strip():
         raise HTTPException(status_code=400, detail="task cannot be empty")
 
     run_id = body.run_id or make_run_id()
     _run_queues[run_id] = asyncio.Queue()
+    await db.create_run(run_id, body.task, current_user.email, int(time.time()))
     asyncio.create_task(_run_pipeline_background(body.task, run_id))
-    logger.info("[API] Run started: %s — task: %s", run_id, body.task)
+    logger.info("[API] Run started: %s by %s — task: %s", run_id, current_user.email, body.task)
 
     return RunAgentResponse(
         run_id=run_id,
@@ -270,6 +321,25 @@ async def get_trust_score_history(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  GET /leaderboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/leaderboard")
+async def get_leaderboard(max_runs: int = Query(50, ge=1, le=500)):
+    """
+    Aggregates per-agent scores across recent runs from TrustScoreRegistry.
+    If totalRuns > runsConsidered, only the most recent `max_runs` runs were
+    aggregated — surfaced explicitly so the UI never silently under-reports.
+    """
+    bridge = get_bridge()
+    try:
+        return await bridge.get_leaderboard(max_runs=max_runs)
+    except Exception as e:
+        logger.error("[API] leaderboard error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  POST /verify
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -281,6 +351,23 @@ async def verify_integrity(body: VerifyRequest):
         return result
     except Exception as e:
         logger.error("[API] verify error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/verify/tamper-demo")
+async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. researcher")):
+    """
+    Read-only proof that AgentIdentityRegistry actually detects substitution:
+    compares the real agent config hash (should PASS) against a deliberately
+    mutated one (should FAIL). No on-chain writes, no gas spent.
+    """
+    bridge = get_bridge()
+    try:
+        return await bridge.tamper_demo(agent_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("[API] tamper-demo error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -393,14 +480,26 @@ async def health():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  GET /runs/{run_id}
+#  GET /runs, GET /runs/{run_id}
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/runs")
+async def list_runs(limit: int = Query(50, ge=1, le=200)):
+    """Run history — survives backend restarts (persisted in SQLite)."""
+    runs = await db.list_runs(limit=limit)
+    return {"runs": runs, "total": len(runs)}
+
 
 @app.get("/runs/{run_id}")
 async def get_run(run_id: str):
-    if run_id not in _run_results:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Run '{run_id}' not found or not yet complete"
-        )
-    return _run_results[run_id]
+    # Fast path: this process's own in-memory cache for a just-completed run.
+    if run_id in _run_results:
+        return _run_results[run_id]
+
+    # Fallback: SQLite — survives restarts, covers runs from prior processes.
+    run = await db.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    if run["status"] == "running":
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not yet complete")
+    return run["result"] if run["result"] is not None else run

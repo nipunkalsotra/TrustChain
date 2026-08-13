@@ -1,6 +1,7 @@
 "use client"
 
 import { Fragment, useState, useEffect } from "react"
+import { useSearchParams } from "next/navigation"
 import { C, AGENT_IDS, AGENT_COLORS, AGENT_LABELS, shortHash, fmtTime, MOCK_AUDIT } from "@/lib/constants"
 import { getAuditLog } from "@/lib/api"
 import type { AuditEntry } from "@/lib/types"
@@ -12,18 +13,23 @@ const MONAD_TX = (hash: string) => {
 }
 
 export default function AuditPage() {
+    const searchParams = useSearchParams()
+    const runParam = searchParams.get("run")
+
     const [entries, setEntries] = useState<AuditEntry[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [filter, setFilter] = useState("all")
     const [search, setSearch] = useState("")
-    const [runFilter, setRunFilter] = useState("all")
+    const [runFilter, setRunFilter] = useState(runParam ?? "all")
     const [expanded, setExpanded] = useState<number | null>(null)
     const [usingMock, setUsingMock] = useState(false)
 
     // ── Fetch all audit entries on mount ──────────────────────────────────
+    // No setLoading(true) here — `loading` already initializes to true, and
+    // every setState below runs inside the fetch's async callbacks, not
+    // synchronously in the effect body.
     useEffect(() => {
-        setLoading(true)
         getAuditLog()
             .then(data => {
                 // API returns { entries: AuditEntry[], total: number }
