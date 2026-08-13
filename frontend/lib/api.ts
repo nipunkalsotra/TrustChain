@@ -25,6 +25,13 @@ export async function getTrustScores(runId: string) {
     return res.json()  // { runId, scores: TrustScore[] }
 }
 
+// ── GET /trust-scores/history ─────────────────────────────────────────────────
+export async function getTrustScoreHistory(runId: string) {
+    const res = await fetch(`${API}/trust-scores/history?run_id=${runId}`)
+    if (!res.ok) throw new Error("trust score history failed")
+    return res.json()  // { runId, history: Record<agentId, ScoreHistoryPoint[]> }
+}
+
 // ── GET /audit-log ────────────────────────────────────────────────────────────
 export async function getAuditLog(runId?: string) {
     const url = runId ? `${API}/audit-log?run_id=${runId}` : `${API}/audit-log`

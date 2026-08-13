@@ -1,0 +1,4 @@
+# start.sh expects a single .venv at the repo root shared by the backend and
+# both MCP servers. backend/requirements.txt is a strict superset of both
+# mcp_servers/*/requirements.txt, so installing it here covers everything.
+-r backend/requirements.txt

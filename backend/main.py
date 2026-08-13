@@ -68,19 +68,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# FIX 1: CORS was allow_origins=["*"] but that alone is not enough when
-# the frontend sends requests to localhost:8000 from localhost:3000.
-# Some browsers block wildcard CORS for credentialed requests.
-# Explicitly list both dev origins so no request is ever blocked.
+# CORS: explicit allowlist only. "*" combined with allow_credentials=True is
+# invalid per the CORS spec (browsers reject it outright), so it can never be
+# used to also cover a deployed frontend URL — that URL must be listed here.
+# Add your deployed frontend origin (e.g. Vercel URL) via FRONTEND_URL once known.
+_extra_origin = os.getenv("FRONTEND_URL")
+_allowed_origins = [
+    "http://localhost:3000",     # Next.js dev server
+    "http://localhost:3001",     # Next.js alt port
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
+if _extra_origin:
+    _allowed_origins.append(_extra_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",     # Next.js dev server
-        "http://localhost:3001",     # Next.js alt port
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "*",                         # keep wildcard for deployed Vercel URL
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -245,6 +249,23 @@ async def get_trust_scores(
         return {"runId": run_id, "scores": scores}
     except Exception as e:
         logger.error("[API] trust-scores error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GET /trust-scores/history
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/trust-scores/history")
+async def get_trust_score_history(
+    run_id: str = Query(..., description="Run ID to fetch score history for")
+):
+    bridge = get_bridge()
+    try:
+        history = await bridge.get_all_score_histories(run_id)
+        return {"runId": run_id, "history": history}
+    except Exception as e:
+        logger.error("[API] trust-scores/history error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

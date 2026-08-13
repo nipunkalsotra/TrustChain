@@ -70,10 +70,21 @@ export function GaugeCircle({
 }
 
 // ─── Score Sparkline Chart ────────────────────────────────────────────────────
-export function ScoreChart({ history, agentId }: { history: Record<string, number>[]; agentId: string }) {
+// `scores` is this agent's own chronological score history (from
+// TrustScoreRegistry.getScoreHistory), not a shared multi-agent timeline.
+export function ScoreChart({ scores, agentId }: { scores: number[]; agentId: string }) {
     const color = AGENT_COLORS[agentId] ?? C.green
     const W = 300, H = 80
-    const data = history.map(h => h[agentId] as number)
+
+    if (scores.length < 2) {
+        return (
+            <div style={{ height: H, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.08em" }}>NOT ENOUGH DATA YET</span>
+            </div>
+        )
+    }
+
+    const data = scores
     const pts = data.map((v, i) => `${(i / (data.length - 1)) * W},${H - (v / 100) * H}`)
     const path = `M ${pts.join(" L ")}`
     const area = `M 0,${H} L ${pts.join(" L ")} L ${W},${H} Z`

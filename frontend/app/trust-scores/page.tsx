@@ -3,14 +3,23 @@
 import { useState, useEffect } from "react"
 import { C, AGENT_IDS, AGENT_COLORS, AGENT_LABELS, MOCK_SCORE_HISTORY, fmtTime } from "@/lib/constants"
 import { GaugeCircle, ScoreChart, TxLink } from "@/components/ui/TrustChainUI"
-import { getTrustScores, getAuditLog } from "@/lib/api"
-import type { TrustScore, AuditEntry } from "@/lib/types"
+import { getTrustScores, getAuditLog, getTrustScoreHistory } from "@/lib/api"
+import type { TrustScore, AuditEntry, ScoreHistoryPoint } from "@/lib/types"
+
+// Per-agent score arrays derived from the shared mock timeline, used ONLY
+// when the real on-chain history comes back empty — never silently
+// alongside real data.
+const MOCK_HISTORY_BY_AGENT: Record<string, number[]> = Object.fromEntries(
+    AGENT_IDS.map(id => [id, MOCK_SCORE_HISTORY.map(h => h[id] as number)])
+)
 
 export default function TrustScoresPage() {
     const [runId, setRunId] = useState("")
     const [inputRunId, setInputRunId] = useState("")
     const [scores, setScores] = useState<TrustScore[]>([])
     const [entries, setEntries] = useState<AuditEntry[]>([])
+    const [history, setHistory] = useState<Record<string, ScoreHistoryPoint[]>>({})
+    const [usingMockHistory, setUsingMockHistory] = useState(false)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
@@ -29,12 +38,19 @@ export default function TrustScoresPage() {
         setLoading(true)
         setError(null)
         try {
-            const [scoreData, auditData] = await Promise.all([
+            const [scoreData, auditData, historyData] = await Promise.all([
                 getTrustScores(rid),
                 getAuditLog(rid),
+                getTrustScoreHistory(rid).catch(() => ({ history: {} })),
             ])
             setScores(scoreData.scores ?? [])
             setEntries(auditData.entries ?? [])
+
+            const fetchedHistory: Record<string, ScoreHistoryPoint[]> = historyData.history ?? {}
+            const hasRealHistory = AGENT_IDS.some(id => (fetchedHistory[id]?.length ?? 0) >= 2)
+            setHistory(fetchedHistory)
+            setUsingMockHistory(!hasRealHistory)
+
             setRunId(rid)
         } catch (e: any) {
             setError(e.message ?? "Failed to fetch data")
@@ -146,16 +162,31 @@ export default function TrustScoresPage() {
                     </div>
 
                     {/* 4 Gauge cards with sparklines */}
+                    {usingMockHistory && (
+                        <div style={{
+                            marginBottom: 16, padding: "8px 14px",
+                            background: "#0a1a0a", border: `1px solid ${C.dim}`,
+                            borderRadius: 6, fontSize: 11, color: C.muted,
+                            display: "flex", alignItems: "center", gap: 8,
+                        }}>
+                            <span style={{ color: C.yellow }}>◎</span>
+                            PREVIEW MODE — sparklines below show sample data. This run doesn't have enough on-chain
+                            score history yet (TrustScoreRegistry.getScoreHistory).
+                        </div>
+                    )}
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }}>
                         {AGENT_IDS.map(id => {
                             const agentEntries = entries.filter(e => e.agentId === id)
                             const lastEntry = agentEntries.at(-1)
+                            const agentScores = usingMockHistory
+                                ? MOCK_HISTORY_BY_AGENT[id]
+                                : (history[id] ?? []).map(h => h.score)
                             return (
                                 <div key={id} className="card" style={{ padding: 24, display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
                                     <GaugeCircle agentId={id} score={scoreMap[id] ?? 0} size={120} fontSize={24} />
                                     <div style={{ width: "100%", borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
                                         <div style={{ fontSize: 9, color: C.dim, marginBottom: 6, letterSpacing: "0.08em" }}>SCORE OVER TIME</div>
-                                        <ScoreChart history={MOCK_SCORE_HISTORY} agentId={id} />
+                                        <ScoreChart scores={agentScores} agentId={id} />
                                     </div>
                                     <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.06em", textAlign: "center" }}>
                                         {agentEntries.length} STEPS

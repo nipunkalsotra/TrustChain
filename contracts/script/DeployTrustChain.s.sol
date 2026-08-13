@@ -40,21 +40,24 @@ contract DeployTrustChain is Script {
     // Run: python3 scripts/compute_hashes.py  (see printed instructions below)
     // ─────────────────────────────────────────────
 
+    // Model/version here are for on-chain display only (see AgentIdentityRegistry
+    // AgentRecord.modelName/modelVersion) — they must match backend/blockchain/
+    // hashing_utils.py's AGENTS list, which is what actually feeds the codeHash.
     string constant RESEARCHER_ID = "researcher";
-    string constant RESEARCHER_MODEL = "gpt-4o";
-    string constant RESEARCHER_VERSION = "2024-11-20";
+    string constant RESEARCHER_MODEL = "llama-3.3-70b-versatile";
+    string constant RESEARCHER_VERSION = "groq-v1";
 
     string constant VALIDATOR_ID = "validator";
-    string constant VALIDATOR_MODEL = "gpt-4o";
-    string constant VALIDATOR_VERSION = "2024-11-20";
+    string constant VALIDATOR_MODEL = "llama-3.3-70b-versatile";
+    string constant VALIDATOR_VERSION = "groq-v1";
 
     string constant SCORER_ID = "scorer";
-    string constant SCORER_MODEL = "gpt-4o";
-    string constant SCORER_VERSION = "2024-11-20";
+    string constant SCORER_MODEL = "llama-3.3-70b-versatile";
+    string constant SCORER_VERSION = "groq-v1";
 
     string constant REPORTER_ID = "reporter";
-    string constant REPORTER_MODEL = "gpt-4o";
-    string constant REPORTER_VERSION = "2024-11-20";
+    string constant REPORTER_MODEL = "llama-3.3-70b-versatile";
+    string constant REPORTER_VERSION = "groq-v1";
 
     // ─────────────────────────────────────────────
     // RUN

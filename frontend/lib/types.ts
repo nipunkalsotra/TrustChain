@@ -53,6 +53,13 @@ export interface TrustScore {
     score: number
 }
 
+// ── Score history point — matches GET /trust-scores/history response ────────
+export interface ScoreHistoryPoint {
+    score: number
+    timestamp: number
+    reason: string
+}
+
 // ── Verify result — matches POST /verify response ────────────────────────────
 export interface VerifyResult {
     agentId: string

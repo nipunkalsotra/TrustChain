@@ -84,7 +84,14 @@ def log_action(
 
     try:
         bridge   = get_bridge()
-        tx_hash  = _run(bridge.log_action(agent_id, action, input_text, output_text, step_index))
+        tx_hash  = _run(bridge.log_action(
+            run_id=run_id,
+            agent_id=agent_id,
+            action=action,
+            input_text=input_text,
+            output_text=output_text,
+            step_index=step_index,
+        ))
 
         return {
             "tx_hash":    tx_hash,

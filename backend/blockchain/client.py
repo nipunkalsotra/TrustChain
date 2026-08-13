@@ -18,9 +18,15 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from dotenv import load_dotenv
 
+from blockchain.hashing_utils import AGENTS, compute_hash
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# agentId -> config dict, for recomputing each agent's *current* identity
+# hash on demand (see verify_run below).
+_AGENT_CONFIGS = {a["agentId"]: a for a in AGENTS}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config
@@ -186,6 +192,26 @@ TRUST_SCORE_ABI = [
         "stateMutability": "view",
         "inputs":  [],
         "outputs": [{"name": "", "type": "string"}],
+    },
+    {
+        "name": "getScoreHistory",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "agentId", "type": "string"},
+            {"name": "runId",   "type": "string"},
+        ],
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple[]",
+                "components": [
+                    {"name": "score",     "type": "uint256"},
+                    {"name": "timestamp", "type": "uint256"},
+                    {"name": "reason",    "type": "string"},
+                ],
+            }
+        ],
     },
     {
         "name": "ScoreUpdated",
@@ -495,6 +521,22 @@ class BlockchainBridge:
             agents = ["researcher", "validator", "scorer", "reporter"]
             return [{"agentId": a, "runId": run_id, "score": 0} for a in agents]
 
+    async def get_score_history(self, agent_id: str, run_id: str) -> list[dict]:
+        raw = await asyncio.to_thread(
+            self.trust_score.functions.getScoreHistory(agent_id, run_id).call
+        )
+        return [
+            {"score": int(score), "timestamp": int(timestamp), "reason": reason}
+            for score, timestamp, reason in raw
+        ]
+
+    async def get_all_score_histories(self, run_id: str) -> dict[str, list[dict]]:
+        agents = ["researcher", "validator", "scorer", "reporter"]
+        return {
+            agent_id: await self.get_score_history(agent_id, run_id)
+            for agent_id in agents
+        }
+
     async def get_latest_run_id(self) -> str:
         return await asyncio.to_thread(
             self.trust_score.functions.getLatestRunId().call
@@ -514,9 +556,25 @@ class BlockchainBridge:
         return tx_hash
 
     async def verify_integrity(self, agent_id: str, code_hash_hex: str) -> dict:
+        """
+        Checks a caller-supplied hash against the on-chain record.
+        (IDENTITY_ABI has no `verify()` function — only verifyAgent/isRegistered/
+        getAgent/registerAgent exist on the contract — so this composes those.)
+        """
         code_hash = bytes.fromhex(code_hash_hex.removeprefix("0x"))
-        matches, exists = await asyncio.to_thread(
-            self.identity_reg.functions.verify(agent_id, code_hash).call
+        exists = await asyncio.to_thread(
+            self.identity_reg.functions.isRegistered(agent_id).call
+        )
+        if not exists:
+            return {
+                "agentId":  agent_id,
+                "matches":  False,
+                "exists":   False,
+                "verified": False,
+            }
+
+        matches = await asyncio.to_thread(
+            self.identity_reg.functions.verifyAgent(agent_id, code_hash).call
         )
         return {
             "agentId":  agent_id,
@@ -552,10 +610,22 @@ class BlockchainBridge:
             code_hash_bytes = raw[1]
             is_active       = raw[4]
 
-            # Verify stored hash against itself — confirms contract consistency
-            matches = await asyncio.to_thread(
-                self.identity_reg.functions.verifyAgent(agent_id, code_hash_bytes).call
-            )
+            # Recompute the CURRENT hash from the live agent config (model +
+            # version + system prompt, see hashing_utils.AGENTS) and compare
+            # that against the stored hash. This is what actually catches a
+            # silently swapped model/prompt — comparing the stored hash to
+            # itself (the previous behaviour) always returns true regardless
+            # of drift, so it never detected anything.
+            config = _AGENT_CONFIGS.get(agent_id)
+            if config is None:
+                matches = False
+                logger.warning("[Identity] no live config for agent %s — cannot verify", agent_id)
+            else:
+                current_hash = bytes.fromhex(compute_hash(config).removeprefix("0x"))
+                matches = await asyncio.to_thread(
+                    self.identity_reg.functions.verifyAgent(agent_id, current_hash).call
+                )
+
             agent_results.append({
                 "agentId":        agent_id,
                 "exists":         True,

@@ -1,19 +1,19 @@
 # Blockchain
-web3
+web3==7.16.0
 
 # core -packages
-python-dotenv
+python-dotenv==1.2.2
 
 # AI
-langchain-groq
-langchain-tavily
-langgraph
+langchain-groq==1.1.3
+langchain-tavily==0.2.18
+langgraph==1.2.11
 
 # FastApi Backend
-fastapi
-uvicorn
+fastapi==0.141.1
+uvicorn==0.52.1
 
 # MCP Servers
-fastmcp
-langchain-mcp-adapters
-tavily-python
+fastmcp==3.4.7
+langchain-mcp-adapters==0.3.2
+tavily-python==0.7.27

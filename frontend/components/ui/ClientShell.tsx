@@ -27,12 +27,11 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     const [session, setSession] = useState<any>(null)
     const [ready, setReady] = useState(false)
 
-    // ── Chain status (your existing logic, unchanged) ─────────────────────
+    // ── Chain status — polls the real backend, no simulated ticking ────────
     useEffect(() => {
-        getChainStatus().then(setChain).catch(() => setChain(null))
-        const t = setInterval(() => {
-            setChain(c => c ? { ...c, blockNumber: (c.blockNumber ?? 0) + Math.floor(Math.random() * 3 + 1) } : c)
-        }, 2000)
+        const poll = () => getChainStatus().then(setChain).catch(() => setChain(null))
+        poll()
+        const t = setInterval(poll, 5000)
         return () => clearInterval(t)
     }, [])
 
