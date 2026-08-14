@@ -1,0 +1,81 @@
+# TrustChain alert rules. Paired runbook entries live in
+# docs/runbooks.md — each alert's `runbook` annotation links there.
+#
+# Thresholds are starting points for a small/demo-scale deployment, not
+# load-tested production numbers (see P2.7 — k6/soak testing) — tune
+# against real traffic before trusting these as paging thresholds.
+
+groups:
+  - name: trustchain-api
+    rules:
+      - alert: HighHTTP5xxRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of API responses are 5xx"
+          description: "{{ $value | humanizePercentage }} of requests over the last 5m returned a 5xx status."
+          runbook: "docs/runbooks.md#high-http-5xx-rate"
+
+      - alert: PipelineFailureRateHigh
+        expr: |
+          sum(rate(pipeline_runs_total{status="failed"}[15m]))
+          /
+          sum(rate(pipeline_runs_total{status="started"}[15m]))
+          > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of agent pipeline runs are failing"
+          description: "{{ $value | humanizePercentage }} of runs started in the last 15m ended in status=failed."
+          runbook: "docs/runbooks.md#pipeline-failure-rate-high"
+
+      - alert: RateLimitRejectionsSpike
+        expr: sum(increase(rate_limit_rejections_total[5m])) > 100
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Sustained spike in rate-limit rejections"
+          description: "{{ $value }} requests rejected by rate limiting in the last 5m — could be a legitimate traffic spike, a misbehaving client, or credential stuffing (kind=login)."
+          runbook: "docs/runbooks.md#rate-limit-rejections-spike"
+
+  - name: trustchain-anchor-worker
+    rules:
+      - alert: AnchorOutboxBacklogGrowing
+        expr: anchor_outbox_pending > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Anchor outbox backlog exceeds 500 steps for 10+ minutes"
+          description: "anchor_outbox_pending={{ $value }} — the anchor worker isn't keeping up (stuck, crash-looping, or genuinely overloaded)."
+          runbook: "docs/runbooks.md#anchor-outbox-backlog-growing"
+
+      - alert: AnchorBatchesFailingRepeatedly
+        expr: sum(increase(anchor_batches_failed_total[15m])) > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Anchor batch submissions failing repeatedly"
+          description: "{{ $value }} anchor batch failures in the last 15m — check anchor-worker logs for the `reason` (build_or_send/timeout/revert)."
+          runbook: "docs/runbooks.md#anchor-batches-failing-repeatedly"
+
+  - name: trustchain-indexer
+    rules:
+      - alert: IndexerFallingBehind
+        expr: indexer_poll_lag_blocks > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexer is more than 1000 blocks behind chain head"
+          description: "indexer_poll_lag_blocks={{ $value }} — check the indexer process is alive and the RPC endpoint is responsive."
+          runbook: "docs/runbooks.md#indexer-falling-behind"

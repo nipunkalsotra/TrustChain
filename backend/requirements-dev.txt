@@ -1,3 +1,8 @@
 # Test-only dependencies — not needed to run the app, only to run pytest.
 -r requirements.txt
 pytest==9.1.1
+
+# Security scanning (P2.5) — run in CI, see .github/workflows/test.yml
+bandit==1.9.4
+pip-audit==2.10.1
+slither-analyzer==0.11.6

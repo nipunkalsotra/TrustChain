@@ -1,0 +1,101 @@
+# Deployment pipeline (P2.8): staging auto-deploys every release, production
+# requires a manual approval gate (via a GitHub Environment protection
+# rule — see docs/release-process.md for how to configure it; that
+# protection lives in repo Settings, not in this file).
+#
+# HONEST LIMITATION: this repo has no real staging/production
+# infrastructure target configured (no cloud account, no server, no
+# kubeconfig) — the actual `deploy` steps below are placeholders that
+# document the real shape of the command (SSH + docker compose pull/up,
+# the most direct fit for how this project already runs via
+# docker-compose.yml) rather than a fabricated "it deployed successfully"
+# step. Wire DEPLOY_HOST/DEPLOY_SSH_KEY as environment secrets once a
+# real target exists and delete this comment block.
+name: Deploy
+permissions: {}
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag to deploy (e.g. 1.4.0) — required for manual runs"
+        required: true
+
+jobs:
+  resolve-version:
+    name: Resolve version to deploy
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Triggered by the Release workflow completing — its jobs
+            # already exposed the version it just published (see
+            # release.yml's `release` job outputs); workflow_run doesn't
+            # let this workflow read that job's outputs directly, so this
+            # re-derives it the same way release.yml itself did: the
+            # latest annotated tag on main.
+            git fetch --tags --quiet https://github.com/${{ github.repository }} main 2>/dev/null || true
+            echo "version=$(git ls-remote --tags --sort=-v:refname https://github.com/${{ github.repository }} 'v*' | head -1 | sed 's/.*refs\/tags\/v//')" >> "$GITHUB_OUTPUT"
+          fi
+
+  staging:
+    name: Deploy to staging
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.trustchain.example  # placeholder — replace once a real staging host exists
+    permissions:
+      contents: read
+    steps:
+      - name: Deploy backend/mcp images to staging
+        run: |
+          cat <<EOF
+          Would deploy version ${{ needs.resolve-version.outputs.version }} to staging.
+          Real shape of this step (once DEPLOY_HOST/DEPLOY_SSH_KEY secrets exist):
+
+            ssh -i \$DEPLOY_SSH_KEY deploy@\$DEPLOY_HOST bash -s <<'REMOTE'
+              cd /opt/trustchain
+              export TRUSTCHAIN_VERSION=${{ needs.resolve-version.outputs.version }}
+              docker compose pull api anchor-worker indexer mcp-search mcp-blockchain
+              docker compose up -d api anchor-worker indexer mcp-search mcp-blockchain
+          REMOTE
+
+          See docs/release-process.md for the full deployment story and why this stays a placeholder for now.
+          EOF
+      - name: Smoke test staging
+        run: |
+          echo "Would curl \$STAGING_URL/ready and \$STAGING_URL/health here and fail the job on a non-200."
+          echo "No real staging URL exists yet — see the deploy step above."
+
+  production:
+    name: Deploy to production
+    needs: [resolve-version, staging]
+    runs-on: ubuntu-latest
+    # A GitHub Environment named "production" with required reviewers
+    # configured (Settings > Environments > production > Deployment
+    # protection rules) makes THIS JOB pause for manual approval before
+    # running — that gate lives in repo settings, not in this YAML, and
+    # needs a repo admin to set it up once. See docs/release-process.md.
+    environment:
+      name: production
+      url: https://trustchain.example  # placeholder — replace once a real production host exists
+    permissions:
+      contents: read
+    steps:
+      - name: Deploy backend/mcp images to production
+        run: |
+          echo "Would deploy version ${{ needs.resolve-version.outputs.version }} to production."
+          echo "Same real shape as the staging step, against \$PROD_DEPLOY_HOST instead."
+          echo "See docs/release-process.md."
+      - name: Smoke test production
+        run: |
+          echo "Would curl \$PRODUCTION_URL/ready and \$PRODUCTION_URL/health here and fail the job on a non-200."

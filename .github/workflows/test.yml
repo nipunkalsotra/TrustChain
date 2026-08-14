@@ -28,16 +28,69 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
         working-directory: contracts
+      - name: Set up Python (for Slither)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Slither
+        run: pip install slither-analyzer==0.11.6
+      - name: Run Slither (static analysis)
+        # Scans the whole contracts/ tree (V1 + v2/). Verified locally: 0
+        # High/Medium findings once excluding Optimization/Low/Informational
+        # (immutable `owner` suggestions, etc. — reviewed, non-security) and
+        # the two Medium "incorrect-equality" hits in AgentAuditLog
+        # .verifyRecord, which are the intended hash-vs-hash tamper-check
+        # comparison, not a real bug — suppressed inline via
+        # `slither-disable-next-line` at that call site so this stays a
+        # real gate: any NEW Medium/High finding anywhere fails the build.
+        # (Runs a `forge clean` + rebuild internally, which is why this
+        # comes after `forge test`, not before it.)
+        run: slither . --exclude-informational --exclude-low --exclude-optimization
+        working-directory: contracts
 
   backend:
     name: Backend (Python)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trustchain
+          POSTGRES_PASSWORD: trustchain
+          POSTGRES_DB: trustchain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trustchain -d trustchain"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      JWT_SECRET: ci-test-secret-not-for-production-use-only
+      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
+      REDIS_URL: redis://localhost:6379/0
+      # Anvil's well-known default account #0 — public, funded only on
+      # local chains Anvil itself spins up. Matches the anchor
+      # worker/indexer/score_writer integration tests' own hardcoded
+      # ANVIL_KEY (tests/conftest.py's `chain_settings` fixture) — CI's
+      # Anvil and that fixture have to agree on which key holds ANCHOR_ROLE.
+      ANVIL_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          submodules: recursive
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -47,8 +100,59 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
         working-directory: backend
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      # The anchor worker, indexer, and score_writer integration tests
+      # (tests/test_anchor_worker.py, test_indexer.py, test_score_writer.py)
+      # exercise real durability/Merkle-compatibility/event-decoding
+      # behavior against a real chain — a mock wouldn't actually verify any
+      # of that (see those files' module docstrings) — so CI needs a real
+      # V2 deployment, not just Postgres.
+      - name: Start Anvil
+        run: |
+          anvil --host 0.0.0.0 --port 8545 &
+          for i in $(seq 1 30); do
+            curl -sf -X POST -H "Content-Type: application/json" \
+              --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+              http://localhost:8545 | grep -q result && break
+            sleep 1
+          done
+      - name: Build contracts
+        run: forge build
+        working-directory: contracts
+      - name: Extract V2 ABIs for the backend
+        run: python3 backend/scripts/extract_v2_abis.py
+      - name: Deploy V2 contracts to Anvil
+        # DeployV2.s.sol reads PRIVATE_KEY via vm.envUint("PRIVATE_KEY")
+        # itself (see the script — it calls vm.startBroadcast internally),
+        # not forge's own --private-key flag.
+        run: forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: ${{ env.ANVIL_KEY }}
+      - name: Record deployed V2 addresses
+        run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
+      - name: Apply database migrations
+        run: alembic upgrade head
+        working-directory: backend
       - name: Run pytest
         run: pytest
+        working-directory: backend
+      - name: Bandit (Python static security analysis)
+        # Verified locally: 0 findings at medium+ severity. The 7 Low
+        # findings below this threshold were reviewed individually — a
+        # fail-open try/except in rate_limit.py, a deterministically
+        # seeded random.Random(1337) in scripts/gen_merkle_fixtures.py
+        # (reproducible test fixtures, not a security control), and one
+        # B105 false positive matching literal text inside a Lua script
+        # string — so the gate stays at medium+ instead of re-litigating
+        # reviewed Lows on every PR.
+        run: bandit -r . -x ./tests,./.venv --severity-level medium
+        working-directory: backend
+      - name: pip-audit (Python dependency CVE scan)
+        run: |
+          pip-audit -r requirements.txt
+          pip-audit -r requirements-dev.txt
         working-directory: backend
 
   frontend:
@@ -82,3 +186,144 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
+      - name: npm audit (JS dependency CVE scan)
+        # Non-blocking: 11 findings (1 low, 1 moderate, 9 high), all
+        # transitive via next -> postcss/sharp. The only fix (`npm audit
+        # fix --force`) installs next@16.3.1, which npm itself flags as
+        # "outside the stated dependency range" — a major-version Next.js
+        # upgrade, not something to force silently in a security-scan step.
+        # Stays visible-but-non-fatal here (same pattern as the Lint step
+        # above) until a deliberate, reviewed upgrade is scheduled.
+        run: npm audit --audit-level=high
+        working-directory: frontend
+        continue-on-error: true
+
+  gitleaks:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run gitleaks
+        # Config (.gitleaks.toml) allowlists Anvil's well-known, public,
+        # zero-value default dev key that's intentionally committed in
+        # docker-compose.yml / conftest.py / this workflow — see that
+        # file's header comment for why. NOTE: unlike Slither/Bandit/
+        # pip-audit above, this step has not been verified locally (no Go
+        # toolchain / package available in this dev environment) — kept
+        # non-blocking until a first real CI run confirms it's clean, then
+        # should be tightened to blocking.
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  sdk-integration:
+    name: SDK integration tests (Python + TypeScript)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Real docker-compose stack — the SDKs' own test suites are
+      # deliberately integration tests against a live API, not
+      # httpx/fetch mocks (see sdk/python/README.md and
+      # sdk/typescript/README.md's "Bugs this test suite found" sections
+      # — that's exactly how three real backend bugs were caught earlier
+      # that a mocked test would have missed entirely). This is the same
+      # `up` + deploy-contracts sequence used throughout local
+      # development, run here for real rather than assumed to work.
+      # docker-compose.yml's api/anchor-worker/indexer services load
+      # backend/.env via `env_file: ..., required: false` — with none
+      # present (a fresh checkout has no .env, it's gitignored), JWT_SECRET
+      # is unset and config.py's Settings(...) fails validation at
+      # startup (no default — see that field's own docstring), so the
+      # containers need a real file here, not just step-level `env:` on
+      # the `docker compose up` command (which does NOT reach the
+      # containers on its own — compose only passes through host env vars
+      # a service explicitly maps via `${VAR}` interpolation, which this
+      # compose file doesn't do for these).
+      #
+      # No GROQ_API_KEY/TAVILY_API_KEY secret is configured for this repo
+      # (the backend job above doesn't need one either — its own tests
+      # mock run_pipeline for anything that would call a real LLM).
+      # Blank is fine: every SDK test that starts a real pipeline run
+      # tolerates the run ending in "run_complete" OR "error" (a blank
+      # key fails the LLM/MCP call fast and cleanly, exactly like the
+      # real Groq quota exhaustion this exact test suite hit during local
+      # development — see the SDKs' own READMEs); only one Python test
+      # needs an actual successful run to check anything, and it skips
+      # itself cleanly otherwise. Set real repo secrets to exercise the
+      # full success path here too.
+      - name: Write backend/.env for docker compose
+        run: |
+          cat > backend/.env <<EOF
+          JWT_SECRET=ci-test-secret-not-for-production-use-only
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+          EOF
+      - name: Start the stack
+        run: docker compose up -d --build postgres redis anvil api anchor-worker indexer mcp-search mcp-blockchain
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/health && break
+            sleep 2
+          done
+      - name: Build contracts
+        run: forge build
+        working-directory: contracts
+      - name: Extract V2 ABIs for the backend
+        run: python3 backend/scripts/extract_v2_abis.py
+      - name: Deploy V2 contracts to Anvil
+        run: forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      - name: Record deployed V2 addresses
+        run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
+      - name: Restart api/anchor-worker/indexer with fresh contract addresses
+        # addresses_v2.json is baked into each image at build time (see
+        # backend/Dockerfile's `COPY . .`), so the containers built above
+        # — before the addresses file existed — need rebuilding now that
+        # it does, not just restarting. This exact gotcha (and the fix)
+        # was hit repeatedly during local development — see
+        # sdk/python/README.md.
+        run: docker compose up -d --build api anchor-worker indexer
+      - name: Wait for API readiness (post-redeploy)
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/ready && break
+            sleep 2
+          done
+      - name: Run Python SDK tests
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/ -v
+        working-directory: sdk/python
+      - name: Run TypeScript SDK tests
+        run: |
+          npm install
+          npm test
+        working-directory: sdk/typescript
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200

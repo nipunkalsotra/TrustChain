@@ -4,8 +4,8 @@ main.py  —  TrustChain FastAPI backend
 Endpoints:
   POST /run-agent          → start pipeline, returns run_id
   GET  /stream/{run_id}    → SSE stream of agent events
-  GET  /audit-log          → all on-chain entries from AgentAuditLog
-  GET  /trust-scores       → all 4 agent scores for a run
+  GET  /audit-log          → anchored steps, from the read model (Postgres)
+  GET  /trust-scores       → all 4 agent scores for a run, from the read model
   POST /verify             → hash integrity check against on-chain record
   GET  /chain-status       → Monad connection status
   GET  /health             → quick health check
@@ -15,37 +15,37 @@ Run:
 """
 
 import asyncio
-import os
 import json
-import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import auth
 import db
+import observability
+import rate_limit
+import refresh
+import run_events
+from db import idempotency, read_model, tenancy
+from config import get_settings
+from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
 from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
 from agents.base import make_run_id
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s  %(name)s  %(message)s"
+configure_logging(log_level=get_settings().log_level, json_logs=get_settings().environment != "development")
+logger = get_logger(__name__)
+
+observability.init_sentry(
+    get_settings().sentry_dsn, get_settings().environment, get_settings().sentry_traces_sample_rate,
 )
-logger = logging.getLogger(__name__)
+observability.init_tracing(get_settings().otel_service_name, get_settings().otel_exporter_otlp_endpoint)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  In-memory run store
-# ─────────────────────────────────────────────────────────────────────────────
-
-_run_queues:  dict[str, asyncio.Queue] = {}
-_run_results: dict[str, dict]          = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,14 +54,14 @@ _run_results: dict[str, dict]          = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("TrustChain backend starting up...")
+    logger.info("backend_starting")
     try:
         bridge = get_bridge()
-        logger.info("Blockchain bridge ready — wallet: %s", bridge.account.address)
+        logger.info("bridge_ready", wallet=bridge.account.address)
     except Exception as e:
-        logger.error("Bridge init failed (non-fatal): %s", e)
+        logger.error("bridge_init_failed_non_fatal", error=str(e))
     yield
-    logger.info("TrustChain backend shutting down.")
+    logger.info("backend_shutting_down")
 
 
 app = FastAPI(
@@ -71,11 +71,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(CorrelationIdMiddleware)
+
 # CORS: explicit allowlist only. "*" combined with allow_credentials=True is
 # invalid per the CORS spec (browsers reject it outright), so it can never be
 # used to also cover a deployed frontend URL — that URL must be listed here.
 # Add your deployed frontend origin (e.g. Vercel URL) via FRONTEND_URL once known.
-_extra_origin = os.getenv("FRONTEND_URL")
+_extra_origin = get_settings().frontend_url
 _allowed_origins = [
     "http://localhost:3000",     # Next.js dev server
     "http://localhost:3001",     # Next.js alt port
@@ -93,6 +95,62 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Type", "Cache-Control"],
 )
+
+# Instruments the app with OpenTelemetry spans (one per request) — needs
+# the app instance, so this runs separately from init_tracing() above,
+# which only sets up the process-wide TracerProvider/exporter.
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+FastAPIInstrumentor.instrument_app(app)
+
+
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    """Records HTTP request count/duration for /metrics. `path` uses the
+    matched route template (request.url.path would put run_id/key_id
+    straight into a label value — unbounded cardinality as more runs/keys
+    accumulate); falls back to the raw path only for genuinely unmatched
+    routes (404s), which are rare enough not to matter."""
+    start = time.monotonic()
+    response = await call_next(request)
+    duration = time.monotonic() - start
+
+    route = request.scope.get("route")
+    path = route.path if route is not None else request.url.path
+    observability.HTTP_REQUESTS_TOTAL.labels(
+        method=request.method, path=path, status=response.status_code
+    ).inc()
+    observability.HTTP_REQUEST_DURATION_SECONDS.labels(method=request.method, path=path).observe(duration)
+    return response
+
+
+@app.get("/metrics")
+async def metrics():
+    from fastapi import Response
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Platform admin-action audit log (db.models.AuditEvent) — distinct from
+#  the on-chain agent audit log. Covers key issuance/revocation and other
+#  authority-affecting actions per the plan's T3 (insider/operator) threat
+#  mitigation: "admin actions are themselves audited." Best-effort — a
+#  logging failure must never block the action it's describing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def audit_log_admin_action(current_user: "auth.CurrentUser", action: str, target: Optional[str] = None) -> None:
+    try:
+        from db.engine import get_sessionmaker
+        from db.models import AuditEvent
+
+        async with get_sessionmaker()() as session:
+            session.add(AuditEvent(
+                actor_id=current_user.user_id, org_id=current_user.org_id,
+                action=action, target=target, created_at=int(time.time()),
+            ))
+            await session.commit()
+    except Exception as e:
+        logger.error("audit_log_write_failed", action=action, error=str(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,8 +192,45 @@ class AuthResponse(BaseModel):
     email: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class TokenPairResponse(BaseModel):
+    access_token:  str
+    refresh_token: str
+    expires_in:    int
+
+
+class CreateApiKeyRequest(BaseModel):
+    scopes:      list[str]
+    environment: str = "live"
+
+
+class ApiKeyCreatedResponse(BaseModel):
+    id:        int
+    raw_key:   str   # shown exactly once — never returned by any other endpoint
+    last_four: str
+    scopes:    list[str]
+
+
+class ApiKeyListItem(BaseModel):
+    id:            int
+    last_four:     str
+    scopes:        list[str]
+    created_at:    int
+    expires_at:    Optional[int]
+    revoked_at:    Optional[int]
+    last_used_at:  Optional[int]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  POST /auth/signup, POST /auth/login
+#
+#  Response shape and the primary token's lifetime are UNCHANGED from
+#  Phase 1/2.0-2.2 — the deployed frontend depends on both. What changed is
+#  invisible to it: the token now embeds project_id/org_id (auth.py), and
+#  signup provisions a real Organization/Project underneath (db.tenancy).
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/signup", response_model=AuthResponse)
@@ -148,18 +243,115 @@ async def signup(body: SignupRequest):
     except ValueError:
         raise HTTPException(status_code=409, detail="email already registered")
 
-    token = auth.create_token(email=user["email"], name=user["name"])
+    token = auth.create_token(
+        email=user["email"], name=user["name"],
+        project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],
+    )
     return AuthResponse(token=token, name=user["name"], email=user["email"])
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-async def login(body: LoginRequest):
+async def login(body: LoginRequest, request: Request):
+    """Credential-stuffing defense (plan §11.3): exponential backoff per
+    account AND per IP on failed attempts, checked BEFORE the password
+    verification runs — a locked-out attempt shouldn't pay for PBKDF2."""
+    client_ip = request.client.host if request.client else "unknown"
+    await rate_limit.check_login_backoff(body.email, client_ip)
+
     user = await db.authenticate_user(email=body.email, password=body.password)
     if user is None:
+        await rate_limit.record_login_failure(body.email, client_ip)
         raise HTTPException(status_code=401, detail="invalid email or password")
 
-    token = auth.create_token(email=user["email"], name=user["name"])
+    await rate_limit.clear_login_failures(body.email, client_ip)
+    token = auth.create_token(
+        email=user["email"], name=user["name"],
+        project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],
+    )
     return AuthResponse(token=token, name=user["name"], email=user["email"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /auth/token-pair, POST /auth/refresh, POST /auth/logout
+#
+#  Additive short-lived-access + rotating-refresh flow (plan §11.3) — for
+#  the SDK/CLI and any future frontend, not the current web login (see
+#  auth.py's module docstring on why /auth/login stays as it is).
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/token-pair", response_model=TokenPairResponse)
+async def issue_token_pair(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Exchanges a valid primary-session JWT for a short-lived access
+    token + rotating refresh token — the on-ramp to the additive flow
+    without requiring a second login."""
+    pair = await refresh.issue_token_pair(
+        current_user.user_id, current_user.email, current_user.name,
+        current_user.project_id, current_user.org_id,
+    )
+    return TokenPairResponse(
+        access_token=pair["accessToken"], refresh_token=pair["refreshToken"], expires_in=pair["expiresIn"]
+    )
+
+
+@app.post("/auth/refresh", response_model=TokenPairResponse)
+async def refresh_token_pair(body: RefreshRequest):
+    try:
+        pair = await refresh.rotate_refresh_token(body.refresh_token)
+    except refresh.RefreshError as e:
+        logger.warning("refresh_token_rejected", reason=str(e))
+        raise HTTPException(status_code=401, detail="invalid, expired, or reused refresh token")
+    return TokenPairResponse(
+        access_token=pair["accessToken"], refresh_token=pair["refreshToken"], expires_in=pair["expiresIn"]
+    )
+
+
+@app.post("/auth/logout")
+async def logout(body: RefreshRequest):
+    await refresh.revoke_family_for_token(body.refresh_token)
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  API key management — human/JWT-only (never an API key itself), and
+#  restricted to owner/admin members of the key's org (plan §14.2: members
+#  can use a project, only owner/admin can mint credentials for it).
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _require_admin(current_user: auth.CurrentUser) -> None:
+    role = await tenancy.get_membership_role(current_user.user_id, current_user.org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="owner or admin role required")
+
+
+@app.post("/api-keys", response_model=ApiKeyCreatedResponse)
+async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await _require_admin(current_user)
+    try:
+        key = await tenancy.create_api_key(
+            current_user.project_id, body.scopes, int(time.time()), environment=body.environment,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await audit_log_admin_action(current_user, "api_key.created", target=f"api_key:{key['id']}")
+    return ApiKeyCreatedResponse(id=key["id"], raw_key=key["rawKey"], last_four=key["lastFour"], scopes=key["scopes"])
+
+
+@app.get("/api-keys")
+async def list_api_keys(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await _require_admin(current_user)
+    keys = await tenancy.list_api_keys(current_user.project_id)
+    return {"keys": keys}
+
+
+@app.delete("/api-keys/{key_id}")
+async def revoke_api_key(key_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await _require_admin(current_user)
+    revoked = await tenancy.revoke_api_key(key_id, current_user.project_id, int(time.time()))
+    if not revoked:
+        raise HTTPException(status_code=404, detail="API key not found (or already revoked)")
+    await audit_log_admin_action(current_user, "api_key.revoked", target=f"api_key:{key_id}")
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,20 +359,56 @@ async def login(body: LoginRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _run_pipeline_background(task: str, run_id: str):
-    queue  = _run_queues[run_id]
+    """
+    Persists the run's terminal DB status (db.complete_run/fail_run) and
+    the PIPELINE_RUNS_TOTAL metric based on which event run_pipeline()
+    actually yielded — NOT on whether iterating it raised an exception.
+
+    agents/pipeline.py's run_pipeline() catches its OWN internal
+    exceptions (any LangGraph node failing — an LLM call, a tool call,
+    etc.) and yields a normal {"type": "error", ...} event instead of
+    letting the exception propagate; the generator then returns normally.
+    An earlier version of this function assumed "the async-for loop
+    finished without raising" meant success, calling db.complete_run()
+    only on an explicit "run_complete" event but otherwise falling
+    through to a blanket "completed" metric with NEITHER db.complete_run()
+    nor db.fail_run() ever called for the "error" case — a run that
+    failed this way stayed at status='running' in Postgres FOREVER (GET
+    /runs/{run_id} 404s "not yet complete" indefinitely), while
+    Prometheus recorded it as "completed". Caught via the Python SDK's
+    integration tests polling GET /runs/{run_id} right after a real
+    pipeline run failed on a real Groq rate limit — not a hypothetical.
+    """
+    bind_run_id(run_id)
     bridge = get_bridge()
+    observability.PIPELINE_RUNS_TOTAL.labels(status="started").inc()
+    start = time.monotonic()
+    tracer = observability.get_tracer(__name__)
+    succeeded = False
     try:
-        async for event in run_pipeline(task, run_id=run_id, bridge=bridge):
-            await queue.put(event)
-            if event.get("type") == "run_complete":
-                _run_results[run_id] = event
-                await db.complete_run(run_id, event, int(time.time()))
+        with tracer.start_as_current_span("pipeline_run") as span:
+            span.set_attribute("run_id", run_id)
+            async for event in run_pipeline(task, run_id=run_id, bridge=bridge):
+                await run_events.publish_event(run_id, event)
+                if event.get("type") == "run_complete":
+                    await db.complete_run(run_id, event, int(time.time()))
+                    succeeded = True
+                elif event.get("type") == "error":
+                    await db.fail_run(run_id, event.get("message", "pipeline error"), int(time.time()))
+        observability.PIPELINE_RUNS_TOTAL.labels(status="completed" if succeeded else "failed").inc()
     except Exception as e:
-        logger.error("[Pipeline] Background error for %s: %s", run_id, e)
-        await queue.put({"type": "error", "runId": run_id, "message": str(e)})
+        # A DIFFERENT failure mode from the one above: something raised
+        # that run_pipeline() itself did NOT catch (e.g. a bug in this
+        # function, or in run_events/db plumbing) — still needs the same
+        # fail_run()/error-event/metric handling, just via this path
+        # instead.
+        logger.error("pipeline_background_error", error=str(e))
+        observability.PIPELINE_RUNS_TOTAL.labels(status="failed").inc()
+        await run_events.publish_event(run_id, {"type": "error", "runId": run_id, "message": str(e)})
         await db.fail_run(run_id, str(e), int(time.time()))
     finally:
-        await queue.put(None)   # sentinel — closes the SSE stream
+        observability.PIPELINE_RUN_DURATION_SECONDS.observe(time.monotonic() - start)
+        await run_events.publish_terminal(run_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,60 +416,91 @@ async def _run_pipeline_background(task: str, run_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/run-agent", response_model=RunAgentResponse)
-async def run_agent(body: RunAgentRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+async def run_agent(
+    body: RunAgentRequest,
+    principal: auth.Principal = Depends(auth.get_current_principal),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    """Accepts either a human JWT or an API key with the `runs:write`
+    scope — an SDK-driven third-party agent never needs a human login to
+    start a run. Rate-limited and quota-checked per plan §11.4 (this
+    endpoint spends both LLM credits and gas — real money), and honors an
+    optional Idempotency-Key so a client's retried request after a
+    dropped response doesn't start the pipeline twice."""
+    auth.require_scope(principal, "runs:write")
     if not body.task.strip():
         raise HTTPException(status_code=400, detail="task cannot be empty")
 
-    run_id = body.run_id or make_run_id()
-    _run_queues[run_id] = asyncio.Queue()
-    await db.create_run(run_id, body.task, current_user.email, int(time.time()))
-    asyncio.create_task(_run_pipeline_background(body.task, run_id))
-    logger.info("[API] Run started: %s by %s — task: %s", run_id, current_user.email, body.task)
+    request_body_bytes = body.model_dump_json().encode()
 
-    return RunAgentResponse(
-        run_id=run_id,
-        task=body.task,
-        status="started",
-        stream_url=f"/stream/{run_id}",
+    if idempotency_key:
+        try:
+            cached = await idempotency.get_cached_response(
+                principal.project_id, idempotency_key, "POST", "/run-agent", request_body_bytes,
+            )
+        except idempotency.IdempotencyConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if cached is not None:
+            return cached["body"]
+
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:run-agent:{principal.project_id}",
+        settings.run_agent_rate_limit_capacity,
+        settings.run_agent_rate_limit_refill_per_second,
     )
+
+    window_start = int(time.time()) - 30 * 24 * 3600
+    run_count = await tenancy.count_org_runs_in_window(principal.org_id, window_start)
+    if run_count >= settings.monthly_run_quota_per_org:
+        raise HTTPException(status_code=429, detail="monthly run quota exceeded for this organization")
+
+    run_id = body.run_id or make_run_id()
+    user_email = principal.actor if not principal.is_api_key else None
+    await db.create_run(run_id, principal.project_id, body.task, user_email, int(time.time()))
+    asyncio.create_task(_run_pipeline_background(body.task, run_id))
+    logger.info("run_started", run_id=run_id, actor=principal.actor, project_id=principal.project_id, task=body.task)
+
+    response = RunAgentResponse(run_id=run_id, task=body.task, status="started", stream_url=f"/stream/{run_id}")
+
+    if idempotency_key:
+        await idempotency.store_response(
+            principal.project_id, idempotency_key, "POST", "/run-agent", request_body_bytes,
+            200, response.model_dump(), int(time.time()),
+        )
+
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  GET /stream/{run_id}  — SSE
+#  GET /stream/{run_id}  — SSE, backed by Redis Streams (run_events.py)
+#
+#  Deliberately unauthenticated, unlike every other endpoint below: browser
+#  EventSource cannot attach an Authorization header, so the frontend
+#  connects here with nothing but the run_id from POST /run-agent's
+#  response. This predates multi-tenancy and stays as-is (a real fix needs
+#  a short-lived signed stream token the frontend would have to adopt —
+#  out of scope for this backend-only pass). It leaks no listing, only the
+#  live event stream for one specific already-known run_id.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/stream/{run_id}")
 async def stream_events(run_id: str):
-    # Wait briefly for queue to appear (race condition on fast clients)
-    for _ in range(20):
-        if run_id in _run_queues:
-            break
-        await asyncio.sleep(0.1)
-
-    if run_id not in _run_queues:
-        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
-
-    queue = _run_queues[run_id]
-
     async def event_generator():
         try:
-            while True:
-                event = await asyncio.wait_for(queue.get(), timeout=120)
-                if event is None:
-                    # FIX 3: was yielding "data: [DONE]\n\n" as a plain string.
-                    # useAgentStream's openAgentStream generator checks for
-                    # parsed.type === "run_complete" to detect end-of-stream.
-                    # A plain [DONE] string fails JSON.parse and throws in the
-                    # generator, causing an unhandled error instead of clean close.
-                    # Yield a proper JSON run_complete event instead.
-                    yield f"data: {json.dumps({'type': 'run_complete', 'runId': run_id})}\n\n"
-                    break
+            async for event in run_events.read_events(run_id, timeout_seconds=120):
                 yield f"data: {json.dumps(event)}\n\n"
-        except asyncio.TimeoutError:
-            logger.warning("[SSE] Timeout for run %s", run_id)
+            # Stream ended via the terminal marker (run_events.publish_terminal)
+            # — was yielding a plain "data: [DONE]\n\n" string before Phase 1's
+            # fix; useAgentStream's generator checks parsed.type ===
+            # "run_complete" to detect end-of-stream, and a non-JSON [DONE]
+            # fails that parse and throws instead of closing cleanly.
+            yield f"data: {json.dumps({'type': 'run_complete', 'runId': run_id})}\n\n"
+        except TimeoutError:
+            logger.warning("sse_stream_timeout", run_id=run_id)
             yield f"data: {json.dumps({'type': 'error', 'runId': run_id, 'message': 'stream timeout'})}\n\n"
         except asyncio.CancelledError:
-            logger.info("[SSE] Client disconnected from run %s", run_id)
+            logger.info("sse_client_disconnected", run_id=run_id)
 
     return StreamingResponse(
         event_generator(),
@@ -258,49 +517,47 @@ async def stream_events(run_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  GET /audit-log
+#  GET /audit-log — read model (steps + anchor_batches), not a live V1 call.
+#  See db/read_model.py's module docstring for what stays on the live V1
+#  bridge instead (/verify, /verify/tamper-demo, /verify-audit) and why.
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Replace the GET /audit-log endpoint in main.py with this:
 
 @app.get("/audit-log")
 async def get_audit_log(
-    run_id: Optional[str] = Query(None)
+    run_id: Optional[str] = Query(None),
+    principal: auth.Principal = Depends(auth.get_current_principal),
 ):
-    """
-    Returns on-chain audit entries.
-    If run_id provided → uses getRunRecordIndices() (fast, 2 RPC calls).
-    If no run_id → fetches all records (slower, use for audit history page).
-    """
-    bridge = get_bridge()
+    """Returns anchored-audit entries from Postgres — populated by the
+    outbox (agents/base.py::log_step) and kept current by the anchor
+    worker + indexer, not fetched from the chain on every request.
+    Scoped to the caller's project (invariant I7) — a run_id belonging to
+    another project returns an empty result, same as one that never
+    existed at all."""
+    auth.require_scope(principal, "runs:read")
     try:
-        if run_id:
-            # FIX: use run-specific fetch — 2 RPC calls instead of N
-            entries = await bridge.get_run_audit_entries(run_id)
-        else:
-            entries = await bridge.get_all_audit_entries()
+        entries = await read_model.get_audit_log_entries(principal.project_id, run_id=run_id)
         return {"entries": entries, "total": len(entries)}
     except Exception as e:
-        logger.error("[API] audit-log error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="audit-log", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  GET /trust-scores
 # ─────────────────────────────────────────────────────────────────────────────
 
-# GET /trust-scores
 @app.get("/trust-scores")
 async def get_trust_scores(
-    run_id: str = Query(..., description="Run ID to fetch scores for")
+    run_id: str = Query(..., description="Run ID to fetch scores for"),
+    principal: auth.Principal = Depends(auth.get_current_principal),
 ):
-    bridge = get_bridge()
+    auth.require_scope(principal, "runs:read")
     try:
-        scores = await bridge.get_all_scores(run_id)  # already async — no to_thread
+        scores = await read_model.get_trust_scores(principal.project_id, run_id)
         return {"runId": run_id, "scores": scores}
     except Exception as e:
-        logger.error("[API] trust-scores error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="trust-scores", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,15 +566,16 @@ async def get_trust_scores(
 
 @app.get("/trust-scores/history")
 async def get_trust_score_history(
-    run_id: str = Query(..., description="Run ID to fetch score history for")
+    run_id: str = Query(..., description="Run ID to fetch score history for"),
+    principal: auth.Principal = Depends(auth.get_current_principal),
 ):
-    bridge = get_bridge()
+    auth.require_scope(principal, "runs:read")
     try:
-        history = await bridge.get_all_score_histories(run_id)
+        history = await read_model.get_trust_score_history(principal.project_id, run_id)
         return {"runId": run_id, "history": history}
     except Exception as e:
-        logger.error("[API] trust-scores/history error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="trust-scores/history", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,18 +583,24 @@ async def get_trust_score_history(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/leaderboard")
-async def get_leaderboard(max_runs: int = Query(50, ge=1, le=500)):
+async def get_leaderboard(
+    max_runs: int = Query(50, ge=1, le=500),
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
     """
-    Aggregates per-agent scores across recent runs from TrustScoreRegistry.
-    If totalRuns > runsConsidered, only the most recent `max_runs` runs were
-    aggregated — surfaced explicitly so the UI never silently under-reports.
+    Aggregates per-agent scores across recent runs IN THE CALLER'S PROJECT
+    from the read model. If totalRuns > runsConsidered, only the most
+    recent `max_runs` runs were aggregated — surfaced explicitly so the UI
+    never silently under-reports. Prior to multi-tenancy this aggregated
+    every run system-wide, which — now that there's more than one tenant
+    — would itself be an invariant-I7 violation, not a feature to preserve.
     """
-    bridge = get_bridge()
+    auth.require_scope(principal, "runs:read")
     try:
-        return await bridge.get_leaderboard(max_runs=max_runs)
+        return await read_model.get_leaderboard(principal.project_id, max_runs=max_runs)
     except Exception as e:
-        logger.error("[API] leaderboard error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="leaderboard", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,8 +614,8 @@ async def verify_integrity(body: VerifyRequest):
         result = await bridge.verify_run(body.runId)  # already async
         return result
     except Exception as e:
-        logger.error("[API] verify error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="verify", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 @app.get("/verify/tamper-demo")
@@ -367,8 +631,8 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        logger.error("[API] tamper-demo error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="tamper-demo", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 @app.get("/verify-audit")
@@ -379,7 +643,7 @@ async def verify_audit(run_id: str = Query(...)):
         indices = await asyncio.to_thread(
             bridge.audit_log.functions.getRunRecordIndices(run_id).call
         )
-        logger.info("[verify-audit] run %s → %d indices", run_id, len(indices))
+        logger.info("verify_audit_indices_fetched", run_id=run_id, count=len(indices))
 
         if not indices:
             return {"runId": run_id, "allMatch": True, "entries": []}
@@ -419,8 +683,8 @@ async def verify_audit(run_id: str = Query(...)):
         return {"runId": run_id, "allMatch": all_match, "entries": results}
 
     except Exception as e:
-        logger.error("[API] verify-audit error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("api_error", endpoint="verify-audit", error=str(e))
+        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -434,7 +698,7 @@ async def chain_status():
     DISCONNECTED in the UI means this endpoint is failing or unreachable.
     Most common causes: backend not running, CORS blocked, bridge error.
     """
-    rpc_url = os.getenv("MONAD_RPC_URL", "https://testnet-rpc.monad.xyz")
+    rpc_url = get_settings().monad_rpc_url
     try:
         bridge = get_bridge()
         # FIX 6: bridge.w3.eth.block_number and chain_id are SYNCHRONOUS.
@@ -451,7 +715,7 @@ async def chain_status():
             "contractsDeployed": 3,
         }
     except Exception as e:
-        logger.error("[API] chain-status error: %s", e)
+        logger.error("api_error", endpoint="chain-status", error=str(e))
         # Return disconnected shape — never 500 on this endpoint.
         # Frontend handles connected: false gracefully.
         return {
@@ -480,24 +744,68 @@ async def health():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  GET /ready  — readiness probe: are this process's real dependencies up?
+#
+#  Distinct from /health, which is a liveness-flavored check that also
+#  happens to touch the chain. /ready is what an orchestrator should gate
+#  traffic on: it checks the database (the one dependency every request
+#  path actually needs) and reports chain reachability as informational,
+#  not blocking — a chain outage degrades specific endpoints, it shouldn't
+#  take the whole process out of rotation, matching how the rest of this
+#  file already treats bridge failures as non-fatal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/ready")
+async def ready():
+    checks: dict[str, dict] = {}
+    ok = True
+
+    try:
+        await db.ping()
+        checks["database"] = {"ok": True}
+    except Exception as e:
+        checks["database"] = {"ok": False, "error": str(e)}
+        ok = False
+
+    try:
+        bridge = get_bridge()
+        await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+        checks["chain"] = {"ok": True}
+    except Exception as e:
+        checks["chain"] = {"ok": False, "error": str(e)}
+        # informational only — does not flip overall readiness
+
+    return {"ready": ok, "checks": checks}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  GET /runs, GET /runs/{run_id}
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/runs")
-async def list_runs(limit: int = Query(50, ge=1, le=200)):
-    """Run history — survives backend restarts (persisted in SQLite)."""
-    runs = await db.list_runs(limit=limit)
+async def list_runs(
+    limit: int = Query(50, ge=1, le=200),
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
+    """Run history, scoped to the caller's project (invariant I7) —
+    survives backend restarts (persisted in Postgres)."""
+    auth.require_scope(principal, "runs:read")
+    runs = await db.list_runs(principal.project_id, limit=limit)
     return {"runs": runs, "total": len(runs)}
 
 
 @app.get("/runs/{run_id}")
-async def get_run(run_id: str):
-    # Fast path: this process's own in-memory cache for a just-completed run.
-    if run_id in _run_results:
-        return _run_results[run_id]
+async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
+    auth.require_scope(principal, "runs:read")
 
-    # Fallback: SQLite — survives restarts, covers runs from prior processes.
-    run = await db.get_run(run_id)
+    # Always reads Postgres, scoped by project_id (invariant I7) — no
+    # in-process cache. The old in-memory _run_results fast path had the
+    # same cross-replica blind spot Redis Streams just fixed for SSE (a
+    # second API replica never sees another replica's in-memory writes),
+    # and db.complete_run/fail_run already commit synchronously right
+    # when the terminal event is produced, so the "fast path" bought
+    # negligible latency at the cost of that correctness gap.
+    run = await db.get_run(run_id, principal.project_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
     if run["status"] == "running":

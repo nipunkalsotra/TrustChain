@@ -7,7 +7,6 @@ Matches the ACTUAL deployed contracts on Monad testnet.
   - AgentIdentityRegistry  → registerAgent() / verify()
 """
 
-import os
 import json
 import asyncio
 import logging
@@ -16,11 +15,9 @@ from typing import Optional
 
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
-from dotenv import load_dotenv
 
 from blockchain.hashing_utils import AGENTS, compute_hash
-
-load_dotenv()
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +27,17 @@ _AGENT_CONFIGS = {a["agentId"]: a for a in AGENTS}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config
+#
+#  NOTE: this whole module is a Phase-1 holdover. Once the outbox pattern +
+#  anchor worker land (Phase 2.1), writes move out of BlockchainBridge
+#  entirely and this file gets trimmed to the read-only helpers still used
+#  by /verify and the tamper demo. Not restructuring it further than a
+#  config-source swap right now to avoid rewriting code that's about to be
+#  replaced anyway.
 # ─────────────────────────────────────────────────────────────────────────────
 
-RPC_URL       = os.getenv("MONAD_RPC_URL", "https://testnet-rpc.monad.xyz")
-PRIVATE_KEY   = os.getenv("PRIVATE_KEY", "")
+RPC_URL       = get_settings().monad_rpc_url
+PRIVATE_KEY   = get_settings().private_key
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
 
 # ─────────────────────────────────────────────────────────────────────────────

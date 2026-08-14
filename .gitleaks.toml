@@ -1,0 +1,23 @@
+# gitleaks config — extends the default ruleset (plan §11.7: "Secret
+# scanning (gitleaks) runs in CI and on pre-commit").
+#
+# The one allowlisted pattern below is Anvil's well-known default account
+# #0 private key — a PUBLIC, documented constant that ships with Foundry
+# itself and only ever holds funds on throwaway local chains Anvil spins
+# up for this repo's own tests/CI/local dev (see backend/tests/conftest.py,
+# docker-compose.yml, .github/workflows/test.yml — all deliberately use
+# it). It is not a secret; without this allowlist entry, gitleaks would
+# flag it as a "detected private key" on every commit that touches any of
+# those files, which would either break CI outright or train reviewers to
+# reflexively dismiss gitleaks findings — both worse outcomes than
+# excluding one specific, known-public, zero-value key by name.
+title = "TrustChain gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-public, zero-value test credentials"
+regexes = [
+  '''0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+]

@@ -1,0 +1,20 @@
+# Local Anvil chain for dev/CI — not a production dependency, this container
+# never talks to Monad. Built via foundryup rather than pulling a prebuilt
+# image (e.g. ghcr.io/foundry-rs/foundry) so it doesn't depend on that
+# registry's availability; foundryup pulls from GitHub releases directly.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV FOUNDRY_DIR=/root/.foundry
+ENV PATH="${FOUNDRY_DIR}/bin:${PATH}"
+
+RUN curl -L https://foundry.paradigm.xyz | bash \
+    && foundryup
+
+EXPOSE 8545
+
+ENTRYPOINT ["anvil", "--host", "0.0.0.0", "--chain-id", "31337"]

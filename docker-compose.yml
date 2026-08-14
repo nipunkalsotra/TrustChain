@@ -1,0 +1,201 @@
+# TrustChain local development stack: postgres (write + read model), anvil
+# (local chain — never Monad testnet in CI/dev-by-default), redis (SSE
+# event bus across API replicas + rate limiting — see backend/run_events.py
+# and backend/rate_limit.py), the API, the anchor worker, the indexer, and
+# both MCP servers /run-agent needs to actually complete a pipeline run.
+#
+# The anchor worker and indexer both need V2 contracts already deployed to
+# `anvil` and their addresses recorded at backend/contracts/addresses_v2.json
+# before they can do anything useful — see contracts/script/DeployV2.s.sol.
+# Both degrade to a harmless retry loop (logged, not crash-looping) if that
+# file is missing.
+#
+# Usage:
+#   docker compose up --build
+#   docker compose down -v   # -v also drops the postgres volume
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: trustchain
+      POSTGRES_PASSWORD: trustchain
+      POSTGRES_DB: trustchain
+    ports:
+      - "5432:5432"
+    volumes:
+      - trustchain_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustchain -d trustchain"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  anvil:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.anvil
+    ports:
+      - "8545:8545"
+    healthcheck:
+      # anvil has no HTTP health endpoint; a JSON-RPC eth_blockNumber call
+      # is the standard liveness probe for it.
+      test: >
+        curl -sf -X POST -H "Content-Type: application/json"
+        --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        http://localhost:8545 | grep -q result
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mcp-search:
+    build:
+      context: ./mcp_servers/web_search
+    env_file:
+      - path: ./mcp_servers/web_search/.env
+        required: false
+    ports:
+      - "8001:8001"
+
+  mcp-blockchain:
+    build:
+      context: .
+      dockerfile: mcp_servers/blockchain/Dockerfile
+    env_file:
+      # Same V1 testnet creds as `api`'s BlockchainBridge — this server
+      # wraps the identical blockchain/client.py, so it needs the same
+      # MONAD_RPC_URL/PRIVATE_KEY, not the V2/Anvil pair.
+      - path: ./backend/.env
+        required: false
+    ports:
+      - "8002:8002"
+
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
+      REDIS_URL: redis://redis:6379/0
+      # V1's BlockchainBridge (still used by /verify, /verify/tamper-demo,
+      # /verify-audit) keeps reading MONAD_RPC_URL/PRIVATE_KEY from .env —
+      # the real testnet, where V1 was actually deployed. agents/scorer.py's
+      # V2 score writes (blockchain/score_writer.py -> anchor_worker.chain)
+      # need a *separate* pointer at `anvil`, where V2 was deployed for
+      # local dev — see config.py's v2_rpc_url/v2_private_key docstring.
+      V2_RPC_URL: http://anvil:8545
+      V2_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # "localhost" inside this container is the container itself, not the
+      # mcp-search/mcp-blockchain containers — override config.py's
+      # localhost-default MCP URLs to the sibling services' Compose names.
+      MCP_SEARCH_URL: http://mcp-search:8001/mcp
+      MCP_BLOCKCHAIN_URL: http://mcp-blockchain:8002/mcp
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+      mcp-search:
+        condition: service_started
+      mcp-blockchain:
+        condition: service_started
+    healthcheck:
+      # /ready, not /health — readiness only hard-requires the database
+      # (chain is informational there), so this doesn't flap on RPC hiccups.
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  anchor-worker:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "anchor_worker.main"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
+      MONAD_RPC_URL: http://anvil:8545
+      # Anvil's well-known default account #0 — public, funded only on
+      # local chains anvil itself spins up. DeployV2.s.sol grants this
+      # account ANCHOR_ROLE when RELAYER_ADDRESS is left unset (the local
+      # dev default). Overridden here, not read from backend/.env, because
+      # .env's PRIVATE_KEY is the real testnet deployer key `api` uses for
+      # V1's BlockchainBridge — the anchor worker talks to `anvil`, not
+      # Monad testnet, in this compose file.
+      PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    ports:
+      - "9101:9101"   # Prometheus /metrics — see backend/observability.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+
+  indexer:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "indexer.main"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
+      MONAD_RPC_URL: http://anvil:8545
+    ports:
+      - "9102:9102"   # Prometheus /metrics — see backend/observability.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+      - anchor-worker
+      - indexer
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      # Host 3002, not 3001 — main.py's CORS allowlist documents 3001 as
+      # the Next.js dev server's alt port; avoid colliding with it for
+      # anyone running frontend dev alongside this compose file.
+      - "3002:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  trustchain_postgres_data:

@@ -1,0 +1,136 @@
+{
+  "title": "TrustChain",
+  "uid": "trustchain-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP request rate by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(http_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP request duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Pipeline runs by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(pipeline_runs_total[15m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Pipeline run duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pipeline_run_duration_seconds_bucket[15m])))",
+          "legendFormat": "p95 duration"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Rate limit rejections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(rate_limit_rejections_total[5m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Anchor outbox pending",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "anchor_outbox_pending",
+          "legendFormat": "pending steps"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Anchor batches submitted vs failed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(anchor_batches_submitted_total[15m])",
+          "legendFormat": "submitted"
+        },
+        {
+          "expr": "sum by (reason) (rate(anchor_batches_failed_total[15m]))",
+          "legendFormat": "failed ({{reason}})"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Anchor submit duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(anchor_submit_duration_seconds_bucket[15m])))",
+          "legendFormat": "p95 submit->confirm"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Indexer poll lag (blocks)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "expr": "indexer_poll_lag_blocks",
+          "legendFormat": "lag"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Indexer events processed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "expr": "sum by (event_type) (rate(indexer_events_processed_total[15m]))",
+          "legendFormat": "{{event_type}}"
+        }
+      ]
+    }
+  ]
+}
