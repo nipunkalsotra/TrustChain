@@ -68,7 +68,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Slither
-        run: pip install slither-analyzer==0.11.6
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" slither-analyzer==0.11.6
       - name: Run Slither (static analysis)
         # Scans the whole contracts/ tree (V1 + v2/). Verified locally: 0
         # High/Medium findings once excluding Optimization/Low/Informational
@@ -133,7 +133,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
         working-directory: backend
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -357,7 +357,7 @@ jobs:
             sleep 1
           done
       - name: Install backend dependencies (for alembic)
-        run: pip install -r requirements-dev.txt
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
         working-directory: backend
       - name: Apply database migrations (creates trustchain_api + RLS policies)
         run: alembic upgrade head
@@ -400,7 +400,7 @@ jobs:
           done
       - name: Run Python SDK tests
         run: |
-          pip install -e ".[dev]"
+          bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -e ".[dev]"
           pytest tests/ -v
         working-directory: sdk/python
       - name: Run TypeScript SDK tests
@@ -422,7 +422,7 @@ jobs:
         # V1 BlockchainBridge — see blockchain/client.py) with headroom;
         # verified locally at 0 errors, exit 0.
         run: |
-          pip install schemathesis==4.24.3
+          bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" schemathesis==4.24.3
           schemathesis run http://localhost:8000/openapi.json \
             --max-examples=5 --request-timeout=15 \
             --exclude-path-regex "run-agent|stream" \
@@ -436,7 +436,7 @@ jobs:
         # of this repo), not something to silently gate on before anyone's
         # triaged them. Same visible-but-non-fatal pattern as gitleaks/
         # npm audit above — runs and is tracked, not absent.
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: trustchain-api:latest
