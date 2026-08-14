@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # replicas, which is exactly the kind of "looks fine in a demo, breaks
     # in production" bug this phase exists to remove.
     jwt_secret: str = Field(...)
+    # iss/aud are validated on every decode (see auth.decode_token) so a
+    # token minted for a different TrustChain deployment/environment that
+    # happens to share this JWT_SECRET (e.g. a staging secret reused by
+    # accident) is rejected rather than silently accepted as valid here.
+    jwt_issuer: str = Field(default="trustchain-api")
+    jwt_audience: str = Field(default="trustchain-clients")
 
     # ── LLM / search providers ──────────────────────────────────────────
     # "groq" is the only implementation today — see
@@ -86,6 +92,12 @@ class Settings(BaseSettings):
     # ── Blockchain ───────────────────────────────────────────────────────
     monad_rpc_url: str = Field(default="https://testnet-rpc.monad.xyz")
     private_key: str = Field(default="")  # dev-only signer; see blockchain/signer.py
+    # Comma-separated additional RPC endpoints, tried in order after
+    # monad_rpc_url/v2_rpc_url when the primary's circuit breaker is open —
+    # see blockchain/resilient_provider.py. Empty (the default) means
+    # single-endpoint, no failover, exactly today's behavior.
+    monad_rpc_fallback_urls: str = Field(default="")
+    v2_rpc_fallback_urls: str = Field(default="")
 
     # V1 (blockchain/client.py's BlockchainBridge) and V2 (anchor_worker/,
     # indexer/, scorer.py's score writes) can legitimately point at
@@ -109,15 +121,25 @@ class Settings(BaseSettings):
     # the respective cloud KMS at all times; see blockchain/signer.py's
     # AwsKmsSigner/GcpKmsSigner. kms_key_id is the KMS key id (AWS) or full
     # CryptoKeyVersion resource path (GCP) — required for either KMS backend.
+    # "vault_kv" fetches the raw key from HashiCorp Vault's KV v2 engine at
+    # startup instead of a plaintext .env file — see VaultKvSigner's own
+    # docstring for why this is Vault-backed key CUSTODY, not Vault-backed
+    # SIGNING like the two KMS backends above (Vault OSS's Transit engine,
+    # the actual equivalent, doesn't support secp256k1).
     signer_backend: str = Field(default="local")
     kms_key_id: str = Field(default="")
     kms_region: Optional[str] = Field(default=None)  # AWS only; GCP resolves region from kms_key_id
+    vault_addr: str = Field(default="")
+    vault_token: str = Field(default="")
+    vault_secret_path: str = Field(default="")
+    vault_mount_point: str = Field(default="secret")
+    vault_key_field: str = Field(default="private_key")
 
     @field_validator("signer_backend")
     @classmethod
     def _validate_signer_backend(cls, v: str) -> str:
-        if v not in ("local", "aws_kms", "gcp_kms"):
-            raise ValueError(f"signer_backend must be 'local', 'aws_kms', or 'gcp_kms' (got {v!r})")
+        if v not in ("local", "aws_kms", "gcp_kms", "vault_kv"):
+            raise ValueError(f"signer_backend must be 'local', 'aws_kms', 'gcp_kms', or 'vault_kv' (got {v!r})")
         return v
 
     # ── CORS ─────────────────────────────────────────────────────────────
@@ -182,6 +204,25 @@ class Settings(BaseSettings):
     @property
     def resolved_v2_rpc_url(self) -> str:
         return self.v2_rpc_url or self.monad_rpc_url
+
+    @staticmethod
+    def _parse_fallback_urls(raw: str) -> list[str]:
+        return [url.strip() for url in raw.split(",") if url.strip()]
+
+    @property
+    def resolved_v2_rpc_urls(self) -> list[str]:
+        """Primary + fallbacks, in try-order, de-duplicated. A single-item
+        list (today's default) makes blockchain/resilient_provider.py's
+        FallbackHTTPProvider behave exactly like a plain HTTPProvider —
+        the resilience layer is opt-in via config, not a behavior change
+        for anyone who hasn't set *_RPC_FALLBACK_URLS."""
+        urls = [self.resolved_v2_rpc_url, *self._parse_fallback_urls(self.v2_rpc_fallback_urls)]
+        return list(dict.fromkeys(urls))
+
+    @property
+    def resolved_monad_rpc_urls(self) -> list[str]:
+        urls = [self.monad_rpc_url, *self._parse_fallback_urls(self.monad_rpc_fallback_urls)]
+        return list(dict.fromkeys(urls))
 
     @property
     def resolved_v2_private_key(self) -> str:

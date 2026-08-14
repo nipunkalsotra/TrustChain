@@ -20,13 +20,13 @@ from functools import lru_cache
 from web3 import Web3
 
 from blockchain.contracts_v2 import build_contract, build_w3
-from blockchain.signer import AwsKmsSigner, GcpKmsSigner, LocalKeySigner, Signer
+from blockchain.signer import AwsKmsSigner, GcpKmsSigner, LocalKeySigner, Signer, VaultKvSigner
 from config import get_settings
 
 
 @lru_cache
 def get_w3() -> Web3:
-    return build_w3(get_settings().resolved_v2_rpc_url)
+    return build_w3(get_settings().resolved_v2_rpc_urls)
 
 
 @lru_cache
@@ -50,6 +50,17 @@ def get_signer() -> Signer:
             raise ValueError("KMS_KEY_ID not set in .env (required for SIGNER_BACKEND=gcp_kms)")
         return GcpKmsSigner(settings.kms_key_id, get_w3())
 
+    if backend == "vault_kv":
+        if not (settings.vault_addr and settings.vault_token and settings.vault_secret_path):
+            raise ValueError(
+                "VAULT_ADDR, VAULT_TOKEN, and VAULT_SECRET_PATH must all be set in .env "
+                "(required for SIGNER_BACKEND=vault_kv)"
+            )
+        return VaultKvSigner(
+            settings.vault_addr, settings.vault_token, settings.vault_secret_path, get_w3(),
+            mount_point=settings.vault_mount_point, key_field=settings.vault_key_field,
+        )
+
     if not settings.resolved_v2_private_key:
         raise ValueError("PRIVATE_KEY (or V2_PRIVATE_KEY) not set in .env")
     return LocalKeySigner(settings.resolved_v2_private_key, get_w3())
@@ -63,3 +74,8 @@ def get_audit_log_contract():
 @lru_cache
 def get_trust_score_contract():
     return build_contract(get_w3(), "TrustScoreRegistryV2")
+
+
+@lru_cache
+def get_identity_registry_contract():
+    return build_contract(get_w3(), "AgentIdentityRegistryV2")

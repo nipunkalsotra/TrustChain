@@ -169,6 +169,47 @@ export class TrustChainClient {
     return this.request("GET", "/audit-log", { params: runId ? { run_id: runId } : {} });
   }
 
+  /** Low-level — takes an already-computed codeHash. Most callers want
+   * the instrumentation TrustChain class's registerAgent (which hashes
+   * {agentId, model, version, systemPrompt} client-side first, never
+   * sending the raw prompt) rather than this directly. */
+  async registerAgent(agentId: string, codeHash: string, model: string, version: string): Promise<{ agent_id: string; tx_hash: string }> {
+    return this.request("POST", "/agents", {
+      json: { agent_id: agentId, code_hash: codeHash, model, version },
+    });
+  }
+
+  async verifyAgentOnchain(agentId: string, codeHash: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/agents/${encodeURIComponent(agentId)}/verify`, { params: { code_hash: codeHash } });
+  }
+
+  /** Low-level, synchronous SDK-ingest call (POST /steps) — most callers
+   * want the instrumentation TrustChain class's log() (non-blocking by
+   * default) rather than this directly. */
+  async logStep(options: {
+    runId: string; agentId: string; action: string; input: string; output: string;
+    trustScore?: number; idempotencyKey?: string;
+  }): Promise<{ step_id: number; outbox_id: number; status: string; anchor_status: string }> {
+    return this.request("POST", "/steps", {
+      json: {
+        run_id: options.runId, agent_id: options.agentId, action: options.action,
+        input: options.input, output: options.output, trust_score: options.trustScore ?? 0,
+      },
+      headers: options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {},
+    });
+  }
+
+  async getStepProof(stepId: number): Promise<Record<string, unknown>> {
+    return this.request("GET", `/steps/${stepId}/proof`);
+  }
+
+  /** GET /stats — public, no auth required (this call still sends the
+   * configured API key like every other method here; the endpoint
+   * simply ignores it). */
+  async platformStats(): Promise<{ totalRuns: number; totalSteps: number; totalAnchoredBatches: number }> {
+    return this.request("GET", "/stats");
+  }
+
   /**
    * Yields parsed SSE events for a run as they arrive. Deliberately
    * unauthenticated on the server side (see main.py's stream_events

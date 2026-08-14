@@ -1,16 +1,30 @@
 # gitleaks config — extends the default ruleset (plan §11.7: "Secret
 # scanning (gitleaks) runs in CI and on pre-commit").
 #
-# The one allowlisted pattern below is Anvil's well-known default account
-# #0 private key — a PUBLIC, documented constant that ships with Foundry
-# itself and only ever holds funds on throwaway local chains Anvil spins
-# up for this repo's own tests/CI/local dev (see backend/tests/conftest.py,
-# docker-compose.yml, .github/workflows/test.yml — all deliberately use
-# it). It is not a secret; without this allowlist entry, gitleaks would
-# flag it as a "detected private key" on every commit that touches any of
-# those files, which would either break CI outright or train reviewers to
-# reflexively dismiss gitleaks findings — both worse outcomes than
-# excluding one specific, known-public, zero-value key by name.
+# Two allowlisted patterns, both verified against a real `gitleaks detect`
+# run over this repo's actual commit history (docker run zricethezav/
+# gitleaks:latest detect --source=. -v — not just the working tree, which
+# would also flag gitignored build artifacts like frontend/.next/ that
+# were never a CI concern to begin with):
+#
+#   1. Anvil's well-known default account #0 private key — a PUBLIC,
+#      documented constant that ships with Foundry itself and only ever
+#      holds funds on throwaway local chains Anvil spins up for this
+#      repo's own tests/CI/local dev (backend/tests/conftest.py,
+#      docker-compose.yml, .github/workflows/test.yml). Matched with and
+#      without the `0x` prefix — the real scan caught both forms in use
+#      (e.g. backend/tests/test_kms_signer.py's hex-only anvil_key_hex),
+#      and the original 0x-only regex silently missed the bare-hex one.
+#   2. A second, arbitrary throwaway key (TEST_KEY_HEX in
+#      backend/tests/test_kms_signer.py and test_vault_signer.py) used
+#      purely to produce a deterministic signature for byte-for-byte
+#      comparison against KMS/Vault-backed signers — never funded on any
+#      real network, not derived from anything sensitive.
+#
+# Without these, gitleaks flags a "detected private key" on every commit
+# touching any of those files — which would either break CI outright or
+# train reviewers to reflexively dismiss gitleaks findings, both worse
+# than excluding two specific, known-public, zero-value keys by name.
 title = "TrustChain gitleaks config"
 
 [extend]
@@ -19,5 +33,6 @@ useDefault = true
 [allowlist]
 description = "Known-public, zero-value test credentials"
 regexes = [
-  '''0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+  '''(0x)?ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+  '''4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318''',
 ]

@@ -148,6 +148,45 @@ class TrustChainClient(_BaseClient):
         params = {"run_id": run_id} if run_id else {}
         return self._request("GET", "/audit-log", params=params)
 
+    def register_agent(self, agent_id: str, code_hash: str, model: str, version: str) -> dict:
+        """Low-level — takes an already-computed code_hash. Most callers
+        want trustchain_sdk.TrustChain.register_agent (which hashes
+        {agentId, model, version, systemPrompt} client-side first, never
+        sending the raw prompt) rather than this directly."""
+        return self._request(
+            "POST", "/agents",
+            json={"agent_id": agent_id, "code_hash": code_hash, "model": model, "version": version},
+        )
+
+    def verify_agent(self, agent_id: str, code_hash: str) -> dict:
+        return self._request("GET", f"/agents/{agent_id}/verify", params={"code_hash": code_hash})
+
+    def log_step(
+        self, run_id: str, agent_id: str, action: str, input: str, output: str,  # noqa: A002
+        trust_score: int = 0, idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """Low-level, synchronous SDK-ingest call (POST /steps) — most
+        callers want trustchain_sdk.TrustChain.log (non-blocking by
+        default) rather than this directly."""
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request(
+            "POST", "/steps",
+            json={
+                "run_id": run_id, "agent_id": agent_id, "action": action,
+                "input": input, "output": output, "trust_score": trust_score,
+            },
+            headers=headers,
+        )
+
+    def get_step_proof(self, step_id: int) -> dict:
+        return self._request("GET", f"/steps/{step_id}/proof")
+
+    def platform_stats(self) -> dict:
+        """GET /stats — public, no auth required (this call still sends
+        the configured API key/JWT like every other method here, which
+        the endpoint simply ignores)."""
+        return self._request("GET", "/stats")
+
     def stream(self, run_id: str, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS) -> Iterator[dict]:
         """Yields parsed SSE events for a run as they arrive. Deliberately
         unauthenticated on the server side (see main.py's stream_events

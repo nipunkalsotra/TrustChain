@@ -237,6 +237,62 @@ class AwsKmsSigner:
         return _sign_via_kms_digest(transaction, self.address, sign_digest)
 
 
+class VaultKvSigner:
+    """Signs with a raw private key fetched from HashiCorp Vault's KV v2
+    secrets engine, held in process memory for this signer's lifetime —
+    the private key itself never sits in a plaintext .env file or
+    docker-compose environment variable, and every fetch is gated by
+    Vault's own access policies and recorded in Vault's audit log.
+
+    HONEST LIMITATION vs AwsKmsSigner/GcpKmsSigner above: those never let
+    the raw key leave the cloud KMS at all — only a digest goes in, a
+    signature comes out. Vault's OSS Transit secrets engine is the
+    would-be equivalent ("sign without ever exposing the key"), but its
+    supported key types are ed25519/ecdsa-p256/ecdsa-p384/ecdsa-p521/rsa —
+    NOT secp256k1, the curve Ethereum uses — as of any current open-source
+    Vault release. So this is Vault-backed key CUSTODY (fetch once at
+    startup, sign locally after that, same trust boundary as
+    LocalKeySigner from that point on), not Vault-backed signing. Still a
+    real improvement over a bare env var: centralized secret storage,
+    access control, audit trail, and rotation without a redeploy — just
+    not the stronger "key never touches this process" guarantee the two
+    KMS backends give. Requires `pip install hvac` (opt-in extra).
+
+    `client`, if given, is used instead of constructing a real
+    hvac.Client — same testability hook as AwsKmsSigner/GcpKmsSigner.
+    """
+
+    def __init__(
+        self,
+        vault_addr: str,
+        vault_token: str,
+        secret_path: str,
+        w3: Web3,
+        client=None,
+        mount_point: str = "secret",
+        key_field: str = "private_key",
+    ):
+        if client is None:
+            try:
+                import hvac
+            except ImportError as e:
+                raise ImportError("VaultKvSigner requires hvac — pip install hvac") from e
+            client = hvac.Client(url=vault_addr, token=vault_token)
+            if not client.is_authenticated():
+                raise RuntimeError(f"failed to authenticate to Vault at {vault_addr}")
+
+        response = client.secrets.kv.v2.read_secret_version(path=secret_path, mount_point=mount_point)
+        private_key = response["data"]["data"][key_field]
+        self._local = LocalKeySigner(private_key, w3)
+
+    @property
+    def address(self) -> str:
+        return self._local.address
+
+    def sign_transaction(self, transaction: dict) -> SignedTransaction:
+        return self._local.sign_transaction(transaction)
+
+
 class GcpKmsSigner:
     """Signs with a GCP Cloud KMS asymmetric key (purpose=ASYMMETRIC_SIGN,
     algorithm=EC_SIGN_SECP256K1_SHA256) — same custody model as

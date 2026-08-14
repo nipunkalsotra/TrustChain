@@ -7,10 +7,14 @@ import "forge-std/console.sol";
 import "../src/v2/AgentAuditLogV2.sol";
 import "../src/v2/TrustScoreRegistryV2.sol";
 import "../src/v2/AgentIdentityRegistryV2.sol";
+import "../src/v2/TrustChainRegistry.sol";
 
 /// @title  DeployV2
-/// @notice Deploys the three V2 contracts and grants ANCHOR_ROLE to a
-///         relayer address (the anchor worker's signing key).
+/// @notice Deploys the three V2 contracts, grants ANCHOR_ROLE to a
+///         relayer address (the anchor worker's signing key), and
+///         registers this generation (version 2) in TrustChainRegistry
+///         so SDKs/indexers can resolve current addresses without
+///         hardcoding them (§12.1/§12.4).
 ///
 /// Local dev / Anvil usage (deployer, admin and relayer are all the same
 /// well-known Anvil test account — fine for local testing, NOT how this
@@ -51,10 +55,18 @@ contract DeployV2 is Script {
         trustScore.grantRole(trustScore.ANCHOR_ROLE(), relayer);
         console.log("   TrustScoreRegistryV2 deployed at:", address(trustScore));
 
-        console.log(">> [3/3] Deploying AgentIdentityRegistryV2...");
+        console.log(">> [3/4] Deploying AgentIdentityRegistryV2...");
         AgentIdentityRegistryV2 identityRegistry = new AgentIdentityRegistryV2(deployer);
+        identityRegistry.grantRole(identityRegistry.REGISTRAR_ROLE(), relayer);
         console.log("   AgentIdentityRegistryV2 deployed at:", address(identityRegistry));
-        console.log("   (registration stays DEFAULT_ADMIN_ROLE-only -- relayer NOT granted here, by design)");
+        console.log("   relayer granted REGISTRAR_ROLE (distinct from ANCHOR_ROLE -- see contract docstring)");
+
+        console.log(">> [4/4] Deploying TrustChainRegistry...");
+        TrustChainRegistry registry = new TrustChainRegistry(deployer);
+        registry.registerDeployment(2, address(auditLog), address(trustScore), address(identityRegistry));
+        registry.setCurrentVersion(2);
+        console.log("   TrustChainRegistry deployed at:", address(registry));
+        console.log("   registered as version 2, set as current");
 
         vm.stopBroadcast();
 
@@ -67,7 +79,8 @@ contract DeployV2 is Script {
         console.log(string.concat('  "chainId": ', vm.toString(block.chainid), ","));
         console.log(string.concat('  "AgentAuditLogV2": "', vm.toString(address(auditLog)), '",'));
         console.log(string.concat('  "TrustScoreRegistryV2": "', vm.toString(address(trustScore)), '",'));
-        console.log(string.concat('  "AgentIdentityRegistryV2": "', vm.toString(address(identityRegistry)), '"'));
+        console.log(string.concat('  "AgentIdentityRegistryV2": "', vm.toString(address(identityRegistry)), '",'));
+        console.log(string.concat('  "TrustChainRegistry": "', vm.toString(address(registry)), '"'));
         console.log("}");
     }
 }

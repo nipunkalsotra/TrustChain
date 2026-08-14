@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS_OUT = REPO_ROOT / "contracts" / "out"
 BACKEND_CONTRACTS = REPO_ROOT / "backend" / "contracts"
 
-CONTRACT_NAMES = ["AgentAuditLogV2", "TrustScoreRegistryV2", "AgentIdentityRegistryV2"]
+CONTRACT_NAMES = ["AgentAuditLogV2", "TrustScoreRegistryV2", "AgentIdentityRegistryV2", "TrustChainRegistry"]
 
 
 def main() -> None:

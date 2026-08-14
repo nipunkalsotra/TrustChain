@@ -3,5 +3,6 @@
   "chainId": 31337,
   "AgentAuditLogV2": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
   "TrustScoreRegistryV2": "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0",
-  "AgentIdentityRegistryV2": "0xdc64a140aa3e981100a9beca4e685f962f0cf6c9"
+  "AgentIdentityRegistryV2": "0xdc64a140aa3e981100a9beca4e685f962f0cf6c9",
+  "TrustChainRegistry": "0x0165878a594ca255338adfa4d48449f69242eb8f"
 }

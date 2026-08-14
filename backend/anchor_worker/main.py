@@ -23,6 +23,7 @@ from anchor_worker.chain import get_audit_log_contract, get_signer, get_w3
 from anchor_worker.claim import claim_batch
 from anchor_worker.reaper import reap_stale_claims
 from anchor_worker.submit import SubmitError, submit_batch
+from blockchain.resilient_provider import sample_breaker_states
 from config import get_settings
 from db.engine import get_sessionmaker
 from logging_config import get_logger
@@ -90,6 +91,15 @@ async def run_once(worker_id: str, settings) -> int:
             await session.execute(text("SELECT COUNT(*) FROM anchor_outbox WHERE status = 'pending'"))
         ).scalar_one()
     observability.ANCHOR_OUTBOX_PENDING.set(pending_count)
+
+    try:
+        balance = await asyncio.to_thread(w3.eth.get_balance, signer.address)
+        observability.ANCHOR_WALLET_BALANCE_WEI.set(balance)
+    except Exception:
+        logger.warning("wallet_balance_sample_failed", exc_info=True)
+
+    for endpoint, state in sample_breaker_states(w3).items():
+        observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=endpoint).set(1 if state == "open" else 0)
 
     async with session_factory() as session:
         claimed = await claim_batch(session, worker_id, settings.anchor_max_batch_size)

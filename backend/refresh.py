@@ -16,7 +16,6 @@ import hashlib
 import secrets
 import time
 import uuid
-from typing import Optional
 
 from sqlalchemy import select, update
 
@@ -54,11 +53,13 @@ def _short_lived_access_token(email: str, name: str, project_id: int, org_id: in
 
     from config import get_settings
 
+    settings = get_settings()
     payload = {
         "sub": email, "name": name, "project_id": project_id, "org_id": org_id, "user_id": user_id,
         "iat": now, "exp": now + ACCESS_TTL_SECONDS,
+        "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
     }
-    return pyjwt.encode(payload, get_settings().jwt_secret, algorithm="HS256")
+    return pyjwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
 class RefreshError(Exception):

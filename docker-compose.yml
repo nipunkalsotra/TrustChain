@@ -87,7 +87,15 @@ services:
       - path: ./backend/.env
         required: false
     environment:
-      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
+      # trustchain_api, NOT the trustchain superuser anchor-worker/indexer
+      # use below — it's the role Postgres Row-Level Security actually
+      # binds to (the table owner/a superuser always bypasses RLS, so
+      # runs/steps/idempotency_keys/audit_events's tenant-isolation
+      # policies only take effect for a distinct, non-owner role). Created
+      # by alembic/versions/9f3a1c7d5e2b_row_level_security_for_tenant_tables.py —
+      # `alembic upgrade head` must run against `postgres` before this
+      # service can start, same as it always has for schema itself.
+      DATABASE_URL: postgresql+asyncpg://trustchain_api:trustchain_api_dev_password@postgres:5432/trustchain
       REDIS_URL: redis://redis:6379/0
       # V1's BlockchainBridge (still used by /verify, /verify/tamper-demo,
       # /verify-audit) keeps reading MONAD_RPC_URL/PRIVATE_KEY from .env —

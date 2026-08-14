@@ -68,6 +68,16 @@ groups:
           description: "{{ $value }} anchor batch failures in the last 15m — check anchor-worker logs for the `reason` (build_or_send/timeout/revert)."
           runbook: "docs/runbooks.md#anchor-batches-failing-repeatedly"
 
+      - alert: AnchorWalletBalanceLow
+        expr: anchor_wallet_balance_wei < 50000000000000000  # 0.05 native token
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Anchor worker's signing wallet is close to empty"
+          description: "anchor_wallet_balance_wei={{ $value }} — every anchorBatch call fails at the pre-send stage (not a revert — see submit.py's reason=build_or_send), so AnchorBatchesFailingRepeatedly may not fire before the queue backs up. Fund the wallet before it hits zero."
+          runbook: "docs/runbooks.md#anchor-wallet-balance-low"
+
   - name: trustchain-indexer
     rules:
       - alert: IndexerFallingBehind
@@ -79,3 +89,15 @@ groups:
           summary: "Indexer is more than 1000 blocks behind chain head"
           description: "indexer_poll_lag_blocks={{ $value }} — check the indexer process is alive and the RPC endpoint is responsive."
           runbook: "docs/runbooks.md#indexer-falling-behind"
+
+  - name: trustchain-rpc-resilience
+    rules:
+      - alert: RpcCircuitBreakerOpen
+        expr: rpc_circuit_breaker_open == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An RPC endpoint's circuit breaker has been open for 5+ minutes"
+          description: "endpoint={{ $labels.endpoint }} in {{ $labels.job }} is being skipped after repeated failures (see blockchain/resilient_provider.py). Traffic is riding on a fallback endpoint in the meantime — this alone isn't an outage, but every configured endpoint tripping at once would be."
+          runbook: "docs/runbooks.md#rpc-circuit-breaker-open"

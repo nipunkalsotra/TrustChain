@@ -39,6 +39,19 @@
     },
     {
       "type": "function",
+      "name": "MAX_META_URI_LENGTH",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
       "name": "anchorBatch",
       "inputs": [
         {
@@ -55,6 +68,11 @@
           "name": "stepCount",
           "type": "uint32",
           "internalType": "uint32"
+        },
+        {
+          "name": "metaURI",
+          "type": "string",
+          "internalType": "string"
         }
       ],
       "outputs": [
@@ -427,6 +445,12 @@
           "internalType": "uint32"
         },
         {
+          "name": "metaURI",
+          "type": "string",
+          "indexed": false,
+          "internalType": "string"
+        },
+        {
           "name": "timestamp",
           "type": "uint256",
           "indexed": false,
@@ -587,6 +611,11 @@
     {
       "type": "error",
       "name": "ExpectedPause",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "MetaURITooLong",
       "inputs": []
     }
   ]

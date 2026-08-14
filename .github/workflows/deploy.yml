@@ -6,11 +6,21 @@
 # HONEST LIMITATION: this repo has no real staging/production
 # infrastructure target configured (no cloud account, no server, no
 # kubeconfig) — the actual `deploy` steps below are placeholders that
-# document the real shape of the command (SSH + docker compose pull/up,
+# document the real shape of the command (SSH + deploy/canary_rollout.sh,
 # the most direct fit for how this project already runs via
 # docker-compose.yml) rather than a fabricated "it deployed successfully"
 # step. Wire DEPLOY_HOST/DEPLOY_SSH_KEY as environment secrets once a
 # real target exists and delete this comment block.
+#
+# What IS real: deploy/canary_rollout.sh — deploy, hold through a bake
+# period of repeated real health checks, and automatically roll back to
+# the last known-good version if any check fails. Verified against this
+# repo's own docker-compose stack (deploy/canary_rollout_test.sh: a real
+# bake success, a real mid-deploy crash triggering a real automatic
+# rollback, and the no-prior-version edge case) — not just described.
+# The steps below show exactly what would run on a real host; locally
+# they're a no-op deploy-mode toggle away from `bash deploy/
+# canary_rollout.sh <version>` run directly.
 name: Deploy
 permissions: {}
 on:
@@ -56,7 +66,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Deploy backend/mcp images to staging
+      - name: Deploy backend/mcp images to staging (canary + auto-rollback)
         run: |
           cat <<EOF
           Would deploy version ${{ needs.resolve-version.outputs.version }} to staging.
@@ -64,17 +74,23 @@ jobs:
 
             ssh -i \$DEPLOY_SSH_KEY deploy@\$DEPLOY_HOST bash -s <<'REMOTE'
               cd /opt/trustchain
-              export TRUSTCHAIN_VERSION=${{ needs.resolve-version.outputs.version }}
-              docker compose pull api anchor-worker indexer mcp-search mcp-blockchain
-              docker compose up -d api anchor-worker indexer mcp-search mcp-blockchain
+              DEPLOY_MODE=pull bash deploy/canary_rollout.sh ${{ needs.resolve-version.outputs.version }}
           REMOTE
 
-          See docs/release-process.md for the full deployment story and why this stays a placeholder for now.
+          deploy/canary_rollout.sh (this repo, tested against its own
+          docker-compose stack — see deploy/canary_rollout_test.sh) pulls
+          the new images, holds them through a bake period of repeated
+          real /ready checks, and automatically redeploys the previous
+          known-good version if any check fails during that window —
+          exit 0 = healthy and live, exit 1 = bad deploy, rolled back
+          successfully, exit 2 = rollback itself failed (a real incident,
+          this job should fail loudly here, not retry silently).
+
+          See docs/release-process.md for the full deployment story and why the SSH target stays a placeholder for now.
           EOF
       - name: Smoke test staging
         run: |
-          echo "Would curl \$STAGING_URL/ready and \$STAGING_URL/health here and fail the job on a non-200."
-          echo "No real staging URL exists yet — see the deploy step above."
+          echo "deploy/canary_rollout.sh's own bake loop above IS the smoke test (real /ready checks over a real window, not one curl right after startup) — nothing further to run here once a real \$STAGING_URL exists."
 
   production:
     name: Deploy to production
@@ -91,11 +107,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Deploy backend/mcp images to production
+      - name: Deploy backend/mcp images to production (canary + auto-rollback)
         run: |
           echo "Would deploy version ${{ needs.resolve-version.outputs.version }} to production."
-          echo "Same real shape as the staging step, against \$PROD_DEPLOY_HOST instead."
+          echo "Same real shape as the staging step (deploy/canary_rollout.sh), against \$PROD_DEPLOY_HOST instead — including the same automatic rollback on a failed bake."
           echo "See docs/release-process.md."
       - name: Smoke test production
         run: |
-          echo "Would curl \$PRODUCTION_URL/ready and \$PRODUCTION_URL/health here and fail the job on a non-200."
+          echo "deploy/canary_rollout.sh's own bake loop above IS the smoke test — nothing further to run here once a real \$PRODUCTION_URL exists."

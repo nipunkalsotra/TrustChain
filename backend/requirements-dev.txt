@@ -6,3 +6,8 @@ pytest==9.1.1
 bandit==1.9.4
 pip-audit==2.10.1
 slither-analyzer==0.11.6
+
+# Static analysis (P2.5/audit follow-up) — see .github/workflows/test.yml
+# and ruff.toml for what's actually gated vs informational.
+ruff==0.16.3
+mypy==2.3.0

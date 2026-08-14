@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.base import AgentState, get_llm, log_step, search_failed
+from agents.base import AgentState, get_llm, log_step
 
 logger = logging.getLogger(__name__)
 

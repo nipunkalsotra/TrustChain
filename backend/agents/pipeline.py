@@ -229,10 +229,10 @@ if __name__ == "__main__":
 
             elif t == "run_complete":
                 print(f"\n{'='*60}")
-                print(f"✅  Run complete")
+                print("✅  Run complete")
                 print(f"    Score:    {event['score']}/100")
                 print(f"    Tx count: {event['txCount']}")
-                print(f"\n--- Final Report (first 600 chars) ---")
+                print("\n--- Final Report (first 600 chars) ---")
                 print(event['report'][:600])
 
             elif t == "error":

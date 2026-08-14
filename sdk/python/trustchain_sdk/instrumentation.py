@@ -1,0 +1,354 @@
+"""
+trustchain_sdk.instrumentation — the actual "any third-party agent can be
+audited through a published SDK" surface (plan §13.1/§13.2), distinct
+from trustchain_sdk.client.TrustChainClient (a REST wrapper around
+TrustChain's OWN 4-agent pipeline, POST /run-agent etc.).
+
+Design principles this module is built around (plan §13.1), each with a
+concrete mechanism:
+  - One line to adopt        -> TrustChain(api_key=...) + tc.log(...)
+  - Never break the host app -> every call fails open (logs a warning,
+                                 never raises) unless on_error="raise"
+  - Non-blocking by default  -> tc.log() enqueues onto a background
+                                 worker thread and returns immediately;
+                                 tc.log(..., wait=True) or tc.log_and_wait
+                                 makes the real call inline when a caller
+                                 genuinely needs the server-assigned
+                                 step_id right away (e.g. to fetch a proof)
+  - Framework-native          -> trustchain_sdk.integrations.langchain
+  - Honest about state        -> a queued StepReceipt reports
+                                 anchor_status=None, not a guess
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+from trustchain_sdk.client import DEFAULT_BASE_URL, TrustChainClient
+from trustchain_sdk.exceptions import TrustChainError
+from trustchain_sdk.merkle import hex_to_bytes, verify_proof as _verify_proof_locally
+
+logger = logging.getLogger("trustchain_sdk")
+
+
+def _code_hash(agent_id: str, model: str, version: str, system_prompt: str) -> str:
+    """keccak256(json.dumps({...}, sort_keys=True, separators=(",", ":")))
+    — MUST match backend/blockchain/hashing_utils.py's compute_hash
+    exactly (same key names, same dict, same serialisation), or every
+    hash computed here will silently mismatch what's registered on-chain
+    despite being "the same" config. system_prompt is hashed HERE,
+    client-side — the raw prompt is never sent to the API (see
+    RegisterAgentRequest in the backend, which only ever accepts a
+    pre-computed hash)."""
+    from eth_utils import keccak
+
+    config = {"agentId": agent_id, "model": model, "version": version, "systemPrompt": system_prompt}
+    serialised = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return "0x" + keccak(text=serialised).hex()
+
+
+@dataclass
+class StepReceipt:
+    local_id: str
+    status: str = "queued"
+    step_id: Optional[int] = None
+    anchor_status: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class VerifyResult:
+    agent_id: str
+    verified: bool
+    is_active: bool
+    hash_matches: bool
+    stored_hash: str
+    provided_hash: str
+
+
+@dataclass
+class MerkleProof:
+    step_id: int
+    run_id: str
+    leaf: str
+    proof: list[str]
+    root: str
+    tx_hash: Optional[str]
+    anchor_status: str
+    anchor_id: Optional[int] = None
+
+
+@dataclass
+class _QueuedLog:
+    kwargs: dict
+    receipt: StepReceipt
+
+
+class TrustChain:
+    """
+    from trustchain_sdk import TrustChain
+    tc = TrustChain(api_key="tc_live_...")
+
+    tc.register_agent(agent_id="support-bot", model="gpt-4o", version="2025-11",
+                       system_prompt=SUPPORT_PROMPT)
+    tc.log(agent_id="support-bot", action="answer_query", input=query, output=result)
+
+    @tc.audited(agent_id="support-bot", action="answer_query")
+    def answer_query(query: str) -> str: ...
+
+    tc.verify_agent("support-bot", model=..., version=..., system_prompt=...)
+    proof = tc.get_proof(step_id)
+    tc.verify_proof(proof)
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        on_error: str = "warn",
+        queue_max_size: int = 10_000,
+    ):
+        """`on_error`: "warn" (default — log via the `trustchain_sdk`
+        logger, swallow, never raise into caller code — audit logging
+        must never be able to break the host application) or "raise"
+        (surface TrustChainError to the caller; useful in tests/CI where
+        a silently-dropped step should fail loudly instead)."""
+        if on_error not in ("warn", "raise"):
+            raise ValueError('on_error must be "warn" or "raise"')
+        self._client = TrustChainClient(api_key, base_url=base_url)
+        self._on_error = on_error
+        self._queue: queue.Queue[Optional[_QueuedLog]] = queue.Queue(maxsize=queue_max_size)
+        self._run_ids: dict[str, str] = {}
+        self._run_ids_lock = threading.Lock()
+        self._worker = threading.Thread(target=self._run_worker, daemon=True, name="trustchain-sdk-log-worker")
+        self._worker.start()
+
+    def close(self) -> None:
+        """Stops accepting new background work and blocks until the
+        queue drains — call before process exit so buffered log() calls
+        aren't lost. Does NOT need to be called for log(..., wait=True)/
+        log_and_wait(), which never touch the queue."""
+        self._queue.put(None)  # sentinel — worker exits after draining what precedes it
+        self._worker.join(timeout=30)
+        self._client.close()
+
+    def __enter__(self) -> "TrustChain":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def flush(self, timeout: float = 10.0) -> bool:
+        """Blocks until every log() call queued so far has been sent (or
+        `timeout` elapses). Returns False on timeout — callers that care
+        about that should treat it as "some steps may not be durably
+        queued server-side yet", not as data loss (the queue itself
+        isn't cleared, draining continues in the background)."""
+        deadline = time.monotonic() + timeout
+        while not self._queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self._queue.empty()
+
+    # ── Background worker ────────────────────────────────────────────
+
+    def _run_worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            self._send_log(item)
+
+    def _send_log(self, item: _QueuedLog) -> None:
+        try:
+            response = self._client.log_step(**item.kwargs)
+            item.receipt.step_id = response["step_id"]
+            item.receipt.status = response["status"]
+            item.receipt.anchor_status = response["anchor_status"]
+        except Exception as e:  # noqa: BLE001 — deliberately broad, see class docstring
+            item.receipt.error = str(e)
+            logger.warning("trustchain_sdk: failed to log step (agent_id=%s): %s", item.kwargs.get("agent_id"), e)
+
+    # ── Registration / verification ──────────────────────────────────
+
+    def register_agent(self, agent_id: str, model: str, version: str, system_prompt: str) -> str:
+        """Synchronous — registration is rare (once per agent config, not
+        once per call), so there's no non-blocking mode for it. Returns
+        the on-chain tx hash. Fails open per `on_error` like everything
+        else here."""
+        code_hash = _code_hash(agent_id, model, version, system_prompt)
+        try:
+            response = self._client.register_agent(agent_id, code_hash, model, version)
+            return response["tx_hash"]
+        except Exception as e:
+            return self._handle_error(e, default="")
+
+    def verify_agent(self, agent_id: str, model: str, version: str, system_prompt: str) -> Optional[VerifyResult]:
+        code_hash = _code_hash(agent_id, model, version, system_prompt)
+        try:
+            response = self._client.verify_agent(agent_id, code_hash)
+            return VerifyResult(
+                agent_id=agent_id,
+                verified=response["isValid"],
+                is_active=response["isActive"],
+                hash_matches=response["hashMatches"],
+                stored_hash=response["storedHash"],
+                provided_hash=response["providedHash"],
+            )
+        except Exception as e:
+            return self._handle_error(e, default=None)
+
+    # ── Logging ──────────────────────────────────────────────────────
+
+    def log(
+        self,
+        agent_id: str,
+        action: str,
+        input: str,  # noqa: A002 — matches the plan's documented kwarg name
+        output: str,
+        trust_score: int = 0,
+        wait: bool = False,
+    ) -> StepReceipt:
+        """Non-blocking by default (queues onto the background worker,
+        returns immediately with step_id=None — the server hasn't
+        assigned one yet). Pass wait=True for the synchronous version
+        (blocks for the real HTTP round trip and returns the real
+        step_id/anchor_status) — needed before get_proof(), since a proof
+        can't be fetched for a step_id that doesn't exist yet."""
+        import uuid
+
+        receipt = StepReceipt(local_id=uuid.uuid4().hex)
+        kwargs = {
+            "run_id": self._current_run_id(agent_id),
+            "agent_id": agent_id, "action": action, "input": input, "output": output,
+            "trust_score": trust_score,
+        }
+
+        if wait:
+            self._send_log(_QueuedLog(kwargs=kwargs, receipt=receipt))
+            if receipt.error is not None:
+                return self._handle_error(TrustChainError(receipt.error), default=receipt)
+            return receipt
+
+        try:
+            self._queue.put_nowait(_QueuedLog(kwargs=kwargs, receipt=receipt))
+        except queue.Full:
+            receipt.error = "trustchain_sdk: local queue full, step dropped"
+            logger.warning(receipt.error)
+        return receipt
+
+    def log_and_wait(self, *args, **kwargs) -> StepReceipt:
+        return self.log(*args, wait=True, **kwargs)
+
+    def _current_run_id(self, agent_id: str) -> str:
+        """One run_id per agent_id per TrustChain instance, generated
+        once and reused for every log() call on that agent — matches the
+        plan's model of "one run groups one agent invocation's steps".
+        Call `new_run(agent_id)` to start a fresh one (e.g. between
+        distinct conversations/requests the SDK can't infer boundaries
+        for on its own)."""
+        with self._run_ids_lock:
+            if agent_id not in self._run_ids:
+                import uuid
+                self._run_ids[agent_id] = f"sdk_{agent_id}_{uuid.uuid4().hex}"
+            return self._run_ids[agent_id]
+
+    def new_run(self, agent_id: str) -> str:
+        import uuid
+
+        with self._run_ids_lock:
+            self._run_ids[agent_id] = f"sdk_{agent_id}_{uuid.uuid4().hex}"
+            return self._run_ids[agent_id]
+
+    def audited(self, agent_id: str, action: str) -> Callable:
+        """Decorator form — zero lines in the hot path. Logs the
+        function's own repr'd args/return value as input/output; wrap
+        your own call site directly (see `log()`) if you need more
+        control over what gets recorded."""
+        def decorator(fn: Callable) -> Callable:
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                result = fn(*args, **kwargs)
+                self.log(
+                    agent_id=agent_id, action=action,
+                    input=repr({"args": args, "kwargs": kwargs}),
+                    output=repr(result),
+                )
+                return result
+            return wrapper
+        return decorator
+
+    # ── Proofs ───────────────────────────────────────────────────────
+
+    def get_proof(self, step_id: int) -> Optional[MerkleProof]:
+        try:
+            response = self._client.get_step_proof(step_id)
+            return MerkleProof(
+                step_id=response["stepId"], run_id=response["runId"], leaf=response["leaf"],
+                proof=response["proof"], root=response["root"], tx_hash=response.get("txHash"),
+                anchor_status=response["anchorStatus"], anchor_id=response.get("anchorId"),
+            )
+        except Exception as e:
+            return self._handle_error(e, default=None)
+
+    def verify_proof(self, proof: MerkleProof) -> bool:
+        """LOCAL verification only — recomputes the root from leaf+proof
+        and compares to `proof.root` as returned by the API. This proves
+        internal consistency (tampering with the leaf or any sibling
+        breaks the fold) but does NOT independently confirm `proof.root`
+        is what's actually anchored on-chain; for that, see
+        verify_proof_onchain, which reads the root from the real
+        contract instead of trusting this field."""
+        leaf = hex_to_bytes(proof.leaf)
+        siblings = [hex_to_bytes(p) for p in proof.proof]
+        root = hex_to_bytes(proof.root)
+        return _verify_proof_locally(leaf, siblings, root)
+
+    def verify_proof_onchain(self, proof: MerkleProof, rpc_url: str, audit_log_address: str) -> bool:
+        """Strongest form: reads AgentAuditLogV2.verifyProof(anchorId,
+        leaf, proof) directly from the chain at `rpc_url` — the same
+        call backend/tests verify against. Requires knowing which chain/
+        contract to check (there's no way for the SDK to infer this
+        safely — a wrong RPC/address would silently "verify" against the
+        wrong deployment), so this is opt-in, not the default. Returns
+        False (never raises, even on an RPC error) — a chain read failing
+        is a normal "couldn't confirm" outcome to handle, not a crash.
+        """
+        if proof.anchor_id is None:
+            return False
+        try:
+            from web3 import Web3
+
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            abi = [{
+                "inputs": [
+                    {"name": "anchorId", "type": "uint256"},
+                    {"name": "leaf", "type": "bytes32"},
+                    {"name": "proof", "type": "bytes32[]"},
+                ],
+                "name": "verifyProof",
+                "outputs": [{"name": "", "type": "bool"}],
+                "stateMutability": "view",
+                "type": "function",
+            }]
+            contract = w3.eth.contract(address=Web3.to_checksum_address(audit_log_address), abi=abi)
+            return contract.functions.verifyProof(
+                proof.anchor_id, hex_to_bytes(proof.leaf), [hex_to_bytes(p) for p in proof.proof],
+            ).call()
+        except Exception as e:
+            logger.warning("trustchain_sdk: on-chain proof verification failed: %s", e)
+            return False
+
+    # ── Error handling ───────────────────────────────────────────────
+
+    def _handle_error(self, e: Exception, default: Any) -> Any:
+        if self._on_error == "raise":
+            raise e if isinstance(e, TrustChainError) else TrustChainError(str(e))
+        logger.warning("trustchain_sdk: %s", e)
+        return default

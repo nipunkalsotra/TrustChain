@@ -16,7 +16,7 @@ from config import get_settings
 
 @lru_cache
 def get_w3() -> Web3:
-    return build_w3(get_settings().resolved_v2_rpc_url)
+    return build_w3(get_settings().resolved_v2_rpc_urls)
 
 
 @lru_cache

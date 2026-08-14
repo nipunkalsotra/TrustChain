@@ -8,14 +8,31 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  * @notice The "silent substitution" detector — proves the agent that ran a
  *         task is the agent that was registered.
  *
- * Deliberately gates registerAgent()/revokeAgent() behind DEFAULT_ADMIN_ROLE
- * rather than ANCHOR_ROLE: establishing what counts as "the real agent" is
- * a higher-trust action than routine batch anchoring, and a compromised
- * anchor-worker hot key must not be able to register a fake identity or
- * revoke a real one. See AgentAuditLogV2 for the role-separation rationale
- * shared across all three V2 contracts.
+ * registerAgent()/revokeAgent() are gated behind a DEDICATED REGISTRAR_ROLE
+ * — not DEFAULT_ADMIN_ROLE, and not ANCHOR_ROLE either. Two things are
+ * both true and need separate roles to hold at once:
+ *   1. Establishing what counts as "the real agent" is a higher-trust
+ *      action than routine batch anchoring — a compromised anchor-worker
+ *      hot key must not be able to register a fake identity or revoke a
+ *      real one, so this is NOT ANCHOR_ROLE.
+ *   2. In a multi-tenant, self-serve deployment (the platform's actual
+ *      operating model — see the plan's SDK strategy, "any third-party
+ *      agent can be audited through a published SDK"), agent registration
+ *      is a routine, automated action the backend performs on a tenant's
+ *      behalf every time they call `register_agent()` — it cannot require
+ *      a multisig signature ceremony per tenant onboarding, so this is
+ *      NOT DEFAULT_ADMIN_ROLE either (an earlier version of this contract
+ *      gated registration behind DEFAULT_ADMIN_ROLE directly, which was
+ *      fine for a single-tenant demo but doesn't scale to that model).
+ * REGISTRAR_ROLE is granted to the platform backend's own signer at
+ * deploy time (see script/DeployV2.s.sol) — revocable independently of
+ * ANCHOR_ROLE, and still ultimately governed by DEFAULT_ADMIN_ROLE (the
+ * multisig), which alone can grant or revoke it. See AgentAuditLogV2 for
+ * the role-separation rationale shared across all three V2 contracts.
  */
 contract AgentIdentityRegistryV2 is AccessControl {
+    bytes32 public constant REGISTRAR_ROLE = keccak256("REGISTRAR_ROLE");
+
     struct AgentRecord {
         string agentId;
         bytes32 codeHash;
@@ -70,7 +87,7 @@ contract AgentIdentityRegistryV2 is AccessControl {
         bytes32 codeHash,
         string calldata modelName,
         string calldata modelVersion
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(REGISTRAR_ROLE) {
         require(bytes(agentId).length > 0, "AgentIdentityRegistryV2: agentId cannot be empty");
         require(codeHash != bytes32(0), "AgentIdentityRegistryV2: codeHash cannot be zero");
 
@@ -102,7 +119,7 @@ contract AgentIdentityRegistryV2 is AccessControl {
         }
     }
 
-    function revokeAgent(string calldata agentId) external onlyRole(DEFAULT_ADMIN_ROLE) agentExists(agentId) {
+    function revokeAgent(string calldata agentId) external onlyRole(REGISTRAR_ROLE) agentExists(agentId) {
         require(agentRecords[agentId].isActive, "AgentIdentityRegistryV2: agent already revoked");
 
         agentRecords[agentId].isActive = false;

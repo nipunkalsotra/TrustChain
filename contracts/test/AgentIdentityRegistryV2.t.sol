@@ -22,20 +22,16 @@ contract AgentIdentityRegistryV2Test is Test {
 
     function setUp() public {
         registry = new AgentIdentityRegistryV2(admin);
-        // No ANCHOR_ROLE exists on this contract at all — registration is
-        // DEFAULT_ADMIN_ROLE-only, full stop. `relayer` below is just an
-        // arbitrary non-admin address, standing in for "anyone who isn't
-        // the multisig," anchor worker included.
+        registry.grantRole(registry.REGISTRAR_ROLE(), relayer);
     }
 
-    // ── The core claim: only DEFAULT_ADMIN_ROLE can register/revoke ─────────
-    // ── identities — NOT the anchor worker's ANCHOR_ROLE. A compromised ────
-    // ── hot key cannot fabricate or destroy an agent's identity. ────────────
+    // ── Role separation — registration needs REGISTRAR_ROLE specifically, ──
+    // ── not DEFAULT_ADMIN_ROLE and not ANCHOR_ROLE (which doesn't exist ────
+    // ── on this contract at all) ─────────────────────────────────────────
 
-    function test_RevertWhen_RelayerRegistersAgent() public {
-        vm.prank(relayer);
-        vm.expectRevert();
-        registry.registerAgent("researcher", hashV1, "llama-3.3-70b-versatile", "groq-v1");
+    function test_RelayerHoldsOnlyRegistrarRole() public view {
+        assertTrue(registry.hasRole(registry.REGISTRAR_ROLE(), relayer));
+        assertFalse(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), relayer));
     }
 
     function test_RevertWhen_StrangerRegistersAgent() public {
@@ -44,16 +40,26 @@ contract AgentIdentityRegistryV2Test is Test {
         registry.registerAgent("researcher", hashV1, "model", "v1");
     }
 
-    function test_AdminCanRegisterAgent() public {
+    function test_RevertWhen_AdminAloneCannotRegister_MustHoldRegistrarRoleToo() public {
+        // Admin has DEFAULT_ADMIN_ROLE but was never granted REGISTRAR_ROLE
+        // itself — roles are additive, not hierarchical, by design here
+        // (same invariant AgentAuditLogV2Test asserts for ANCHOR_ROLE).
+        vm.expectRevert();
+        registry.registerAgent("researcher", hashV1, "llama-3.3-70b-versatile", "groq-v1");
+    }
+
+    function test_RegistrarCanRegisterAgent() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "llama-3.3-70b-versatile", "groq-v1");
         assertTrue(registry.isRegistered("researcher"));
         assertTrue(registry.verifyAgent("researcher", hashV1));
     }
 
-    function test_RevertWhen_RelayerRevokesAgent() public {
+    function test_RevertWhen_StrangerRevokesAgent() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
 
-        vm.prank(relayer);
+        vm.prank(stranger);
         vm.expectRevert();
         registry.revokeAgent("researcher");
     }
@@ -61,8 +67,10 @@ contract AgentIdentityRegistryV2Test is Test {
     // ── Re-registration updates in place, doesn't duplicate ─────────────────
 
     function test_ReRegistering_UpdatesHash() public {
+        vm.startPrank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
         registry.registerAgent("researcher", hashV2, "model", "v2");
+        vm.stopPrank();
 
         assertEq(registry.getCodeHash("researcher"), hashV2);
         assertFalse(registry.verifyAgent("researcher", hashV1));
@@ -73,13 +81,16 @@ contract AgentIdentityRegistryV2Test is Test {
     // ── verifyAgent — substitution detection ────────────────────────────────
 
     function test_VerifyAgent_FalseOnMismatch() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
         assertFalse(registry.verifyAgent("researcher", hashV2));
     }
 
     function test_VerifyAgent_FalseWhenRevoked() public {
+        vm.startPrank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
         registry.revokeAgent("researcher");
+        vm.stopPrank();
         assertFalse(registry.verifyAgent("researcher", hashV1));
     }
 
@@ -90,6 +101,7 @@ contract AgentIdentityRegistryV2Test is Test {
     // ── verifyAgentAndLog — the tamper alarm ────────────────────────────────
 
     function test_VerifyAgentAndLog_EmitsIntegrityViolationOnMismatch() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
 
         // agentId is no longer indexed (see the contract's event
@@ -104,6 +116,7 @@ contract AgentIdentityRegistryV2Test is Test {
     // ── verifyAgentFull ──────────────────────────────────────────────────
 
     function test_VerifyAgentFull_ValidAgent() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
         AgentIdentityRegistryV2.VerificationResult memory result = registry.verifyAgentFull("researcher", hashV1);
         assertTrue(result.isValid);
@@ -111,6 +124,7 @@ contract AgentIdentityRegistryV2Test is Test {
     }
 
     function test_VerifyAgentFull_TamperedButStillActive() public {
+        vm.prank(relayer);
         registry.registerAgent("researcher", hashV1, "model", "v1");
         AgentIdentityRegistryV2.VerificationResult memory result = registry.verifyAgentFull("researcher", hashV2);
         assertFalse(result.isValid);

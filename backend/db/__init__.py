@@ -23,33 +23,58 @@ import json
 import secrets
 from typing import Optional
 
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from db import tenancy
 from db.engine import get_sessionmaker
-from db.models import Run, User
+from db.models import Run, Step, User
 
 _PBKDF2_ITERATIONS = 260_000
+_argon2_hasher = PasswordHasher()
 
 
-# ── Password hashing — PBKDF2-HMAC-SHA256, stdlib only ──────────────────────
-# Unchanged from Phase 1 — pure Python, no SQL, no reason to touch it.
+# ── Password hashing — Argon2id, with transparent PBKDF2 migration ─────────
+# New hashes use Argon2id (memory-hard — the OWASP-recommended default,
+# unlike PBKDF2 which is only CPU-hard and so cheaper to brute-force on
+# GPUs/ASICs). Existing users' PBKDF2-HMAC-SHA256 hashes (Phase 1, stdlib
+# only) still verify correctly — `verify_password` dispatches on the
+# stored hash's own format (Argon2's PHC string always starts with
+# "$argon2"; the old format never contains "$argon2") — and are
+# transparently upgraded to Argon2id in place on next successful login
+# (see authenticate_user), so no forced reset/migration script is needed
+# and no one is ever locked out mid-rollout.
 
 def hash_password(password: str) -> str:
+    return _argon2_hasher.hash(password)
+
+
+def _hash_password_pbkdf2(password: str) -> str:
+    """Only used by tests exercising the legacy-hash migration path."""
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), _PBKDF2_ITERATIONS)
     return f"{salt}${digest.hex()}"
 
 
-def verify_password(password: str, stored: str) -> bool:
+def _verify_password_pbkdf2(password: str, stored: str) -> bool:
     try:
         salt, digest_hex = stored.split("$", 1)
     except ValueError:
         return False
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), _PBKDF2_ITERATIONS)
     return hmac.compare_digest(digest.hex(), digest_hex)
+
+
+def verify_password(password: str, stored: str) -> bool:
+    if stored.startswith("$argon2"):
+        try:
+            return _argon2_hasher.verify(stored, password)
+        except VerifyMismatchError:
+            return False
+    return _verify_password_pbkdf2(password, stored)
 
 
 # ── Users ─────────────────────────────────────────────────────────────────
@@ -79,8 +104,17 @@ async def authenticate_user(email: str, password: str) -> Optional[dict]:
     async with session_factory() as session:
         result = await session.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
-    if user is None or not verify_password(password, user.password_hash):
-        return None
+        if user is None or not verify_password(password, user.password_hash):
+            return None
+
+        if not user.password_hash.startswith("$argon2"):
+            # Transparent migration: the password is only ever available
+            # in cleartext right here, right after a successful legacy
+            # verify — rehash it into Argon2id now rather than running a
+            # separate backfill script (which would need the cleartext
+            # password too, i.e. can't be done offline at all).
+            user.password_hash = hash_password(password)
+            await session.commit()
 
     project = await tenancy.get_default_project_for_user(user.id)
     if project is None:
@@ -165,6 +199,57 @@ async def get_run(run_id: str, project_id: int) -> Optional[dict]:
         if run is not None and run.project_id != project_id:
             return None
     return _row_to_run_dict(run) if run else None
+
+
+async def get_or_create_run_for_project(run_id: str, project_id: int, created_at: int) -> bool:
+    """For POST /steps (SDK ingest of a third-party agent's own step,
+    plan §7.4/§13.4) — unlike POST /run-agent, that workflow has no
+    separate "create a run" call; a caller just starts logging steps
+    under a run_id it picked itself. Creates a minimal Run row (task=NULL
+    — there's no task text for a step the caller ran itself, only for
+    TrustChain's own pipeline) the first time a run_id is seen.
+
+    Returns True if run_id belongs to (or was just created for) this
+    project — safe to write a Step against it. Returns False if run_id
+    already exists under a DIFFERENT project — the caller must reject
+    that (404), never silently write into another tenant's run.
+
+    Uses ON CONFLICT DO NOTHING, not create_run()'s ON CONFLICT DO
+    UPDATE: that upsert only ever updates task/user_email (never
+    project_id), so it's safe for its own use (a client-supplied run_id
+    colliding with another project there just leaves project_id
+    unchanged) — but reusing it here would let a caller in project B
+    silently overwrite project A's task/user_email fields on task/
+    user_email columns this endpoint doesn't even touch. Insert-if-absent
+    then check ownership is the actually-safe primitive for this case.
+    """
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        stmt = pg_insert(Run).values(
+            run_id=run_id, project_id=project_id, task=None, user_email=None,
+            status="running", created_at=created_at,
+        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=[Run.run_id])
+        await session.execute(stmt)
+        await session.commit()
+
+        run = await session.get(Run, run_id)
+        return run is not None and run.project_id == project_id
+
+
+async def next_step_index(run_id: str) -> int:
+    """Server-computed, not caller-supplied — a third-party SDK calling
+    POST /steps repeatedly shouldn't have to track its own step counter
+    (and a wrong/reused index from a buggy client would corrupt the
+    Merkle leaf ordering steps.step_index is part of)."""
+    from sqlalchemy import func
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(func.count()).select_from(Step).where(Step.run_id == run_id)
+        )
+        return result.scalar_one()
 
 
 async def list_runs(project_id: int, limit: int = 50) -> list[dict]:

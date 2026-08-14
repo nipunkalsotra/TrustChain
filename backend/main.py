@@ -36,7 +36,8 @@ from config import get_settings
 from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
 from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
-from agents.base import make_run_id
+from agents.base import make_run_id, log_step
+from blockchain import identity_writer
 
 configure_logging(log_level=get_settings().log_level, json_logs=get_settings().environment != "development")
 logger = get_logger(__name__)
@@ -131,6 +132,23 @@ async def metrics():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  API versioning (F-item, plan §13.4/Appendix A): every route below lives
+#  on `router`, mounted TWICE at the bottom of this file — once unprefixed
+#  (legacy shape, kept working indefinitely for the existing frontend and
+#  any pre-versioning integration — "never break the host application" is
+#  a design principle for the SDK, and it applies here too) and once under
+#  /v1, the new canonical, documented surface. Both point at the exact
+#  same handler functions — there is no behavior difference, only the
+#  path prefix. /health, /ready, and /metrics stay on `app` directly,
+#  unversioned: they're infrastructure probes, not the business API
+#  surface Appendix A actually versions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import APIRouter
+router = APIRouter()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Platform admin-action audit log (db.models.AuditEvent) — distinct from
 #  the on-chain agent audit log. Covers key issuance/revocation and other
 #  authority-affecting actions per the plan's T3 (insider/operator) threat
@@ -153,6 +171,23 @@ async def audit_log_admin_action(current_user: "auth.CurrentUser", action: str, 
         logger.error("audit_log_write_failed", action=action, error=str(e))
 
 
+def get_bridge_or_503():
+    """get_bridge() raises if V1's PRIVATE_KEY/MONAD_RPC_URL aren't
+    configured — real Monad testnet secrets, never set in CI (see
+    .github/workflows/test.yml) and not required for any environment
+    that only runs V2. Every V1 endpoint (/verify, /verify/tamper-demo,
+    /verify-audit, /health) needs to treat that as a clean, deliberate
+    503, not let it propagate as FastAPI's generic unhandled-exception
+    500 from several near-identical call sites — found via real
+    Schemathesis fuzzing against a live container with no PRIVATE_KEY
+    configured (exactly CI's actual environment), not by inspection."""
+    try:
+        return get_bridge()
+    except Exception as e:
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Request / Response models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +202,48 @@ class RunAgentResponse(BaseModel):
     task:       str
     status:     str = "started"
     stream_url: str
+
+
+class RegisterAgentRequest(BaseModel):
+    """Matches the SDK's tc.register_agent(agent_id, model, version,
+    system_prompt=...) call (plan §13.2) — code_hash is computed
+    CLIENT-SIDE from {agentId, model, version, systemPrompt} (same
+    keccak256(json.dumps(config, sort_keys=True)) scheme
+    blockchain/hashing_utils.py already uses for the pipeline's own 4
+    agents), never the raw system prompt itself. The backend only ever
+    sees and stores the hash."""
+    agent_id:   str = Field(min_length=1, max_length=100)
+    code_hash:  str = Field(min_length=66, max_length=66, pattern=r"^0x[0-9a-fA-F]{64}$")
+    model:      str = Field(min_length=1, max_length=200)
+    version:    str = Field(min_length=1, max_length=100)
+
+
+class RegisterAgentResponse(BaseModel):
+    agent_id: str
+    tx_hash:  str
+
+
+class LogStepRequest(BaseModel):
+    """Matches the SDK's tc.log(agent_id=..., action=..., input=...,
+    output=...) call — SDK ingest of a THIRD-PARTY agent's own step
+    (plan §7.4/§13.4), as opposed to POST /run-agent, which runs
+    TrustChain's own 4-agent pipeline. `run_id` is picked by the caller
+    (their own logical grouping, e.g. one per agent invocation) — there's
+    no separate "create a run" call in this workflow; the first step
+    logged under a new run_id creates it."""
+    run_id:      str = Field(min_length=1, max_length=64)
+    agent_id:    str = Field(min_length=1, max_length=100)
+    action:      str = Field(min_length=1, max_length=100)
+    input:       str = Field(max_length=100_000)
+    output:      str = Field(max_length=100_000)
+    trust_score: int = Field(default=0, ge=0, le=100)
+
+
+class LogStepResponse(BaseModel):
+    step_id:       int
+    outbox_id:     int
+    status:        str = "queued"
+    anchor_status: str
 
 
 class VerifyRequest(BaseModel):
@@ -233,7 +310,7 @@ class ApiKeyListItem(BaseModel):
 #  signup provisions a real Organization/Project underneath (db.tenancy).
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/auth/signup", response_model=AuthResponse)
+@router.post("/auth/signup", response_model=AuthResponse)
 async def signup(body: SignupRequest):
     try:
         user = await db.create_user(
@@ -250,7 +327,7 @@ async def signup(body: SignupRequest):
     return AuthResponse(token=token, name=user["name"], email=user["email"])
 
 
-@app.post("/auth/login", response_model=AuthResponse)
+@router.post("/auth/login", response_model=AuthResponse)
 async def login(body: LoginRequest, request: Request):
     """Credential-stuffing defense (plan §11.3): exponential backoff per
     account AND per IP on failed attempts, checked BEFORE the password
@@ -279,7 +356,7 @@ async def login(body: LoginRequest, request: Request):
 #  auth.py's module docstring on why /auth/login stays as it is).
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/auth/token-pair", response_model=TokenPairResponse)
+@router.post("/auth/token-pair", response_model=TokenPairResponse)
 async def issue_token_pair(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     """Exchanges a valid primary-session JWT for a short-lived access
     token + rotating refresh token — the on-ramp to the additive flow
@@ -293,7 +370,7 @@ async def issue_token_pair(current_user: auth.CurrentUser = Depends(auth.get_cur
     )
 
 
-@app.post("/auth/refresh", response_model=TokenPairResponse)
+@router.post("/auth/refresh", response_model=TokenPairResponse)
 async def refresh_token_pair(body: RefreshRequest):
     try:
         pair = await refresh.rotate_refresh_token(body.refresh_token)
@@ -305,7 +382,7 @@ async def refresh_token_pair(body: RefreshRequest):
     )
 
 
-@app.post("/auth/logout")
+@router.post("/auth/logout")
 async def logout(body: RefreshRequest):
     await refresh.revoke_family_for_token(body.refresh_token)
     return {"ok": True}
@@ -323,7 +400,7 @@ async def _require_admin(current_user: auth.CurrentUser) -> None:
         raise HTTPException(status_code=403, detail="owner or admin role required")
 
 
-@app.post("/api-keys", response_model=ApiKeyCreatedResponse)
+@router.post("/api-keys", response_model=ApiKeyCreatedResponse)
 async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
     try:
@@ -337,14 +414,14 @@ async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUs
     return ApiKeyCreatedResponse(id=key["id"], raw_key=key["rawKey"], last_four=key["lastFour"], scopes=key["scopes"])
 
 
-@app.get("/api-keys")
+@router.get("/api-keys")
 async def list_api_keys(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
     keys = await tenancy.list_api_keys(current_user.project_id)
     return {"keys": keys}
 
 
-@app.delete("/api-keys/{key_id}")
+@router.delete("/api-keys/{key_id}")
 async def revoke_api_key(key_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
     revoked = await tenancy.revoke_api_key(key_id, current_user.project_id, int(time.time()))
@@ -430,7 +507,7 @@ async def _run_pipeline_background(task: str, run_id: str):
 #  POST /run-agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/run-agent", response_model=RunAgentResponse)
+@router.post("/run-agent", response_model=RunAgentResponse)
 async def run_agent(
     body: RunAgentRequest,
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -499,7 +576,7 @@ async def run_agent(
 #  live event stream for one specific already-known run_id.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/stream/{run_id}")
+@router.get("/stream/{run_id}")
 async def stream_events(run_id: str):
     async def event_generator():
         try:
@@ -537,7 +614,7 @@ async def stream_events(run_id: str):
 #  bridge instead (/verify, /verify/tamper-demo, /verify-audit) and why.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/audit-log")
+@router.get("/audit-log")
 async def get_audit_log(
     run_id: Optional[str] = Query(None),
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -561,7 +638,7 @@ async def get_audit_log(
 #  GET /trust-scores
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/trust-scores")
+@router.get("/trust-scores")
 async def get_trust_scores(
     run_id: str = Query(..., description="Run ID to fetch scores for"),
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -579,7 +656,7 @@ async def get_trust_scores(
 #  GET /trust-scores/history
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/trust-scores/history")
+@router.get("/trust-scores/history")
 async def get_trust_score_history(
     run_id: str = Query(..., description="Run ID to fetch score history for"),
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -597,7 +674,7 @@ async def get_trust_score_history(
 #  GET /leaderboard
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/leaderboard")
+@router.get("/leaderboard")
 async def get_leaderboard(
     max_runs: int = Query(50, ge=1, le=500),
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -622,9 +699,9 @@ async def get_leaderboard(
 #  POST /verify
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/verify")
+@router.post("/verify")
 async def verify_integrity(body: VerifyRequest):
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         result = await bridge.verify_run(body.runId)  # already async
         return result
@@ -633,14 +710,14 @@ async def verify_integrity(body: VerifyRequest):
         raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
-@app.get("/verify/tamper-demo")
+@router.get("/verify/tamper-demo")
 async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. researcher")):
     """
     Read-only proof that AgentIdentityRegistry actually detects substitution:
     compares the real agent config hash (should PASS) against a deliberately
     mutated one (should FAIL). No on-chain writes, no gas spent.
     """
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         return await bridge.tamper_demo(agent_id)
     except ValueError as e:
@@ -650,9 +727,9 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
         raise HTTPException(status_code=500, detail="internal error — see server logs for details")
 
 
-@app.get("/verify-audit")
+@router.get("/verify-audit")
 async def verify_audit(run_id: str = Query(...)):
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         # Step 1: get indices for this specific run
         indices = await asyncio.to_thread(
@@ -706,7 +783,7 @@ async def verify_audit(run_id: str = Query(...)):
 #  GET /chain-status   — FIX 6: was using asyncio.to_thread for sync w3 calls
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/chain-status")
+@router.get("/chain-status")
 async def chain_status():
     """
     Called by the frontend on mount to show the top status bar.
@@ -749,8 +826,12 @@ async def chain_status():
 
 @app.get("/health")
 async def health():
-    bridge = get_bridge()
-    chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+    bridge = get_bridge_or_503()
+    try:
+        chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+    except Exception as e:
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
     return {
         "status":   "ok",
         "chain_id": chain_id,
@@ -797,7 +878,7 @@ async def ready():
 #  GET /runs, GET /runs/{run_id}
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/runs")
+@router.get("/runs")
 async def list_runs(
     limit: int = Query(50, ge=1, le=200),
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -809,7 +890,7 @@ async def list_runs(
     return {"runs": runs, "total": len(runs)}
 
 
-@app.get("/runs/{run_id}")
+@router.get("/runs/{run_id}")
 async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
     auth.require_scope(principal, "runs:read")
 
@@ -826,3 +907,138 @@ async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_curr
     if run["status"] == "running":
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not yet complete")
     return run["result"] if run["result"] is not None else run
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /agents, GET /agents/{agent_id}/verify — SDK register_agent()/
+#  verify_agent() (plan §7.3/§13.2). Distinct from the pipeline's own
+#  internal identity checks (agents/base.py, blockchain/hashing_utils.py)
+#  — this is the SAME on-chain registry (AgentIdentityRegistryV2), just
+#  reachable by ANY authenticated project for agents THEY run themselves.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/agents", response_model=RegisterAgentResponse)
+async def register_agent(
+    body: RegisterAgentRequest,
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
+    auth.require_scope(principal, "agents:register")
+    try:
+        tx_hash = await identity_writer.register_agent(body.agent_id, body.code_hash, body.model, body.version)
+    except Exception as e:
+        logger.error("api_error", endpoint="agents.register", error=str(e))
+        raise HTTPException(status_code=502, detail="on-chain registration failed — see server logs for details")
+    return RegisterAgentResponse(agent_id=body.agent_id, tx_hash=tx_hash)
+
+
+@router.get("/agents/{agent_id}/verify")
+async def verify_agent(
+    agent_id: str,
+    code_hash: str = Query(..., pattern=r"^0x[0-9a-fA-F]{64}$"),
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
+    """Live re-verification (§7.3): recomputes nothing here — the caller
+    hashes its OWN current config client-side (same scheme as
+    registration) and asks whether that hash still matches what's
+    registered and active on-chain. A mismatch means the agent's model,
+    version, or prompt changed without re-registering — the same "silent
+    substitution" signal AgentIdentityRegistryV2.verifyAgentFull was
+    built to catch for the pipeline's own 4 agents, now reachable for
+    anyone's."""
+    auth.require_scope(principal, "agents:read")
+    try:
+        return await identity_writer.verify_agent(agent_id, code_hash)
+    except Exception as e:
+        logger.error("api_error", endpoint="agents.verify", error=str(e))
+        raise HTTPException(status_code=502, detail="on-chain verification failed — see server logs for details")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /steps, GET /steps/{step_id}/proof — SDK ingest of a THIRD-PARTY
+#  agent's own step, and the Merkle inclusion proof for it (plan §7.2/
+#  §7.4/§13.4). This is the actual "any third-party agent can be audited"
+#  path — POST /run-agent runs TrustChain's OWN pipeline; this lets a
+#  caller audit an agent it runs itself, writing through the exact same
+#  outbox + Merkle-batching machinery (agents/base.py::log_step) the
+#  internal pipeline uses, so durability and anchoring work identically
+#  either way.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/steps", response_model=LogStepResponse)
+async def log_external_step(
+    body: LogStepRequest,
+    principal: auth.Principal = Depends(auth.get_current_principal),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    auth.require_scope(principal, "logs:write")
+
+    request_body_bytes = body.model_dump_json().encode()
+    if idempotency_key:
+        try:
+            cached = await idempotency.get_cached_response(
+                principal.project_id, idempotency_key, "POST", "/steps", request_body_bytes,
+            )
+        except idempotency.IdempotencyConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if cached is not None:
+            return cached["body"]
+
+    owned = await db.get_or_create_run_for_project(body.run_id, principal.project_id, int(time.time()))
+    if not owned:
+        raise HTTPException(status_code=404, detail=f"Run '{body.run_id}' not found")
+
+    step_index = await db.next_step_index(body.run_id)
+    _, event = await log_step(
+        bridge=None,
+        agent_id=body.agent_id,
+        action=body.action,
+        input_text=body.input,
+        output_text=body.output,
+        step_index=step_index,
+        run_id=body.run_id,
+        trust_score=body.trust_score,
+    )
+    response = LogStepResponse(
+        step_id=event["stepId"], outbox_id=event["outboxId"], anchor_status=event["anchorStatus"],
+    )
+
+    if idempotency_key:
+        await idempotency.store_response(
+            principal.project_id, idempotency_key, "POST", "/steps", request_body_bytes,
+            200, response.model_dump(), int(time.time()),
+        )
+
+    return response
+
+
+@router.get("/steps/{step_id}/proof")
+async def get_step_proof(step_id: int, principal: auth.Principal = Depends(auth.get_current_principal)):
+    auth.require_scope(principal, "runs:read")
+    proof = await read_model.get_step_proof(step_id, principal.project_id)
+    if proof is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Step {step_id} not found, not yours, or not yet anchored in a batch",
+        )
+    return proof
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GET /stats — public platform-level counters (plan Appendix A). No auth,
+#  by design (see read_model.get_platform_stats's docstring for why it's
+#  still safe: aggregate-only, never a per-tenant breakdown).
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/stats")
+async def platform_stats():
+    return await read_model.get_platform_stats()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Mount `router` twice — see this file's earlier "API versioning" note
+#  for why both the unprefixed legacy shape and the /v1 canonical one
+#  stay live indefinitely, pointing at the identical handlers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+app.include_router(router)
+app.include_router(router, prefix="/v1")

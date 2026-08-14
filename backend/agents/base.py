@@ -4,7 +4,6 @@ agents/base.py  —  shared plumbing for all 4 TrustChain agents
 Imports are pointed at blockchain/client.py (your renamed blockchain.py)
 """
 
-import asyncio
 import secrets
 from typing import TypedDict, Annotated, Any, Optional
 from datetime import datetime, timezone

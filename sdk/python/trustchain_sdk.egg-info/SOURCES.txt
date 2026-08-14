@@ -1,10 +1,16 @@
+README.md
 pyproject.toml
 tests/test_client.py
+tests/test_instrumentation.py
 trustchain_sdk/__init__.py
 trustchain_sdk/client.py
 trustchain_sdk/exceptions.py
+trustchain_sdk/instrumentation.py
+trustchain_sdk/merkle.py
 trustchain_sdk.egg-info/PKG-INFO
 trustchain_sdk.egg-info/SOURCES.txt
 trustchain_sdk.egg-info/dependency_links.txt
 trustchain_sdk.egg-info/requires.txt
 trustchain_sdk.egg-info/top_level.txt
+trustchain_sdk/integrations/__init__.py
+trustchain_sdk/integrations/langchain.py

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trustchain-cli"
+version = "0.1.0"
+description = "Command-line tool for TrustChain — verify runs, manage agents/API keys, local dev stack helpers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "trustchain-sdk",
+    "httpx>=0.27,<1.0",
+]
+
+[project.scripts]
+trustchain = "trustchain_cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+include = ["trustchain_cli*"]

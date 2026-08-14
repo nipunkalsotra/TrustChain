@@ -19,7 +19,6 @@ import hashlib
 import json
 from typing import Optional
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 

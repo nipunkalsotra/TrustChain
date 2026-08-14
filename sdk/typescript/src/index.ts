@@ -12,3 +12,8 @@ export {
   ServerError,
   StreamTimeoutError,
 } from "./errors.js";
+export { TrustChain } from "./instrumentation.js";
+export type {
+  TrustChainOptions, OnError, StepReceipt, VerifyResult, MerkleProofResult,
+} from "./instrumentation.js";
+export { hashPair, verifyProof, hexToBytes, bytesToHex, keccak256Hex } from "./merkle.js";

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: trustchain-cli
+Version: 0.1.0
+Summary: Command-line tool for TrustChain — verify runs, manage agents/API keys, local dev stack helpers.
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: trustchain-sdk
+Requires-Dist: httpx<1.0,>=0.27
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"

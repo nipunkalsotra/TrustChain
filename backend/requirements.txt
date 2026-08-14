@@ -6,6 +6,7 @@ python-dotenv==1.2.2
 PyJWT==2.13.0
 pydantic-settings==2.15.0
 structlog==26.1.0
+argon2-cffi==25.1.0
 
 # Database (Postgres, async)
 SQLAlchemy==2.0.52

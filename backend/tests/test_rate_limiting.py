@@ -81,7 +81,6 @@ def test_login_backoff_locks_out_after_repeated_failures(client):
     # backoff window eventually trip the 429 lockout.
     assert statuses[0] == 401
     assert 429 in statuses
-    limited_index = statuses.index(429)
     assert "Retry-After" in client.post(
         "/auth/login", json={"email": user["email"], "password": "wrong-password"}
     ).headers

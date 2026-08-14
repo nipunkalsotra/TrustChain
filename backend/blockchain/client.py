@@ -17,6 +17,7 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from blockchain.hashing_utils import AGENTS, compute_hash
+from blockchain.resilient_provider import FallbackHTTPProvider
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ _AGENT_CONFIGS = {a["agentId"]: a for a in AGENTS}
 # ─────────────────────────────────────────────────────────────────────────────
 
 RPC_URL       = get_settings().monad_rpc_url
+RPC_URLS      = get_settings().resolved_monad_rpc_urls  # RPC_URL + any *_RPC_FALLBACK_URLS
 PRIVATE_KEY   = get_settings().private_key
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
 
@@ -352,11 +354,15 @@ async def _fetch_tx_map(audit_log_contract, from_block: int = 0) -> dict[int, st
 class BlockchainBridge:
 
     def __init__(self):
-        self.w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        # A single-URL RPC_URLS list (no *_RPC_FALLBACK_URLS set) makes
+        # this identical to the old bare Web3.HTTPProvider(RPC_URL) — see
+        # blockchain/contracts_v2.py's build_w3 for the same pattern.
+        provider = Web3.HTTPProvider(RPC_URLS[0]) if len(RPC_URLS) == 1 else FallbackHTTPProvider(RPC_URLS)
+        self.w3 = Web3(provider)
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
         if not self.w3.is_connected():
-            raise ConnectionError(f"Cannot connect to RPC: {RPC_URL}")
+            raise ConnectionError(f"Cannot connect to RPC: {RPC_URLS}")
         logger.info("Connected to Monad testnet. Chain ID: %s", self.w3.eth.chain_id)
 
         if not PRIVATE_KEY:

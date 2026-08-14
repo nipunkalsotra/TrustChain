@@ -1,13 +1,87 @@
 # trustchain-sdk (Python)
 
-Client for the TrustChain API — start and stream agent pipeline runs, read
-trust scores and audit history. Built for the "SDK-driven third-party
-agent" use case: authenticate with an API key (`tc_live_.../tc_test_...`,
-minted via `POST /api-keys`), no human login required.
+Two things live here, both authenticating with an API key
+(`tc_live_.../tc_test_...`, minted via `POST /api-keys`), no human login
+required:
+
+1. **`TrustChain`** — instrument YOUR OWN agent, running wherever it
+   already runs. This is the actual "any third-party agent can be
+   audited through a published SDK" surface.
+2. **`TrustChainClient`/`AsyncTrustChainClient`** — a REST wrapper around
+   TrustChain's *own* 4-agent pipeline (`POST /run-agent`, SSE streaming,
+   trust scores). Useful if you want TrustChain to run agents on your
+   behalf, rather than auditing agents you run yourself.
 
 ```bash
-pip install -e sdk/python   # from the repo root, until this is published
+pip install -e "sdk/python[onchain,langchain]"   # from the repo root, until this is published
 ```
+
+## Instrumenting your own agent
+
+```python
+from trustchain_sdk import TrustChain
+
+tc = TrustChain(api_key="tc_live_...")
+
+# Register the agent's fingerprint once (or whenever its config changes).
+# system_prompt is hashed CLIENT-SIDE here — the raw prompt is never sent.
+tc.register_agent(
+    agent_id="support-bot", model="gpt-4o", version="2026-01",
+    system_prompt=SUPPORT_PROMPT,
+)
+
+# Log a step explicitly. Non-blocking by default (queues onto a
+# background worker thread and returns immediately with step_id=None —
+# audit logging must never add latency to your hot path); pass
+# wait=True for the synchronous version that returns the real step_id.
+result = my_llm_call(query)
+tc.log(agent_id="support-bot", action="answer_query", input=query, output=result)
+
+# Or zero lines in the hot path:
+@tc.audited(agent_id="support-bot", action="answer_query")
+def answer_query(query: str) -> str:
+    return my_llm_call(query)
+
+# Call before process exit so any still-queued log() calls aren't lost.
+tc.flush()
+```
+
+**Framework integration** — audits every LLM/tool call automatically:
+
+```python
+from trustchain_sdk.integrations.langchain import TrustChainCallback
+
+agent = create_agent(llm, tools, callbacks=[TrustChainCallback(tc, agent_id="support-bot")])
+```
+
+**Verification:**
+
+```python
+result = tc.verify_agent("support-bot", model="gpt-4o", version="2026-01", system_prompt=SUPPORT_PROMPT)
+# VerifyResult(verified=True, is_active=True, hash_matches=True, ...)
+# verified=False means the model/version/prompt changed without re-registering.
+
+proof = tc.get_proof(step_id)          # MerkleProof(leaf, proof, root, tx_hash, ...)
+tc.verify_proof(proof)                 # bool — local recompute, no network
+tc.verify_proof_onchain(proof, rpc_url=..., audit_log_address=...)  # bool — reads the REAL contract
+```
+
+`verify_proof` is a pure local computation (fold the proof into the leaf,
+compare to `proof.root`) — meaningful, but it trusts that `proof.root` is
+what TrustChain's API says it is. `verify_proof_onchain` is the stronger
+form: it reads `AgentAuditLogV2.verifyProof(...)` directly from the chain
+at the RPC URL/contract address you provide, so it doesn't have to trust
+the API's word for the root at all — only the chain's.
+
+### Failure handling
+
+Every `TrustChain` method fails open by default (`on_error="warn"`, the
+constructor's default) — a TrustChain outage degrades to a logged warning
+via the `trustchain_sdk` logger, never an exception into your code. Pass
+`on_error="raise"` to get real exceptions instead (useful in tests/CI,
+where a silently-dropped step should fail loudly).
+
+## Calling TrustChain's own pipeline
 
 ## Quickstart
 
@@ -108,12 +182,17 @@ stream had already reported the run as done. `run_and_wait()` and
 
 ## Testing
 
-`tests/test_client.py` runs against a REAL TrustChain stack — no mocking
-of `httpx` or the API:
+`tests/test_client.py` and `tests/test_instrumentation.py` run against a
+REAL TrustChain stack — no mocking of `httpx` or the API. The
+instrumentation tests additionally need real Anvil with V2 deployed
+(`register_agent`/`verify_agent`/`get_proof`/`verify_proof_onchain` are
+all real on-chain reads/writes, verified end-to-end including a real
+`AgentAuditLogV2.verifyProof()` call and its negative case — a forged
+leaf that correctly fails to verify):
 
 ```bash
 docker compose up -d postgres redis anvil api anchor-worker indexer mcp-search mcp-blockchain
-pip install -e ".[dev]"
+pip install -e ".[dev,onchain]"
 pytest tests/ -v
 ```
 
