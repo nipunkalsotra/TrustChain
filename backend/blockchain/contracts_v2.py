@@ -15,9 +15,12 @@ for no real benefit, since each caller already caches at its own layer.
 
 import json
 from pathlib import Path
+from typing import Union
 
-from web3 import Web3
+from web3 import HTTPProvider, Web3
 from web3.middleware import ExtraDataToPOAMiddleware
+
+from blockchain.resilient_provider import FallbackHTTPProvider
 
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
 
@@ -39,11 +42,19 @@ def load_addresses() -> dict:
         return json.load(f)
 
 
-def build_w3(rpc_url: str) -> Web3:
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
+def build_w3(rpc_url: Union[str, list[str]]) -> Web3:
+    """A single URL builds a plain HTTPProvider — unchanged behavior for
+    every existing caller. A list builds a FallbackHTTPProvider (see
+    blockchain/resilient_provider.py): endpoints after the first are only
+    ever used if an earlier one's circuit breaker trips, so a
+    single-element list is likewise indistinguishable from today's
+    single-URL behavior."""
+    urls = [rpc_url] if isinstance(rpc_url, str) else list(rpc_url)
+    provider = HTTPProvider(urls[0]) if len(urls) == 1 else FallbackHTTPProvider(urls)
+    w3 = Web3(provider)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     if not w3.is_connected():
-        raise ConnectionError(f"cannot connect to RPC: {rpc_url}")
+        raise ConnectionError(f"cannot connect to RPC: {urls}")
     return w3
 
 

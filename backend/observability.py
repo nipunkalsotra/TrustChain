@@ -73,6 +73,30 @@ ANCHOR_OUTBOX_PENDING = Gauge(
 ANCHOR_SUBMIT_DURATION_SECONDS = Histogram(
     "anchor_submit_duration_seconds", "Time from tx submit to confirmed receipt"
 )
+ANCHOR_WALLET_BALANCE_WEI = Gauge(
+    "anchor_wallet_balance_wei",
+    "Native-token balance of the anchor worker's signing wallet (sampled each work loop) — "
+    "the wallet running dry is exactly the 'gas exhaustion' failure mode "
+    "(see tests/test_chaos.py's insufficient-funds scenario): every anchorBatch "
+    "call after that silently fails at the pre-send stage, not on-chain, so "
+    "there's no revert to alert on without this. Precision note: Prometheus "
+    "Gauges are float64 (the exposition format itself is), so this loses "
+    "precision below ~1 part in 2^53 of a wei-scale balance — irrelevant for "
+    "an alerting threshold (AnchorWalletBalanceLow), not a source of truth "
+    "for exact accounting.",
+)
+
+# ── RPC resilience (blockchain/resilient_provider.py) — anchor worker and
+#    indexer processes, whichever process's Web3 is built with
+#    FallbackHTTPProvider (i.e. *_RPC_FALLBACK_URLS is actually set) ───────
+RPC_CIRCUIT_BREAKER_OPEN = Gauge(
+    "rpc_circuit_breaker_open",
+    "1 if this RPC endpoint's circuit breaker is open (skipped, cooling "
+    "down after repeated failures), 0 otherwise — see "
+    "blockchain/resilient_provider.py. Only emitted when multiple RPC "
+    "endpoints are configured; absent entirely for a single-endpoint setup.",
+    ["endpoint"],
+)
 
 # ── Indexer (indexer process) ───────────────────────────────────────────
 INDEXER_EVENTS_PROCESSED_TOTAL = Counter(

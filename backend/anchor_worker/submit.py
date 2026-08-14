@@ -44,7 +44,18 @@ async def submit_batch(
     w3: Web3,
     confirm_timeout: int = 60,
 ) -> dict:
-    fn = contract.functions.anchorBatch(batch["run_id_hash"], batch["root_hex"], batch["step_count"])
+    # metaURI: optional IPFS/Arweave content-address for the batch's full
+    # leaf set (AgentAuditLogV2.anchorBatch's 4th param — see its
+    # docstring for what this buys: full public verifiability independent
+    # of TrustChain's own database staying intact, §8.1's "recommended
+    # end state" mitigation for the Merkle-batching data-availability
+    # trade-off). Always "" today — actually pinning the leaf set to
+    # IPFS/Arweave needs a real pinning service account, which is
+    # out of scope here (no such credentials exist for this deployment);
+    # wiring one in later is exactly this one line, not a schema or
+    # contract change.
+    meta_uri = ""
+    fn = contract.functions.anchorBatch(batch["run_id_hash"], batch["root_hex"], batch["step_count"], meta_uri)
     submit_start = time.monotonic()
 
     # Everything from nonce fetch through send is one failure domain: a
@@ -98,13 +109,31 @@ async def submit_batch(
         observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="revert").inc()
         raise SubmitError(f"tx {tx_hash_hex} reverted (status=0)")
 
+    # anchorBatch() returns the on-chain anchorId AND emits it in
+    # BatchAnchored — decode it from the receipt now, synchronously,
+    # rather than leaving onchain_anchor_id NULL until the indexer's
+    # separate reconciliation pass eventually reprocesses this same event
+    # (indexer/reconcile.py — that path exists for the crash-recovery
+    # case where THIS process died before reaching this line, not as the
+    # only way this column ever gets populated). Anything that needs
+    # anchorId right after confirmation (e.g. GET /steps/{id}/proof,
+    # which calls the real verifyProof(anchorId, ...) on-chain) would
+    # otherwise see NULL for however long the indexer takes to catch up —
+    # a real gap this caught, not a hypothetical.
+    decoded = contract.events.BatchAnchored().process_receipt(receipt)
+    onchain_anchor_id = decoded[0]["args"]["anchorId"] if decoded else None
+
     await session.execute(
         text("""
             UPDATE anchor_batches
-            SET status = 'confirmed', block_number = :block_number, confirmed_at = :now
+            SET status = 'confirmed', block_number = :block_number, confirmed_at = :now,
+                onchain_anchor_id = :onchain_anchor_id
             WHERE id = :batch_id
         """),
-        {"block_number": receipt.blockNumber, "now": _now(), "batch_id": batch["batch_id"]},
+        {
+            "block_number": receipt.blockNumber, "now": _now(), "batch_id": batch["batch_id"],
+            "onchain_anchor_id": onchain_anchor_id,
+        },
     )
     await session.execute(
         text("UPDATE anchor_outbox SET status = 'anchored' WHERE batch_id = :batch_id"),
@@ -116,7 +145,10 @@ async def submit_batch(
     observability.ANCHOR_BATCH_SIZE_STEPS.observe(batch["step_count"])
     observability.ANCHOR_SUBMIT_DURATION_SECONDS.observe(time.monotonic() - submit_start)
 
-    return {"tx_hash": tx_hash_hex, "block_number": receipt.blockNumber, "status": "confirmed"}
+    return {
+        "tx_hash": tx_hash_hex, "block_number": receipt.blockNumber, "status": "confirmed",
+        "onchain_anchor_id": onchain_anchor_id,
+    }
 
 
 def _now() -> int:

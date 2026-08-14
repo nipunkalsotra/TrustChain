@@ -45,6 +45,7 @@ import jwt
 from fastapi import Header, HTTPException
 
 from config import get_settings
+from db.engine import current_org_id, current_project_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +54,22 @@ _TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 days — see module docstring on why thi
 
 
 def create_token(email: str, name: str, project_id: int, org_id: int, user_id: int = 0) -> str:
+    settings = get_settings()
     now = int(time.time())
     payload = {
         "sub": email, "name": name, "project_id": project_id, "org_id": org_id, "user_id": user_id,
         "iat": now, "exp": now + _TOKEN_TTL_SECONDS,
+        "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
     }
-    return jwt.encode(payload, get_settings().jwt_secret, algorithm=_ALGORITHM)
+    return jwt.encode(payload, settings.jwt_secret, algorithm=_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
+    settings = get_settings()
+    return jwt.decode(
+        token, settings.jwt_secret, algorithms=[_ALGORITHM],
+        issuer=settings.jwt_issuer, audience=settings.jwt_audience,
+    )
 
 
 class Principal:
@@ -110,6 +117,11 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Curre
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="invalid or expired token")
 
+    # Sets the RLS session context for every DB transaction this request
+    # opens from here on — see db/engine.py's module docstring.
+    current_project_id.set(payload["project_id"])
+    current_org_id.set(payload["org_id"])
+
     return CurrentUser(
         email=payload["sub"], name=payload.get("name", ""),
         project_id=payload["project_id"], org_id=payload["org_id"],
@@ -133,6 +145,8 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
         key_info = await tenancy.verify_api_key(token, now=int(time.time()))
         if key_info is None:
             raise HTTPException(status_code=401, detail="invalid, revoked, or expired API key")
+        current_project_id.set(key_info["projectId"])
+        current_org_id.set(key_info["orgId"])
         return Principal(
             project_id=key_info["projectId"], org_id=key_info["orgId"],
             actor=f"api_key:{key_info['id']}", scopes=key_info["scopes"],
@@ -143,6 +157,8 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="invalid or expired token")
 
+    current_project_id.set(payload["project_id"])
+    current_org_id.set(payload["org_id"])
     return Principal(project_id=payload["project_id"], org_id=payload["org_id"], actor=payload["sub"], scopes=None)
 
 

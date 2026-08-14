@@ -67,17 +67,26 @@ contract AgentAuditLogV2 is AccessControl, Pausable {
     ///         exactly-once effect on-chain.
     mapping(bytes32 => bool) public usedRoots;
 
+    /// @dev event data is ~10x cheaper than storage (§12.3) — metaURI
+    ///      lives ONLY in the log, never in `BatchRecord`/contract storage.
     event BatchAnchored(
         uint256 indexed anchorId,
         bytes32 indexed runIdHash,
         bytes32 merkleRoot,
         uint32 stepCount,
+        string metaURI,
         uint256 timestamp,
         address anchoredBy
     );
 
     error EmptyBatch();
     error DuplicateRoot(bytes32 merkleRoot);
+    error MetaURITooLong();
+
+    /// @dev Input length cap to prevent gas-griefing through oversized
+    ///      strings (§11.6) — generous enough for any real IPFS/Arweave
+    ///      URI (ipfs://<CID>, ar://<txid>, or a gateway URL) with margin.
+    uint256 public constant MAX_META_URI_LENGTH = 256;
 
     constructor(address admin) {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -99,8 +108,19 @@ contract AgentAuditLogV2 is AccessControl, Pausable {
      * @param stepCount   Number of leaves in the tree — informational, lets
      *                    a reader sanity-check a proof's claimed position
      *                    without re-deriving the whole tree.
+     * @param metaURI     Optional content-address (e.g. "ipfs://<CID>",
+     *                    "ar://<txid>") for the batch's full leaf set,
+     *                    pinned off-chain by the anchor worker. Pass "" to
+     *                    omit. This is §8.1's data-availability mitigation:
+     *                    a Merkle root alone proves a leaf existed *if the
+     *                    off-chain leaf set survives* — pinning that set
+     *                    to IPFS/Arweave and recording the CID here
+     *                    restores full public verifiability independent of
+     *                    TrustChain's own database staying intact. Lives
+     *                    only in the event log, never in contract storage
+     *                    (see BatchAnchored's own docstring).
      */
-    function anchorBatch(bytes32 runIdHash, bytes32 merkleRoot, uint32 stepCount)
+    function anchorBatch(bytes32 runIdHash, bytes32 merkleRoot, uint32 stepCount, string calldata metaURI)
         external
         onlyRole(ANCHOR_ROLE)
         whenNotPaused
@@ -108,6 +128,7 @@ contract AgentAuditLogV2 is AccessControl, Pausable {
     {
         if (stepCount == 0) revert EmptyBatch();
         if (usedRoots[merkleRoot]) revert DuplicateRoot(merkleRoot);
+        if (bytes(metaURI).length > MAX_META_URI_LENGTH) revert MetaURITooLong();
 
         usedRoots[merkleRoot] = true;
 
@@ -123,7 +144,7 @@ contract AgentAuditLogV2 is AccessControl, Pausable {
         anchorId = batches.length - 1;
         batchesForRun[runIdHash].push(anchorId);
 
-        emit BatchAnchored(anchorId, runIdHash, merkleRoot, stepCount, block.timestamp, msg.sender);
+        emit BatchAnchored(anchorId, runIdHash, merkleRoot, stepCount, metaURI, block.timestamp, msg.sender);
     }
 
     /**

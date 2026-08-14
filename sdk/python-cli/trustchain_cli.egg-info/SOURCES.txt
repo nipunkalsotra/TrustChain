@@ -1,0 +1,10 @@
+pyproject.toml
+trustchain_cli/__init__.py
+trustchain_cli/credentials.py
+trustchain_cli/main.py
+trustchain_cli.egg-info/PKG-INFO
+trustchain_cli.egg-info/SOURCES.txt
+trustchain_cli.egg-info/dependency_links.txt
+trustchain_cli.egg-info/entry_points.txt
+trustchain_cli.egg-info/requires.txt
+trustchain_cli.egg-info/top_level.txt

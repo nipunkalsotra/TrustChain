@@ -13,6 +13,7 @@ import asyncio
 import signal
 
 import observability
+from blockchain.resilient_provider import sample_breaker_states
 from config import get_settings
 from db.engine import get_sessionmaker
 from indexer.chain import get_audit_log_contract, get_trust_score_contract, get_w3
@@ -39,6 +40,14 @@ async def run_once() -> int:
             session, w3, get_trust_score_contract(), "ScoreUpdated",
             index_score_updated, "TrustScoreRegistryV2",
         )
+
+    # Sampled AFTER polling, not before: it's this same iteration's real
+    # RPC calls (get_logs for both event streams) that would trip a
+    # breaker, so reading breaker state first would only ever reflect the
+    # PREVIOUS iteration's activity, one cycle stale.
+    for endpoint, state in sample_breaker_states(w3).items():
+        observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=endpoint).set(1 if state == "open" else 0)
+
     return handled
 
 

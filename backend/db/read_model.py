@@ -31,6 +31,7 @@ from typing import Optional
 
 from sqlalchemy import func, select
 
+from db import engine
 from db.engine import get_sessionmaker
 from db.models import AnchorBatch, AnchorOutbox, ReadModelScore, Run, Step
 
@@ -79,6 +80,60 @@ async def get_audit_log_entries(project_id: int, run_id: Optional[str] = None) -
             "anchorStatus": anchor_status,
         })
     return entries
+
+
+# ── Merkle inclusion proof (GET /steps/{id}/proof, plan §7.2) ──────────
+
+async def get_step_proof(step_id: int, project_id: int) -> Optional[dict]:
+    """Reconstructs a step's Merkle inclusion proof from its batch's
+    persisted `leaf_order` (see AnchorBatch's own docstring on why that's
+    stored rather than re-derived) — walks the SAME tree-building code
+    (blockchain/merkle.build_tree) the anchor worker used, so the proof
+    this returns is provably the one that verifies against the on-chain
+    root, not a reimplementation that happens to usually agree with it.
+
+    Returns None if the step doesn't exist, doesn't belong to this
+    project (invariant I7), or hasn't been placed in a batch yet — the
+    caller (main.py) maps all three to the same 404, same reasoning as
+    get_run(): a caller can't distinguish "not yours" from "not ready"
+    from "never existed" by probing IDs, and "not ready" here is exactly
+    "not ready" — there is nothing to prove membership in yet.
+    """
+    from blockchain.merkle import build_tree
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        stmt = (
+            select(Step, AnchorBatch)
+            .join(Run, Run.run_id == Step.run_id)
+            .join(AnchorBatch, Step.anchor_batch_id == AnchorBatch.id)
+            .where(Step.id == step_id, Run.project_id == project_id)
+        )
+        row = (await session.execute(stmt)).first()
+        if row is None:
+            return None
+        step, batch = row
+
+        leaf_order: list[int] = batch.leaf_order
+        batch_steps_stmt = select(Step).where(Step.id.in_(leaf_order))
+        batch_steps = {s.id: s for s in (await session.execute(batch_steps_stmt)).scalars().all()}
+
+    leaves = [bytes.fromhex(batch_steps[sid].leaf_hash.removeprefix("0x")) for sid in leaf_order]
+    tree = build_tree(leaves)
+    index = leaf_order.index(step_id)
+
+    return {
+        "stepId": step_id,
+        "runId": step.run_id,
+        "leaf": "0x" + tree.leaves[index].hex(),
+        "proof": tree.proof_hex(index),
+        "root": tree.root_hex,
+        "anchorId": batch.onchain_anchor_id,
+        "txHash": batch.tx_hash,
+        "anchorStatus": batch.status,
+        "rawInputHash": step.input_hash,
+        "rawOutputHash": step.output_hash,
+    }
 
 
 # ── Trust scores (rm_scores) ────────────────────────────────────────────
@@ -180,3 +235,37 @@ async def get_leaderboard(project_id: int, max_runs: int = 50) -> dict:
     agents.sort(key=lambda a: a["avgScore"], reverse=True)
 
     return {"agents": agents, "totalRuns": total_runs, "runsConsidered": runs_considered}
+
+
+# ── Platform stats (GET /stats — public, plan Appendix A) ──────────────
+
+async def get_platform_stats() -> dict:
+    """Deliberately NOT project-scoped — this is the one read endpoint
+    that's genuinely public (no auth, see main.py). That means it must
+    only ever return AGGREGATE, cross-tenant counts, never anything that
+    could reveal one tenant's activity to another (a per-project
+    breakdown here would itself be an invariant-I7 violation, just via a
+    different door than the scoped endpoints).
+
+    runs/steps carry RLS policies scoped to app.current_project_id (see
+    db/engine.py) — there IS no principal here (no auth on this route),
+    so that GUC is never set and the policies would deny every row by
+    default. rls_bypass() is the explicit, narrow, grep-able exception:
+    this is the one query in the codebase that's supposed to see across
+    every tenant, and only ever returns opaque counts, never row content."""
+    session_factory = get_sessionmaker()
+    with engine.rls_bypass():
+        async with session_factory() as session:
+            total_runs = (await session.execute(select(func.count()).select_from(Run))).scalar_one()
+            total_steps = (await session.execute(select(func.count()).select_from(Step))).scalar_one()
+            total_anchored_batches = (
+                await session.execute(
+                    select(func.count()).select_from(AnchorBatch).where(AnchorBatch.status == "confirmed")
+                )
+            ).scalar_one()
+
+    return {
+        "totalRuns": total_runs,
+        "totalSteps": total_steps,
+        "totalAnchoredBatches": total_anchored_batches,
+    }

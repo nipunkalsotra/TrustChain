@@ -24,7 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-CONTRACT_KEYS = ["AgentAuditLogV2", "TrustScoreRegistryV2", "AgentIdentityRegistryV2"]
+CONTRACT_KEYS = ["AgentAuditLogV2", "TrustScoreRegistryV2", "AgentIdentityRegistryV2", "TrustChainRegistry"]
 
 
 def main() -> None:

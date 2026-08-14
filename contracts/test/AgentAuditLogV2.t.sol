@@ -10,6 +10,7 @@ contract AgentAuditLogV2Test is Test {
         bytes32 indexed runIdHash,
         bytes32 merkleRoot,
         uint32 stepCount,
+        string metaURI,
         uint256 timestamp,
         address anchoredBy
     );
@@ -60,14 +61,14 @@ contract AgentAuditLogV2Test is Test {
     function test_RevertWhen_StrangerAnchors() public {
         vm.prank(stranger);
         vm.expectRevert();
-        auditLog.anchorBatch(runIdHash, keccak256("root"), 5);
+        auditLog.anchorBatch(runIdHash, keccak256("root"), 5, "");
     }
 
     function test_AdminAloneCannotAnchor_MustHoldAnchorRoleToo() public {
         // Admin has DEFAULT_ADMIN_ROLE but was never granted ANCHOR_ROLE —
         // roles are additive, not hierarchical, by design here.
         vm.expectRevert();
-        auditLog.anchorBatch(runIdHash, keccak256("root"), 5);
+        auditLog.anchorBatch(runIdHash, keccak256("root"), 5, "");
     }
 
     // ── anchorBatch happy path ──────────────────────────────────────────────
@@ -76,7 +77,7 @@ contract AgentAuditLogV2Test is Test {
         bytes32 root = keccak256("merkle-root-1");
 
         vm.prank(relayer);
-        uint256 anchorId = auditLog.anchorBatch(runIdHash, root, 7);
+        uint256 anchorId = auditLog.anchorBatch(runIdHash, root, 7, "");
 
         assertEq(anchorId, 0);
         AgentAuditLogV2.BatchRecord memory rec = auditLog.getBatch(0);
@@ -91,16 +92,39 @@ contract AgentAuditLogV2Test is Test {
         bytes32 root = keccak256("merkle-root-2");
 
         vm.expectEmit(true, true, false, true);
-        emit BatchAnchored(0, runIdHash, root, 3, block.timestamp, relayer);
+        emit BatchAnchored(0, runIdHash, root, 3, "", block.timestamp, relayer);
 
         vm.prank(relayer);
-        auditLog.anchorBatch(runIdHash, root, 3);
+        auditLog.anchorBatch(runIdHash, root, 3, "");
+    }
+
+    function test_AnchorBatch_EmitsProvidedMetaURI() public {
+        bytes32 root = keccak256("merkle-root-cid");
+        string memory cid = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+        vm.expectEmit(true, true, false, true);
+        emit BatchAnchored(0, runIdHash, root, 2, cid, block.timestamp, relayer);
+
+        vm.prank(relayer);
+        auditLog.anchorBatch(runIdHash, root, 2, cid);
+    }
+
+    function test_RevertWhen_MetaURIExceedsMaxLength() public {
+        // MAX_META_URI_LENGTH is 256 — build a 257-byte string.
+        bytes memory tooLong = new bytes(257);
+        for (uint256 i = 0; i < tooLong.length; i++) {
+            tooLong[i] = "a";
+        }
+
+        vm.prank(relayer);
+        vm.expectRevert(AgentAuditLogV2.MetaURITooLong.selector);
+        auditLog.anchorBatch(runIdHash, keccak256("root"), 1, string(tooLong));
     }
 
     function test_AnchorBatch_SequentialIds() public {
         vm.startPrank(relayer);
-        uint256 id0 = auditLog.anchorBatch(runIdHash, keccak256("r0"), 1);
-        uint256 id1 = auditLog.anchorBatch(runIdHash, keccak256("r1"), 1);
+        uint256 id0 = auditLog.anchorBatch(runIdHash, keccak256("r0"), 1, "");
+        uint256 id1 = auditLog.anchorBatch(runIdHash, keccak256("r1"), 1, "");
         vm.stopPrank();
 
         assertEq(id0, 0);
@@ -112,9 +136,9 @@ contract AgentAuditLogV2Test is Test {
         bytes32 otherRun = keccak256("run_2");
 
         vm.startPrank(relayer);
-        auditLog.anchorBatch(runIdHash, keccak256("r0"), 1);
-        auditLog.anchorBatch(otherRun, keccak256("r1"), 1);
-        auditLog.anchorBatch(runIdHash, keccak256("r2"), 1);
+        auditLog.anchorBatch(runIdHash, keccak256("r0"), 1, "");
+        auditLog.anchorBatch(otherRun, keccak256("r1"), 1, "");
+        auditLog.anchorBatch(runIdHash, keccak256("r2"), 1, "");
         vm.stopPrank();
 
         uint256[] memory forRun1 = auditLog.getBatchesForRun(runIdHash);
@@ -132,17 +156,17 @@ contract AgentAuditLogV2Test is Test {
     function test_RevertWhen_EmptyBatch() public {
         vm.prank(relayer);
         vm.expectRevert(AgentAuditLogV2.EmptyBatch.selector);
-        auditLog.anchorBatch(runIdHash, keccak256("root"), 0);
+        auditLog.anchorBatch(runIdHash, keccak256("root"), 0, "");
     }
 
     function test_RevertWhen_DuplicateRoot() public {
         bytes32 root = keccak256("same-root");
 
         vm.startPrank(relayer);
-        auditLog.anchorBatch(runIdHash, root, 5);
+        auditLog.anchorBatch(runIdHash, root, 5, "");
 
         vm.expectRevert(abi.encodeWithSelector(AgentAuditLogV2.DuplicateRoot.selector, root));
-        auditLog.anchorBatch(runIdHash, root, 5);
+        auditLog.anchorBatch(runIdHash, root, 5, "");
         vm.stopPrank();
     }
 
@@ -153,7 +177,7 @@ contract AgentAuditLogV2Test is Test {
 
         vm.prank(relayer);
         vm.expectRevert();
-        auditLog.anchorBatch(runIdHash, keccak256("root"), 1);
+        auditLog.anchorBatch(runIdHash, keccak256("root"), 1, "");
     }
 
     function test_AnchoringResumesAfterUnpause() public {
@@ -161,7 +185,7 @@ contract AgentAuditLogV2Test is Test {
         auditLog.unpause();
 
         vm.prank(relayer);
-        uint256 anchorId = auditLog.anchorBatch(runIdHash, keccak256("root"), 1);
+        uint256 anchorId = auditLog.anchorBatch(runIdHash, keccak256("root"), 1, "");
         assertEq(anchorId, 0);
     }
 
@@ -179,7 +203,7 @@ contract AgentAuditLogV2Test is Test {
         bytes32 root = _hashPair(node01, node23);
 
         vm.prank(relayer);
-        uint256 anchorId = auditLog.anchorBatch(runIdHash, root, 4);
+        uint256 anchorId = auditLog.anchorBatch(runIdHash, root, 4, "");
 
         bytes32[] memory proof0 = new bytes32[](2);
         proof0[0] = leaf1;

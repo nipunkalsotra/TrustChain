@@ -74,7 +74,10 @@ def chain_settings(monkeypatch):
     monkeypatch.setattr("anchor_worker.chain.get_settings", lambda: test_settings)
     monkeypatch.setattr("indexer.chain.get_settings", lambda: test_settings)
     modules = (anchor_chain_module, indexer_chain_module)
-    caches = ["get_w3", "get_signer", "get_audit_log_contract", "get_trust_score_contract"]
+    caches = [
+        "get_w3", "get_signer", "get_audit_log_contract", "get_trust_score_contract",
+        "get_identity_registry_contract",
+    ]
 
     def _clear():
         for module in modules:

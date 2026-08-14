@@ -209,3 +209,28 @@ def test_indexer_is_idempotent_on_rerun(chain_settings):
             return result.scalar_one()
 
     assert run(_count()) == 1
+
+
+@requires_anvil
+def test_indexer_run_once_samples_circuit_breaker_state(chain_settings, monkeypatch):
+    """indexer/main.py::run_once must publish each configured RPC
+    endpoint's real circuit-breaker state into
+    observability.RPC_CIRCUIT_BREAKER_OPEN every iteration — what
+    RpcCircuitBreakerOpen (docker/prometheus/alerts.yml) alerts on."""
+    import observability
+    from web3 import Web3
+
+    from blockchain.resilient_provider import FallbackHTTPProvider
+    from indexer import main as indexer_main
+
+    dead_rpc = "http://localhost:19999"
+    anvil_rpc = "http://localhost:8545"
+    fallback_w3 = Web3(FallbackHTTPProvider([dead_rpc, anvil_rpc], failure_threshold=1, reset_timeout_seconds=30))
+    monkeypatch.setattr(indexer_main, "get_w3", lambda: fallback_w3)
+
+    run(run_once())
+
+    dead_state = observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=dead_rpc)._value.get()
+    healthy_state = observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=anvil_rpc)._value.get()
+    assert dead_state == 1.0  # tripped after the first real connection-refused failure
+    assert healthy_state == 0.0

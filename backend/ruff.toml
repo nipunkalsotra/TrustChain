@@ -1,0 +1,15 @@
+# ruff.toml — CI's static-analysis gate (.github/workflows/test.yml's
+# `backend` job). Scoped to F (pyflakes: undefined names, unused imports,
+# genuinely dead code) and E9 (syntax errors) — the categories that catch
+# real bugs, not style. This codebase predates ruff; the full default
+# ruleset (pyupgrade, bugbear, blind-except, ...) flags ~180 findings that
+# are either stylistic modernization or deliberate patterns already
+# reviewed elsewhere (e.g. fail-open `except Exception` in worker loops,
+# see anchor_worker/main.py's own docstring on why that's intentional) —
+# turning all of those on at once would make this gate something to
+# silence rather than something that catches real regressions. Expand the
+# `select` list deliberately, rule by rule, not by flipping to "ALL".
+line-length = 120
+
+[lint]
+select = ["F", "E9"]

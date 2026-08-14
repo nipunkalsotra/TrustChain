@@ -1,4 +1,11 @@
 httpx<1.0,>=0.27
+eth-utils>=4.0
 
 [dev]
 pytest>=8
+
+[langchain]
+langchain-core>=0.3
+
+[onchain]
+web3>=7.0

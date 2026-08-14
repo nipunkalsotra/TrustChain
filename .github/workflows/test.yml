@@ -28,6 +28,41 @@ jobs:
       - name: Run Forge tests
         run: forge test -vvv
         working-directory: contracts
+      - name: Check gas snapshot for regressions
+        # contracts/.gas-snapshot is committed — `forge snapshot` (no
+        # --check) regenerates it locally after a deliberate gas-affecting
+        # change; this step only ever compares against what's committed.
+        run: forge snapshot --check
+        working-directory: contracts
+      - name: Run Forge coverage
+        # script/ excluded: deployment scripts are verified by actually
+        # running them (this repo's Anvil/testnet deploys, done for real
+        # throughout local development — see DeployV2.s.sol's own use
+        # earlier in this same job), not by unit-test line coverage, which
+        # would mean writing tests whose only purpose is inflating a
+        # number rather than testing anything meaningfully.
+        run: forge coverage --report lcov --report summary --no-match-coverage "script/"
+        working-directory: contracts
+      - name: Enforce coverage threshold
+        # 90% — src/*.sol's actual coverage is ~95% today (verified
+        # locally); this gate exists to catch a future PR silently
+        # dropping under-tested contract code in, not to chase 100%.
+        run: |
+          python3 -c "
+          lf = lh = 0
+          for line in open('lcov.info'):
+              if line.startswith('LF:'):
+                  lf += int(line[3:])
+              elif line.startswith('LH:'):
+                  lh += int(line[3:])
+          pct = 100.0 * lh / lf if lf else 0.0
+          print(f'Line coverage: {lh}/{lf} = {pct:.2f}%')
+          threshold = 90.0
+          if pct < threshold:
+              print(f'FAIL: coverage {pct:.2f}% is below the {threshold}% threshold')
+              raise SystemExit(1)
+          "
+        working-directory: contracts
       - name: Set up Python (for Slither)
         uses: actions/setup-python@v5
         with:
@@ -138,6 +173,35 @@ jobs:
       - name: Run pytest
         run: pytest
         working-directory: backend
+      - name: ruff (lint)
+        # ruff.toml scopes this to F (pyflakes: undefined names, unused
+        # imports, real dead code) + E9 (syntax errors) — verified clean
+        # locally. The full default ruleset (pyupgrade, bugbear, ...)
+        # flags ~180 pre-existing findings that are style/modernization,
+        # not bugs; expanding `select` is a deliberate future call, not
+        # something to silently widen here.
+        run: ruff check .
+        working-directory: backend
+      - name: ruff format --check (non-blocking)
+        # This codebase predates ruff/black — 52 files would need
+        # reformatting today (verified locally). That's a one-time,
+        # whole-repo formatting commit, not something to force as a side
+        # effect of adding a CI gap-check; stays visible-but-non-fatal
+        # until that commit happens, same pattern as npm audit/frontend
+        # lint below.
+        run: ruff format --check .
+        working-directory: backend
+        continue-on-error: true
+      - name: mypy (non-blocking)
+        # 40 pre-existing findings (verified locally) — mostly web3.py's
+        # TypedDict-vs-AttributeDict duality (`.status` access on a
+        # TypedDict that works at runtime via web3's AttributeDict but
+        # isn't visible to mypy's static view) plus a few genuinely
+        # loosely-typed dict/BaseModel union sites. Real signal, not yet
+        # a hard gate — same non-blocking pattern as ruff format above.
+        run: mypy --ignore-missing-imports --explicit-package-bases --exclude 'tests/' .
+        working-directory: backend
+        continue-on-error: true
       - name: Bandit (Python static security analysis)
         # Verified locally: 0 findings at medium+ severity. The 7 Low
         # findings below this threshold were reviewed individually — a
@@ -209,16 +273,15 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Run gitleaks
-        # Config (.gitleaks.toml) allowlists Anvil's well-known, public,
-        # zero-value default dev key that's intentionally committed in
-        # docker-compose.yml / conftest.py / this workflow — see that
-        # file's header comment for why. NOTE: unlike Slither/Bandit/
-        # pip-audit above, this step has not been verified locally (no Go
-        # toolchain / package available in this dev environment) — kept
-        # non-blocking until a first real CI run confirms it's clean, then
-        # should be tightened to blocking.
+        # Config (.gitleaks.toml) allowlists two specific, known-public,
+        # zero-value test keys (Anvil's well-known default dev key, with
+        # and without the 0x prefix, and one arbitrary KMS/Vault-signer
+        # test fixture key) — see that file's header comment. Verified
+        # locally against the real commit history (`docker run
+        # zricethezav/gitleaks:latest detect --source=. -v`, not just
+        # `gitleaks-action`'s own claim): 0 leaks with this config — so
+        # this is a real, blocking gate, not an unverified guess.
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
@@ -280,8 +343,29 @@ jobs:
           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
           TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
           EOF
-      - name: Start the stack
-        run: docker compose up -d --build postgres redis anvil api anchor-worker indexer mcp-search mcp-blockchain
+      # postgres/anvil first, api/anchor-worker/indexer NOT yet — those
+      # need the schema (and, since the RLS migration, the trustchain_api
+      # role it creates) to already exist, and docker-compose's own
+      # `depends_on: postgres: condition: service_healthy` only waits for
+      # Postgres to accept connections, not for migrations to have run.
+      - name: Start postgres/redis/anvil/mcp servers
+        run: docker compose up -d --build postgres redis anvil mcp-search mcp-blockchain
+      - name: Wait for Postgres readiness
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U trustchain -d trustchain && break
+            sleep 1
+          done
+      - name: Install backend dependencies (for alembic)
+        run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Apply database migrations (creates trustchain_api + RLS policies)
+        run: alembic upgrade head
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
+      - name: Start api/anchor-worker/indexer
+        run: docker compose up -d --build api anchor-worker indexer
       - name: Wait for API readiness
         run: |
           for i in $(seq 1 60); do
@@ -324,6 +408,52 @@ jobs:
           npm install
           npm test
         working-directory: sdk/typescript
+      - name: Schemathesis (API fuzzing against the real OpenAPI schema)
+        # Property-based fuzzing against the LIVE api container — malformed/
+        # boundary/adversarial inputs generated straight from the OpenAPI
+        # schema, checking only for `not_a_server_error` (5xx): an unhandled
+        # crash on unexpected input is a real bug regardless of auth state,
+        # a 401/403/422 on unauthenticated fuzzed input is expected and
+        # correct. run-agent/stream excluded — one starts a real multi-agent
+        # pipeline (minutes, not something to fuzz-repeat), the other is a
+        # deliberately long-lived SSE connection, neither fits a bounded
+        # request-timeout. --request-timeout=15 covers /verify's real
+        # observed ~7-8s latency (8 sequential live Monad-testnet RPC calls,
+        # V1 BlockchainBridge — see blockchain/client.py) with headroom;
+        # verified locally at 0 errors, exit 0.
+        run: |
+          pip install schemathesis==4.24.3
+          schemathesis run http://localhost:8000/openapi.json \
+            --max-examples=5 --request-timeout=15 \
+            --exclude-path-regex "run-agent|stream" \
+            --checks not_a_server_error
+      - name: Trivy (container image vulnerability scan, non-blocking)
+        # Scans the actual images this compose stack just built and ran
+        # against, not a hypothetical Dockerfile lint. Non-blocking:
+        # verified locally against trustchain-api — real HIGH/CRITICAL
+        # findings exist today (msgpack/setuptools transitive deps, plus
+        # several base-image (python:3.14-slim) OS package CVEs upstream
+        # of this repo), not something to silently gate on before anyone's
+        # triaged them. Same visible-but-non-fatal pattern as gitleaks/
+        # npm audit above — runs and is tracked, not absent.
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: trustchain-api:latest
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
+          format: "table"
+      - name: Generate SBOM for the api image
+        uses: anchore/sbom-action@v0
+        with:
+          image: trustchain-api:latest
+          format: cyclonedx-json
+          output-file: sbom-api.cyclonedx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-api
+          path: sbom-api.cyclonedx.json
       - name: Dump service logs on failure
         if: failure()
         run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200

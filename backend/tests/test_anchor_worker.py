@@ -95,7 +95,7 @@ def test_claim_batch_atomically_claims_pending_outbox_rows(chain_settings):
 @requires_anvil
 def test_build_batches_produces_merkle_root_matching_pure_python(chain_settings):
     run_id = _unique_run_id("run_batch_test")
-    events = _seed_run_with_steps(run_id, 5)
+    _seed_run_with_steps(run_id, 5)
 
     async def _claim_and_batch():
         from db.engine import get_sessionmaker
@@ -393,3 +393,27 @@ def test_handle_submit_failure_requeues_steps_for_rebatching(chain_settings):
     # them in some in-between state a real worker couldn't recover from.
     anchored = run(run_once("worker-retry", chain_settings))
     assert anchored == 2
+
+
+@requires_anvil
+def test_run_once_samples_real_wallet_balance(chain_settings):
+    """run_once() must sample the signer's REAL Anvil-reported balance
+    into observability.ANCHOR_WALLET_BALANCE_WEI every iteration — this
+    is what AnchorWalletBalanceLow (docker/prometheus/alerts.yml) alerts
+    on, and it can only ever be wrong if it drifts from the chain's own
+    answer, so the check compares directly against eth_getBalance."""
+    import observability
+
+    w3 = chain_module.get_w3()
+    signer = chain_module.get_signer()
+
+    run(run_once("worker-balance-sample", chain_settings))
+
+    real_balance = w3.eth.get_balance(signer.address)
+    sampled = observability.ANCHOR_WALLET_BALANCE_WEI._value.get()
+    # Prometheus Gauges are float64 internally (the whole exposition
+    # format is), so a wei-scale integer (~10**21 for a funded Anvil
+    # account) loses precision the instant it's stored — expected, not a
+    # bug in the sampling itself. A relative tolerance is the honest check.
+    assert sampled == pytest.approx(real_balance, rel=1e-9)
+    assert sampled > 0  # Anvil's default account #0 starts funded

@@ -58,6 +58,65 @@ def test_password_hash_is_not_plaintext():
     assert "$" in stored_hash
 
 
+def test_new_users_get_argon2id_hashes():
+    run(db.create_user("argon@b.com", "Argon", "hunter22", 1000))
+
+    async def _fetch_hash():
+        from sqlalchemy import select
+        from db.engine import get_sessionmaker
+        from db.models import User
+
+        async with get_sessionmaker()() as session:
+            result = await session.execute(select(User).where(User.email == "argon@b.com"))
+            return result.scalar_one().password_hash
+
+    assert run(_fetch_hash()).startswith("$argon2id$")
+
+
+def test_legacy_pbkdf2_hash_still_verifies_and_is_upgraded_in_place():
+    """Simulates a pre-Argon2id user row (Phase 1's PBKDF2-HMAC-SHA256
+    format) — must still authenticate, then be transparently rehashed to
+    Argon2id on that same successful login so no forced-reset migration
+    is ever needed."""
+
+    async def _seed_legacy_user():
+        from db.engine import get_sessionmaker
+        from db import tenancy
+        from db.models import User
+
+        async with get_sessionmaker()() as session:
+            user = User(email="legacy@b.com", name="Legacy", password_hash=db._hash_password_pbkdf2("hunter22"), created_at=1000)
+            session.add(user)
+            await session.flush()
+            await tenancy.provision_personal_org(session, user.id, "Legacy", 1000)
+            await session.commit()
+
+    async def _fetch_hash():
+        from sqlalchemy import select
+        from db.engine import get_sessionmaker
+        from db.models import User
+
+        async with get_sessionmaker()() as session:
+            result = await session.execute(select(User).where(User.email == "legacy@b.com"))
+            return result.scalar_one().password_hash
+
+    run(_seed_legacy_user())
+    hash_before = run(_fetch_hash())
+    assert not hash_before.startswith("$argon2")
+
+    ok = run(db.authenticate_user("legacy@b.com", "hunter22"))
+    assert ok["email"] == "legacy@b.com"
+
+    hash_after = run(_fetch_hash())
+    assert hash_after.startswith("$argon2id$")
+    assert hash_after != hash_before
+
+    # The upgraded hash must itself authenticate correctly going forward,
+    # and a wrong password must still be rejected.
+    assert run(db.authenticate_user("legacy@b.com", "hunter22")) is not None
+    assert run(db.authenticate_user("legacy@b.com", "wrongpassword")) is None
+
+
 def test_run_lifecycle():
     user = run(db.create_user("a@b.com", "Alice", "hunter22", 1000))
     project_id = user["projectId"]
