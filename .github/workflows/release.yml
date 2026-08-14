@@ -97,7 +97,7 @@ jobs:
           ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
           submodules: recursive
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
