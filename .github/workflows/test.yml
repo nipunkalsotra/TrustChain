@@ -417,15 +417,27 @@ jobs:
         # correct. run-agent/stream excluded — one starts a real multi-agent
         # pipeline (minutes, not something to fuzz-repeat), the other is a
         # deliberately long-lived SSE connection, neither fits a bounded
-        # request-timeout. --request-timeout=15 covers /verify's real
-        # observed ~7-8s latency (8 sequential live Monad-testnet RPC calls,
-        # V1 BlockchainBridge — see blockchain/client.py) with headroom;
-        # verified locally at 0 errors, exit 0.
+        # request-timeout.
+        #
+        # /verify, /verify/tamper-demo, /verify-audit, /health (+ their
+        # /v1/ variants) are ALSO excluded — all four depend on V1's
+        # BlockchainBridge (blockchain/client.py), which needs a real
+        # Monad-testnet PRIVATE_KEY this workflow deliberately never
+        # configures (same reasoning as leaving GROQ_API_KEY/
+        # TAVILY_API_KEY blank above) — get_bridge_or_503() (main.py)
+        # already turns that into a clean 503 rather than an unhandled
+        # crash (a real bug this exact fuzzing step caught and main.py
+        # fixed), but `not_a_server_error` flags any 5xx regardless of
+        # how deliberate/well-formed it is, and a 503 here is the
+        # STRUCTURALLY CORRECT response for "this environment has no V1
+        # key", not a bug to gate the build on. NOT excluded:
+        # /agents/{agent_id}/verify — a different, V2-only endpoint that
+        # doesn't touch V1's bridge at all.
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" schemathesis==4.24.3
           schemathesis run http://localhost:8000/openapi.json \
             --max-examples=5 --request-timeout=15 \
-            --exclude-path-regex "run-agent|stream" \
+            --exclude-path-regex 'run-agent|stream|^/(v1/)?verify(-audit|/tamper-demo)?$|^/health$' \
             --checks not_a_server_error
       - name: Trivy (container image vulnerability scan, non-blocking)
         # Scans the actual images this compose stack just built and ran

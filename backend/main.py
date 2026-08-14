@@ -171,6 +171,23 @@ async def audit_log_admin_action(current_user: "auth.CurrentUser", action: str, 
         logger.error("audit_log_write_failed", action=action, error=str(e))
 
 
+def get_bridge_or_503():
+    """get_bridge() raises if V1's PRIVATE_KEY/MONAD_RPC_URL aren't
+    configured — real Monad testnet secrets, never set in CI (see
+    .github/workflows/test.yml) and not required for any environment
+    that only runs V2. Every V1 endpoint (/verify, /verify/tamper-demo,
+    /verify-audit, /health) needs to treat that as a clean, deliberate
+    503, not let it propagate as FastAPI's generic unhandled-exception
+    500 from several near-identical call sites — found via real
+    Schemathesis fuzzing against a live container with no PRIVATE_KEY
+    configured (exactly CI's actual environment), not by inspection."""
+    try:
+        return get_bridge()
+    except Exception as e:
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Request / Response models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -684,7 +701,7 @@ async def get_leaderboard(
 
 @router.post("/verify")
 async def verify_integrity(body: VerifyRequest):
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         result = await bridge.verify_run(body.runId)  # already async
         return result
@@ -700,7 +717,7 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
     compares the real agent config hash (should PASS) against a deliberately
     mutated one (should FAIL). No on-chain writes, no gas spent.
     """
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         return await bridge.tamper_demo(agent_id)
     except ValueError as e:
@@ -712,7 +729,7 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
 
 @router.get("/verify-audit")
 async def verify_audit(run_id: str = Query(...)):
-    bridge = get_bridge()
+    bridge = get_bridge_or_503()
     try:
         # Step 1: get indices for this specific run
         indices = await asyncio.to_thread(
@@ -809,8 +826,12 @@ async def chain_status():
 
 @app.get("/health")
 async def health():
-    bridge = get_bridge()
-    chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+    bridge = get_bridge_or_503()
+    try:
+        chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+    except Exception as e:
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
     return {
         "status":   "ok",
         "chain_id": chain_id,
