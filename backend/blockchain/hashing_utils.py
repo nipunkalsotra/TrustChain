@@ -23,6 +23,8 @@ Output:
 import json
 from web3 import Web3
 
+from agents.llm_provider import MODEL_NAME, MODEL_VERSION
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AGENT CONFIG DICTS
@@ -47,8 +49,8 @@ from web3 import Web3
 AGENTS = [
     {
         "agentId":      "researcher",
-        "model":        "llama-3.3-70b-versatile",
-        "version":      "groq-v1",
+        "model":        MODEL_NAME,
+        "version":      MODEL_VERSION,
         "systemPrompt": (
             "You are the Researcher agent in a multi-agent AI system called TrustChain. "
             "Your job is to synthesise web search results into clear, factual research findings. "
@@ -58,8 +60,8 @@ AGENTS = [
     },
     {
         "agentId":      "validator",
-        "model":        "llama-3.3-70b-versatile",
-        "version":      "groq-v1",
+        "model":        MODEL_NAME,
+        "version":      MODEL_VERSION,
         "systemPrompt": (
             "You are the Validator agent in TrustChain. "
             "Compare the original research against fact-check results. "
@@ -70,8 +72,8 @@ AGENTS = [
     },
     {
         "agentId":      "scorer",
-        "model":        "llama-3.3-70b-versatile",
-        "version":      "groq-v1",
+        "model":        MODEL_NAME,
+        "version":      MODEL_VERSION,
         "systemPrompt": (
             "You are the Scorer agent in TrustChain. "
             "Assign trust scores (0-100) for all 4 agents based on pipeline quality.\n\n"
@@ -90,8 +92,8 @@ AGENTS = [
     },
     {
         "agentId":      "reporter",
-        "model":        "llama-3.3-70b-versatile",
-        "version":      "groq-v1",
+        "model":        MODEL_NAME,
+        "version":      MODEL_VERSION,
         "systemPrompt": (
             "You are the Reporter agent in TrustChain — a blockchain-verified multi-agent AI system.\n"
             "Produce a clean, structured final report for the judge to read.\n\n"

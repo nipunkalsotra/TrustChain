@@ -1,0 +1,17 @@
+apiVersion: 1
+
+providers:
+  - name: TrustChain
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      # Deliberately NOT nested under /etc/grafana/provisioning (this
+      # file's own directory) — that whole tree is bind-mounted read-only
+      # as one unit, so Grafana can't create a missing subdirectory mount
+      # point inside it for a second, separate bind mount. This path lives
+      # outside that mount instead.
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,113 @@
+# Release pipeline (P2.8). Runs after CI (test.yml) succeeds on main:
+# computes the next version from Conventional Commits since the last
+# release (see .releaserc.json), writes CHANGELOG.md, tags the commit,
+# publishes a GitHub Release, and builds+pushes versioned Docker images
+# for every deployable component to GHCR.
+#
+# Requires commits on main to follow Conventional Commits
+# (feat:/fix:/perf:/etc. — https://www.conventionalcommits.org) for
+# version bumps to compute correctly; a commit that doesn't match any
+# recognized type contributes no bump. See docs/release-process.md.
+name: Release
+permissions: {}
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  release:
+    name: semantic-release
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create tags/commits (CHANGELOG.md) and GitHub Releases
+      packages: write   # push images to GHCR
+      issues: write     # semantic-release comments on issues/PRs referenced by a release
+      pull-requests: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: true   # semantic-release needs to push the CHANGELOG commit + tag
+          fetch-depth: 0              # full history — commit-analyzer walks it since the last tag
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install release tooling
+        run: npm install
+      - name: Run semantic-release
+        id: release
+        run: |
+          npx semantic-release
+          # semantic-release doesn't set step outputs itself — read the
+          # tag it just created (if any) straight from git, so downstream
+          # jobs know whether a release happened and what version it is
+          # without re-parsing semantic-release's own log output.
+          tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          if [ -n "$tag" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-images:
+    name: Build and push Docker images
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          # ONE "backend" image serves api, anchor-worker, AND indexer —
+          # docker-compose.yml builds all three from this exact same
+          # context/Dockerfile and only changes the `command:` at deploy
+          # time (anchor-worker/indexer override it to `python3 -m
+          # anchor_worker.main` / `python3 -m indexer.main`); publishing
+          # three identical images under different tags would be wasteful
+          # and misleadingly imply they're different builds.
+          - image: backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+          - image: mcp-search
+            context: ./mcp_servers/web_search
+            dockerfile: ./mcp_servers/web_search/Dockerfile
+          - image: mcp-blockchain
+            context: .
+            dockerfile: ./mcp_servers/blockchain/Dockerfile
+          # No frontend image: it has no Dockerfile and isn't part of
+          # docker-compose.yml — it's deployed separately (Vercel, per
+          # main.py's CORS allowlist comments about a deployed frontend
+          # URL), with its own git-integration-based deploy flow, not a
+          # Docker image push.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
+          submodules: recursive
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}:${{ needs.release.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}:latest

@@ -4,10 +4,11 @@ agents/pipeline.py  —  LangGraph pipeline
 Wires 4 agents in sequence:
   researcher → validator → scorer → reporter
 
-MCP tools are loaded once at run start and injected into each node.
-Both MCP servers must be running:
-  web_search  → http://localhost:8001
-  blockchain  → http://localhost:8002
+MCP tools are loaded once at run start and injected into each node. Both
+MCP servers must be running — see config.py's mcp_search_url/
+mcp_blockchain_url for where they're expected (defaults match start.sh's
+local dev setup; Docker Compose overrides them to the sibling containers'
+service names).
 
 Usage from FastAPI:
     from agents.pipeline import run_pipeline
@@ -26,19 +27,17 @@ from agents.researcher import researcher_node
 from agents.validator   import validator_node
 from agents.scorer      import scorer_node
 from agents.reporter    import reporter_node
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
-MCP_SERVERS = {
-    "web_search": {
-        "url":       "http://localhost:8001/mcp",
-        "transport": "streamable_http",
-    },
-    "blockchain": {
-        "url":       "http://localhost:8002/mcp",
-        "transport": "streamable_http",
-    },
-}
+
+def _mcp_servers() -> dict:
+    settings = get_settings()
+    return {
+        "web_search": {"url": settings.mcp_search_url, "transport": "streamable_http"},
+        "blockchain": {"url": settings.mcp_blockchain_url, "transport": "streamable_http"},
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +49,7 @@ async def load_mcp_tools() -> list:
     Connect to both MCP servers and return all tools as a flat list.
     Called once per pipeline run.
     """
-    client = MultiServerMCPClient(MCP_SERVERS)
+    client = MultiServerMCPClient(_mcp_servers())
     tools  = await client.get_tools()
     logger.info(
         "MCP tools loaded (%d): %s",
@@ -197,6 +196,36 @@ if __name__ == "__main__":
 
             if t == "run_started":
                 print(f"▶  Run ID: {event['runId']}\n")
+                # Phase 2: steps.run_id is FK-constrained against runs.run_id
+                # (agents/base.py::log_step writes to the outbox now, not
+                # directly to chain), and runs.project_id is FK-constrained
+                # against a real project (Phase 2.3 multi-tenancy). main.py's
+                # real /run-agent path always creates both before starting the
+                # pipeline; this standalone smoke test has to do the same
+                # thing manually — a throwaway org/project, since there's no
+                # real user in a CLI smoke test.
+                import time as _time
+
+                import db as _db
+                from sqlalchemy import text as _text
+
+                from db.engine import get_sessionmaker as _get_sessionmaker
+
+                async with _get_sessionmaker()() as _session:
+                    _now = int(_time.time())
+                    _org_id = (await _session.execute(
+                        _text("INSERT INTO organizations (name, plan, gas_spent_wei, created_at) "
+                              "VALUES ('pipeline smoke test', 'free', 0, :now) RETURNING id"),
+                        {"now": _now},
+                    )).scalar_one()
+                    _project_id = (await _session.execute(
+                        _text("INSERT INTO projects (org_id, name, environment, created_at) "
+                              "VALUES (:org_id, 'Default', 'live', :now) RETURNING id"),
+                        {"org_id": _org_id, "now": _now},
+                    )).scalar_one()
+                    await _session.commit()
+
+                await _db.create_run(event["runId"], _project_id, task, None, int(_time.time()))
 
             elif t == "run_complete":
                 print(f"\n{'='*60}")

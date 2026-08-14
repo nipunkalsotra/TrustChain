@@ -67,6 +67,21 @@ if [ ! -d "$FRONTEND/node_modules" ]; then
     cd "$ROOT"
 fi
 
+# ── Ensure Postgres is up (backend/db is Postgres-backed as of Phase 2) ──
+if ! docker compose ps postgres --status running >/dev/null 2>&1 || \
+   [ -z "$(docker compose ps postgres --status running -q 2>/dev/null)" ]; then
+    echo -e "${YELLOW}⚠ Postgres not running — starting it via docker compose...${NC}"
+    docker compose up -d postgres
+fi
+echo -n "  Waiting for Postgres..."
+for i in $(seq 1 30); do
+    if docker compose exec -T postgres pg_isready -U trustchain -d trustchain >/dev/null 2>&1; then
+        echo -e " ${GREEN}ready${NC}"
+        break
+    fi
+    sleep 1
+done
+
 # ── Log directory ──────────────────────────────────────────────────
 mkdir -p "$ROOT/.logs"
 SEARCH_LOG="$ROOT/.logs/mcp_search.log"
@@ -106,6 +121,7 @@ fi
 # ── 3. FastAPI backend ─────────────────────────────────────────────
 echo -e "  ${CYAN}[3/4]${NC} FastAPI backend           ${DIM}→ localhost:8000${NC}"
 cd "$BACKEND"
+alembic upgrade head >> "$API_LOG" 2>&1
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload > "$API_LOG" 2>&1 &
 PIDS+=($!)
 cd "$ROOT"

@@ -169,7 +169,9 @@ contract AgentAuditLog {
         returns (bool inputMatch, bool outputMatch)
     {
         ActionRecord memory record = records[index];
+        // slither-disable-next-line incorrect-equality
         inputMatch = (keccak256(bytes(rawInput)) == record.inputHash);
+        // slither-disable-next-line incorrect-equality
         outputMatch = (keccak256(bytes(rawOutput)) == record.outputHash);
     }
 }
