@@ -378,14 +378,29 @@ async def _run_pipeline_background(task: str, run_id: str):
     Prometheus recorded it as "completed". Caught via the Python SDK's
     integration tests polling GET /runs/{run_id} right after a real
     pipeline run failed on a real Groq rate limit — not a hypothetical.
+
+    get_bridge() is called INSIDE the try block, not before it — a
+    second real bug found via real CI (not local dev, which always has a
+    real PRIVATE_KEY configured): blockchain/client.py's V1 bridge raises
+    ValueError("PRIVATE_KEY not set in .env") whenever that secret isn't
+    configured, which is exactly GitHub Actions' backend test job (it
+    correctly doesn't fabricate a real Monad testnet deployer key as a
+    secret). With get_bridge() unprotected before the try, that raise
+    killed this whole background task silently — before a single event
+    was ever published, before db.fail_run() ever ran — leaving the run
+    stuck at status='running' forever and the SSE stream's only signal a
+    120-second client-side timeout. Treating bridge-init failure as just
+    another pipeline failure (same error-event + db.fail_run() path any
+    other exception already gets) is both more correct AND is what
+    actually made the bug visible instead of silently hanging.
     """
     bind_run_id(run_id)
-    bridge = get_bridge()
     observability.PIPELINE_RUNS_TOTAL.labels(status="started").inc()
     start = time.monotonic()
     tracer = observability.get_tracer(__name__)
     succeeded = False
     try:
+        bridge = get_bridge()
         with tracer.start_as_current_span("pipeline_run") as span:
             span.set_attribute("run_id", run_id)
             async for event in run_pipeline(task, run_id=run_id, bridge=bridge):

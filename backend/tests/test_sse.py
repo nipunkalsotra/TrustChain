@@ -40,7 +40,17 @@ async def _fake_run_pipeline_that_errors_internally(task, run_id=None, bridge=No
     yield {"type": "error", "runId": run_id, "message": "simulated internal pipeline failure"}
 
 
-def test_run_agent_then_stream_sees_all_events_via_redis(client, monkeypatch):
+def test_run_agent_then_stream_sees_all_events_via_redis(client_with_fake_bridge, monkeypatch):
+    # client_with_fake_bridge, not client: _run_pipeline_background calls
+    # get_bridge() itself (to pass into run_pipeline — even though the
+    # mocked run_pipeline below ignores it), so a real V1 bridge would
+    # still be constructed and would need a real PRIVATE_KEY. Local dev
+    # has one in .env; CI correctly doesn't fabricate a real Monad
+    # testnet deployer key as a secret, so without this fixture
+    # get_bridge() raises "PRIVATE_KEY not set in .env" — invisible
+    # locally, a real CI failure (background task dies before publishing
+    # a single event; the stream then times out after 120s).
+    client = client_with_fake_bridge
     import main
 
     monkeypatch.setattr(main, "run_pipeline", _fake_run_pipeline)
@@ -78,7 +88,9 @@ def test_run_agent_then_stream_sees_all_events_via_redis(client, monkeypatch):
     assert types_seen.count("run_complete") == 2
 
 
-def test_run_that_errors_internally_is_persisted_as_failed_not_stuck_running(client, monkeypatch):
+def test_run_that_errors_internally_is_persisted_as_failed_not_stuck_running(
+    client_with_fake_bridge, monkeypatch
+):
     """Regression test for a real bug: agents/pipeline.py's run_pipeline()
     catches its OWN internal exceptions and yields a normal
     {"type": "error", ...} event rather than raising — so
@@ -91,7 +103,13 @@ def test_run_that_errors_internally_is_persisted_as_failed_not_stuck_running(cli
     pipeline_runs_total metric recorded it as "completed" despite having
     failed. Caught for real via the Python SDK's integration tests
     polling GET /runs/{run_id} right after a genuine Groq rate-limit
-    failure (sdk/python/tests/test_client.py)."""
+    failure (sdk/python/tests/test_client.py).
+
+    client_with_fake_bridge, not client — see the sibling test above for
+    why: get_bridge() runs regardless of which run_pipeline is mocked in,
+    and needs a real PRIVATE_KEY (present locally, correctly absent in
+    CI) unless faked out."""
+    client = client_with_fake_bridge
     import main
 
     monkeypatch.setattr(main, "run_pipeline", _fake_run_pipeline_that_errors_internally)

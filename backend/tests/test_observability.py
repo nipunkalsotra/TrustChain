@@ -81,10 +81,18 @@ def test_metrics_endpoint_exposes_prometheus_text_format():
 
 
 def test_metrics_middleware_records_real_requests():
+    # /ready, not /health: /health calls the real V1 blockchain bridge
+    # (returns its wallet address), which requires a real PRIVATE_KEY —
+    # present in local dev's .env but deliberately absent in CI (it's a
+    # real Monad testnet deployer key, not something to fabricate as a
+    # secret). /ready only hard-requires the database — see main.py's own
+    # docstring on why the two are split. This test only cares that the
+    # metrics middleware recorded a real request; which cheap endpoint it
+    # hits doesn't matter.
     from main import app
     with TestClient(app) as client:
-        client.get("/health")
-        client.get("/health")
+        client.get("/ready")
+        client.get("/ready")
         metrics_body = client.get("/metrics").text
 
     # Look for the specific counter line for this method+path+status,
@@ -94,10 +102,10 @@ def test_metrics_middleware_records_real_requests():
     matching_lines = [
         line for line in metrics_body.splitlines()
         if line.startswith("http_requests_total{")
-        and 'path="/health"' in line
+        and 'path="/ready"' in line
         and 'status="200"' in line
     ]
-    assert matching_lines, f"no http_requests_total line for /health,200 in:\n{metrics_body}"
+    assert matching_lines, f"no http_requests_total line for /ready,200 in:\n{metrics_body}"
     value = float(matching_lines[0].rsplit(" ", 1)[-1])
     assert value >= 2.0
 
