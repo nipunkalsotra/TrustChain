@@ -543,11 +543,18 @@ jobs:
         working-directory: sdk/typescript
       - name: Pack TypeScript SDK and verify it installs
         # Same reasoning as the Python wheel step above: `npm test` runs
-        # against source directly, not the published-shape package —
-        # `files: ["dist"]` in package.json (or an entry missing from it)
-        # is exactly the kind of thing that only breaks for someone who
-        # actually `npm install`s the packed tarball.
+        # against source directly (via tsx, no compile step needed), not
+        # the published-shape package — `files: ["dist"]` in package.json
+        # (or an entry missing from it) is exactly the kind of thing that
+        # only breaks for someone who actually `npm install`s the packed
+        # tarball. `dist/` is gitignored (nothing commits build output),
+        # so without `npm run build` here first, `npm pack` silently
+        # packs a tarball with an empty dist/ — `npm install` succeeds
+        # (the tarball itself is well-formed), but importing it then fails
+        # with ERR_MODULE_NOT_FOUND on dist/index.js — a real CI failure
+        # this exact gap caused, not a hypothetical.
         run: |
+          npm run build
           npm pack
           mkdir -p /tmp/sdk-npm-install && cd /tmp/sdk-npm-install
           npm init -y >/dev/null
