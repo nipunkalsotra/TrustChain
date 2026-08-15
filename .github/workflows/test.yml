@@ -591,12 +591,34 @@ jobs:
         # key", not a bug to gate the build on. NOT excluded:
         # /agents/{agent_id}/verify — a different, V2-only endpoint that
         # doesn't touch V1's bridge at all.
+        #
+        # --suppress-health-check too_slow,filter_too_much: most of this
+        # API's 47 tested operations require auth Schemathesis is never
+        # given (deliberately — see above, unauthenticated fuzzing is the
+        # actual point), so its Stateful phase — which tries to chain
+        # operations via inferred OpenAPI links — ends up discarding most
+        # candidate link sequences as unusable. That's already surfaced,
+        # correctly, as the non-fatal "Missing authentication"/"Schema
+        # validation mismatch" WARNINGS below; the underlying Hypothesis
+        # engine ALSO separately raises a hard FailedHealthCheck for the
+        # exact same condition, and which specific check trips
+        # (HealthCheck.too_slow vs HealthCheck.filter_too_much) varies by
+        # random seed — reproduced locally as both, back to back, using
+        # two different seeds against this same running API with zero
+        # code changes in between. A real CI run failed on
+        # HealthCheck.too_slow specifically (exit code 1, 1769/1769
+        # generated cases still passed) even though the actual
+        # correctness check (not_a_server_error) never failed once —
+        # gating the build on Hypothesis's own generation-efficiency
+        # meta-check, for a condition already reported informationally,
+        # isn't a real regression signal for an unattended CI gate.
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" schemathesis==4.24.3
           schemathesis run http://localhost:8000/openapi.json \
             --max-examples=5 --request-timeout=15 \
             --exclude-path-regex 'run-agent|stream|^/(v1/)?verify(-audit|/tamper-demo)?$|^/health$' \
-            --checks not_a_server_error
+            --checks not_a_server_error \
+            --suppress-health-check too_slow,filter_too_much
       - name: Trivy (container image vulnerability scan, non-blocking)
         # Scans the actual images this compose stack just built and ran
         # against, not a hypothetical Dockerfile lint. Non-blocking:
