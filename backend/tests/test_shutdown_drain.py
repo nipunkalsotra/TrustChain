@@ -20,7 +20,7 @@ import asyncio
 import time
 
 import db
-from tests.conftest import seed_user_and_token
+from tests.conftest import FakeBridge, seed_user_and_token
 
 
 def _auth_headers(token: str) -> dict:
@@ -34,6 +34,18 @@ def test_shutdown_force_fails_a_still_running_pipeline_task(monkeypatch):
 
     settings = config.get_settings()
     monkeypatch.setattr(settings, "api_shutdown_drain_timeout_seconds", 0.3)
+
+    # _run_pipeline_background calls get_bridge() INSIDE its try block
+    # BEFORE run_pipeline() — in CI (no real PRIVATE_KEY/.env configured
+    # for V1's BlockchainBridge) that raises immediately, so the run
+    # fails with "PRIVATE_KEY not set in .env" before this test's fake
+    # run_pipeline is ever reached, never actually exercising the slow/
+    # in-flight path this test means to cover. Stub it the same way
+    # conftest.py's client_with_fake_bridge fixture does, so this is
+    # deterministic everywhere, matching main.py's own documented lesson
+    # about this exact class of local-vs-CI divergence (see
+    # _run_pipeline_background's docstring).
+    monkeypatch.setattr(main, "get_bridge", lambda: FakeBridge())
 
     async def _slow_pipeline(task, run_id=None, bridge=None):
         yield {"type": "run_started", "runId": run_id, "task": task}
@@ -64,6 +76,7 @@ def test_shutdown_does_not_clobber_a_run_that_finishes_within_the_drain_window(m
 
     settings = config.get_settings()
     monkeypatch.setattr(settings, "api_shutdown_drain_timeout_seconds", 5.0)
+    monkeypatch.setattr(main, "get_bridge", lambda: FakeBridge())
 
     async def _fast_pipeline(task, run_id=None, bridge=None):
         yield {"type": "run_started", "runId": run_id, "task": task}

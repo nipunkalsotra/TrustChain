@@ -613,15 +613,21 @@ jobs:
           format: cyclonedx-json
           output-file: sbom-api.cyclonedx.json
       - name: Install cosign
-        # v4, not v3: sigstore/cosign-installer's OWN major version tag
-        # installs a DIFFERENT cosign major version by default (v3 of
-        # this action -> cosign 2.x; v4 -> cosign 3.x) — confusingly not
-        # matched. Verified locally against a real cosign v3.1.3 binary
-        # that `sign-blob --bundle` (the flag used below) is that
-        # version's current, non-deprecated form; cosign 2.x might not
-        # accept it identically, so this pins to the installer version
-        # that actually gives the binary this was tested against.
-        uses: sigstore/cosign-installer@v4
+        # v4.1.2, not the floating @v4 (or @v3): sigstore/cosign-
+        # installer's OWN major version tag installs a DIFFERENT cosign
+        # major version by default (v3 of this action -> cosign 2.x; v4
+        # -> cosign 3.x) — confusingly not matched. Verified locally
+        # against a real cosign v3.1.3 binary that `sign-blob --bundle`
+        # (the flag used below) is that version's current, non-deprecated
+        # form; cosign 2.x might not accept it identically, so this needs
+        # an installer version in the v4 line. Pinned to the exact release
+        # tag rather than a floating `@v4` alias: as of this writing the
+        # cosign-installer repo has only ever published full version tags
+        # in the v4 line (v4.0.0, v4.1.0, v4.1.1, v4.1.2) — no `v4` major-
+        # version alias tag exists yet (unlike `v3`, which does) — a real
+        # CI run failed with "Unable to resolve action
+        # sigstore/cosign-installer@v4" confirming this, not a hypothetical.
+        uses: sigstore/cosign-installer@v4.1.2
       - name: Sign SBOM (keyless, Sigstore/Fulcio + Rekor)
         # No --key: cosign requests a short-lived signing cert from Fulcio
         # using this job's OIDC token (see the job's id-token: write

@@ -9,7 +9,7 @@ the field names rather than a literal "tenant_id").
 
 import logging
 
-from tests.conftest import seed_user_and_token
+from tests.conftest import FakeBridge, seed_user_and_token
 
 
 def _auth_headers(token: str) -> dict:
@@ -96,6 +96,13 @@ def test_background_pipeline_task_inherits_tenant_context(monkeypatch, client):
     request log line."""
     import logging_config
     import main
+
+    # get_bridge() runs INSIDE _run_pipeline_background's try block BEFORE
+    # run_pipeline() — without a real PRIVATE_KEY/.env (true in CI, and
+    # should stay true there) it raises immediately, so this test's fake
+    # pipeline below would never run at all and `captured` would stay
+    # empty. Same fix as test_shutdown_drain.py's tests.
+    monkeypatch.setattr(main, "get_bridge", lambda: FakeBridge())
 
     captured = {}
 
