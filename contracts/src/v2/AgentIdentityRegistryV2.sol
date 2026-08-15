@@ -29,11 +29,33 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  * ANCHOR_ROLE, and still ultimately governed by DEFAULT_ADMIN_ROLE (the
  * multisig), which alone can grant or revoke it. See AgentAuditLogV2 for
  * the role-separation rationale shared across all three V2 contracts.
+ *
+ * PROJECT NAMESPACING (plan §14.2's isolation strategy, "Namespaced agent
+ * IDs — (project_id, agent_id) is the composite key, so two tenants may
+ * both register an agent named researcher without collision"): every
+ * external function takes `projectId` and internally keys ALL state off
+ * keccak256(projectId, agentId), never off agentId alone. Before this,
+ * the registry was keyed by bare agentId globally — two different
+ * tenants both registering "researcher" would have SILENTLY COLLIDED,
+ * the second registerAgent() call updating (AgentUpdated, not a fresh
+ * AgentRegistered) the FIRST tenant's record, and the backend's own
+ * per-project auth (main.py's principal.project_id) provided no
+ * protection at all against this once the call reached the chain — the
+ * isolation this platform's whole multi-tenancy design depends on
+ * (invariant I7) simply didn't exist at this one layer. The trust-boundary
+ * consequence was real, not theoretical: Tenant B registering an agent
+ * named "researcher" AFTER Tenant A did would silently overwrite Tenant
+ * A's stored codeHash, so Tenant A's subsequent verifyAgent() calls would
+ * start comparing against TENANT B'S hash — a genuine cross-tenant
+ * identity-substitution vulnerability, the exact failure mode this
+ * contract exists to detect, just introduced from the isolation gap
+ * rather than a compromised agent.
  */
 contract AgentIdentityRegistryV2 is AccessControl {
     bytes32 public constant REGISTRAR_ROLE = keccak256("REGISTRAR_ROLE");
 
     struct AgentRecord {
+        uint256 projectId;
         string agentId;
         bytes32 codeHash;
         address registeredBy;
@@ -53,10 +75,15 @@ contract AgentIdentityRegistryV2 is AccessControl {
         string agentId;
     }
 
-    mapping(string => AgentRecord) public agentRecords;
-    mapping(string => bytes32) public agentHashes;
-    mapping(string => bool) public isRegistered;
-    string[] public registeredAgentIds;
+    mapping(bytes32 => AgentRecord) public agentRecords;
+    mapping(bytes32 => bytes32) public agentHashes;
+    mapping(bytes32 => bool) public isRegistered;
+    // Every (projectId, agentId) pair ever registered, across all
+    // tenants — purely informational (getAgentCount(), test/debugging
+    // use only; nothing in the backend reads this), so it staying a
+    // flat cross-tenant list rather than per-project is deliberate, not
+    // an isolation gap the way the mappings above would have been.
+    bytes32[] public registeredKeys;
 
     // agentId is deliberately NOT `indexed`, unlike an earlier version of
     // this contract (and matching the same fix already applied to
@@ -67,14 +94,22 @@ contract AgentIdentityRegistryV2 is AccessControl {
     // which breaks any future read model built on these events the same
     // way it would have broken rm_scores. registeredBy/revokedBy stay
     // indexed — address is a fixed-size type, so indexing it is free and
-    // genuinely useful for "which admin did this" filtering.
-    event AgentRegistered(string agentId, bytes32 codeHash, address indexed registeredBy, uint256 timestamp);
-    event AgentUpdated(string agentId, bytes32 oldCodeHash, bytes32 newCodeHash, uint256 timestamp);
-    event AgentRevoked(string agentId, address indexed revokedBy, uint256 timestamp);
-    event IntegrityViolation(string agentId, bytes32 expectedHash, bytes32 providedHash, uint256 timestamp);
+    // genuinely useful for "which admin did this" filtering. projectId is
+    // also indexed — fixed-size, and exactly the field a per-tenant
+    // indexer/read-model needs to filter a log stream on cheaply.
+    event AgentRegistered(
+        uint256 indexed projectId, string agentId, bytes32 codeHash, address indexed registeredBy, uint256 timestamp
+    );
+    event AgentUpdated(
+        uint256 indexed projectId, string agentId, bytes32 oldCodeHash, bytes32 newCodeHash, uint256 timestamp
+    );
+    event AgentRevoked(uint256 indexed projectId, string agentId, address indexed revokedBy, uint256 timestamp);
+    event IntegrityViolation(
+        uint256 indexed projectId, string agentId, bytes32 expectedHash, bytes32 providedHash, uint256 timestamp
+    );
 
-    modifier agentExists(string calldata agentId) {
-        require(isRegistered[agentId], "AgentIdentityRegistryV2: agent not registered");
+    modifier agentExists(uint256 projectId, string calldata agentId) {
+        require(isRegistered[_key(projectId, agentId)], "AgentIdentityRegistryV2: agent not registered");
         _;
     }
 
@@ -82,7 +117,12 @@ contract AgentIdentityRegistryV2 is AccessControl {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
+    function _key(uint256 projectId, string calldata agentId) internal pure returns (bytes32) {
+        return keccak256(abi.encode(projectId, agentId));
+    }
+
     function registerAgent(
+        uint256 projectId,
         string calldata agentId,
         bytes32 codeHash,
         string calldata modelName,
@@ -91,17 +131,20 @@ contract AgentIdentityRegistryV2 is AccessControl {
         require(bytes(agentId).length > 0, "AgentIdentityRegistryV2: agentId cannot be empty");
         require(codeHash != bytes32(0), "AgentIdentityRegistryV2: codeHash cannot be zero");
 
-        if (isRegistered[agentId]) {
-            bytes32 oldHash = agentHashes[agentId];
+        bytes32 key = _key(projectId, agentId);
 
-            agentRecords[agentId].codeHash = codeHash;
-            agentRecords[agentId].modelName = modelName;
-            agentRecords[agentId].modelVersion = modelVersion;
-            agentHashes[agentId] = codeHash;
+        if (isRegistered[key]) {
+            bytes32 oldHash = agentHashes[key];
 
-            emit AgentUpdated(agentId, oldHash, codeHash, block.timestamp);
+            agentRecords[key].codeHash = codeHash;
+            agentRecords[key].modelName = modelName;
+            agentRecords[key].modelVersion = modelVersion;
+            agentHashes[key] = codeHash;
+
+            emit AgentUpdated(projectId, agentId, oldHash, codeHash, block.timestamp);
         } else {
-            agentRecords[agentId] = AgentRecord({
+            agentRecords[key] = AgentRecord({
+                projectId: projectId,
                 agentId: agentId,
                 codeHash: codeHash,
                 registeredBy: msg.sender,
@@ -111,45 +154,55 @@ contract AgentIdentityRegistryV2 is AccessControl {
                 modelVersion: modelVersion
             });
 
-            agentHashes[agentId] = codeHash;
-            isRegistered[agentId] = true;
-            registeredAgentIds.push(agentId);
+            agentHashes[key] = codeHash;
+            isRegistered[key] = true;
+            registeredKeys.push(key);
 
-            emit AgentRegistered(agentId, codeHash, msg.sender, block.timestamp);
+            emit AgentRegistered(projectId, agentId, codeHash, msg.sender, block.timestamp);
         }
     }
 
-    function revokeAgent(string calldata agentId) external onlyRole(REGISTRAR_ROLE) agentExists(agentId) {
-        require(agentRecords[agentId].isActive, "AgentIdentityRegistryV2: agent already revoked");
+    function revokeAgent(uint256 projectId, string calldata agentId)
+        external
+        onlyRole(REGISTRAR_ROLE)
+        agentExists(projectId, agentId)
+    {
+        bytes32 key = _key(projectId, agentId);
+        require(agentRecords[key].isActive, "AgentIdentityRegistryV2: agent already revoked");
 
-        agentRecords[agentId].isActive = false;
+        agentRecords[key].isActive = false;
 
-        emit AgentRevoked(agentId, msg.sender, block.timestamp);
+        emit AgentRevoked(projectId, agentId, msg.sender, block.timestamp);
     }
 
-    function verifyAgent(string calldata agentId, bytes32 currentHash) external view returns (bool) {
-        if (!isRegistered[agentId]) return false;
-        if (!agentRecords[agentId].isActive) return false;
-        if (agentHashes[agentId] != currentHash) return false;
+    function verifyAgent(uint256 projectId, string calldata agentId, bytes32 currentHash) external view returns (bool) {
+        bytes32 key = _key(projectId, agentId);
+        if (!isRegistered[key]) return false;
+        if (!agentRecords[key].isActive) return false;
+        if (agentHashes[key] != currentHash) return false;
         return true;
     }
 
     /// @notice Same check as verifyAgent, but not `view` — can emit
     ///         IntegrityViolation on mismatch (the tamper alarm).
-    function verifyAgentAndLog(string calldata agentId, bytes32 currentHash) external returns (bool) {
-        if (!isRegistered[agentId] || !agentRecords[agentId].isActive) {
+    function verifyAgentAndLog(uint256 projectId, string calldata agentId, bytes32 currentHash)
+        external
+        returns (bool)
+    {
+        bytes32 key = _key(projectId, agentId);
+        if (!isRegistered[key] || !agentRecords[key].isActive) {
             return false;
         }
 
-        bytes32 stored = agentHashes[agentId];
+        bytes32 stored = agentHashes[key];
         if (stored != currentHash) {
-            emit IntegrityViolation(agentId, stored, currentHash, block.timestamp);
+            emit IntegrityViolation(projectId, agentId, stored, currentHash, block.timestamp);
             return false;
         }
         return true;
     }
 
-    function verifyAgentFull(string calldata agentId, bytes32 currentHash)
+    function verifyAgentFull(uint256 projectId, string calldata agentId, bytes32 currentHash)
         external
         view
         returns (VerificationResult memory result)
@@ -157,11 +210,12 @@ contract AgentIdentityRegistryV2 is AccessControl {
         result.agentId = agentId;
         result.providedHash = currentHash;
 
-        if (!isRegistered[agentId]) {
+        bytes32 key = _key(projectId, agentId);
+        if (!isRegistered[key]) {
             return result;
         }
 
-        AgentRecord storage rec = agentRecords[agentId];
+        AgentRecord storage rec = agentRecords[key];
         result.isActive = rec.isActive;
         result.storedHash = rec.codeHash;
         result.registeredAt = rec.registeredAt;
@@ -169,15 +223,20 @@ contract AgentIdentityRegistryV2 is AccessControl {
         result.isValid = rec.isActive && result.hashMatches;
     }
 
-    function getAgent(string calldata agentId) external view agentExists(agentId) returns (AgentRecord memory) {
-        return agentRecords[agentId];
+    function getAgent(uint256 projectId, string calldata agentId)
+        external
+        view
+        agentExists(projectId, agentId)
+        returns (AgentRecord memory)
+    {
+        return agentRecords[_key(projectId, agentId)];
     }
 
     function getAgentCount() external view returns (uint256) {
-        return registeredAgentIds.length;
+        return registeredKeys.length;
     }
 
-    function getCodeHash(string calldata agentId) external view returns (bytes32) {
-        return agentHashes[agentId];
+    function getCodeHash(uint256 projectId, string calldata agentId) external view returns (bytes32) {
+        return agentHashes[_key(projectId, agentId)];
     }
 }

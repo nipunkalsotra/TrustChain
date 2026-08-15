@@ -17,6 +17,21 @@ configured no-op path (safe default) and that a real OTLP exporter is
 constructed without error when an endpoint IS configured — the exact
 code path that was hand-verified end-to-end above.
 
+The same hand-verification was repeated for anchor_worker/main.py's
+`anchor_batch_submit` spans and indexer/main.py's `indexer_poll` spans
+(each process's own `init_tracing()` call, see those files) — real
+`run_once()` calls against this repo's own docker-compose stack, real
+spans landing under distinct `trustchain-anchor-worker`/
+`trustchain-indexer` service names (not folded into `trustchain-api`),
+attributes (batch_id/run_id/step_count/tx_hash, cursor_name/event_name)
+present and correct, confirmed via Jaeger's `/api/services` and
+`/api/traces` endpoints. Not committed as an automated test for the same
+reason as above (no Jaeger in CI, and OpenTelemetry's global
+TracerProvider can only be set once per process — pytest running many
+tests in one process makes a clean per-test in-memory exporter
+unreliable without a way to inject a non-global provider, which
+`observability.get_tracer()` deliberately doesn't expose).
+
 Sentry: same story — real event delivery needs a real Sentry account
 this repo doesn't have. What's checked here: init with a syntactically
 valid but fake DSN doesn't raise, and capture_exception() against that

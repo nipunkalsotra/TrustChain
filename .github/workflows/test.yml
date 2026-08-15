@@ -43,23 +43,43 @@ jobs:
         # number rather than testing anything meaningfully.
         run: forge coverage --report lcov --report summary --no-match-coverage "script/"
         working-directory: contracts
-      - name: Enforce coverage threshold
-        # 90% — src/*.sol's actual coverage is ~95% today (verified
-        # locally); this gate exists to catch a future PR silently
-        # dropping under-tested contract code in, not to chase 100%.
+      - name: Enforce coverage thresholds (line + branch)
+        # 90% each — src/*.sol's actual coverage is ~98% lines / 100%
+        # branches today (verified locally); this gate exists to catch a
+        # future PR silently dropping under-tested contract code in, not
+        # to chase 100%. Branch coverage is checked separately from line
+        # coverage (not folded into one number) because they catch
+        # different regressions: a line can be 100% "executed" while only
+        # ever taking one side of an if/require — the exact gap this
+        # would have missed before it started tracking BRF/BRH (e.g. a
+        # require's revert path never actually exercised by any test,
+        # which line coverage alone can't see since the require statement
+        # itself still counts as "hit" on the passing path alone).
         run: |
           python3 -c "
-          lf = lh = 0
+          lf = lh = brf = brh = 0
           for line in open('lcov.info'):
               if line.startswith('LF:'):
                   lf += int(line[3:])
               elif line.startswith('LH:'):
                   lh += int(line[3:])
-          pct = 100.0 * lh / lf if lf else 0.0
-          print(f'Line coverage: {lh}/{lf} = {pct:.2f}%')
+              elif line.startswith('BRF:'):
+                  brf += int(line[4:])
+              elif line.startswith('BRH:'):
+                  brh += int(line[4:])
+          line_pct = 100.0 * lh / lf if lf else 0.0
+          branch_pct = 100.0 * brh / brf if brf else 0.0
+          print(f'Line coverage:   {lh}/{lf} = {line_pct:.2f}%')
+          print(f'Branch coverage: {brh}/{brf} = {branch_pct:.2f}%')
           threshold = 90.0
-          if pct < threshold:
-              print(f'FAIL: coverage {pct:.2f}% is below the {threshold}% threshold')
+          failed = False
+          if line_pct < threshold:
+              print(f'FAIL: line coverage {line_pct:.2f}% is below the {threshold}% threshold')
+              failed = True
+          if branch_pct < threshold:
+              print(f'FAIL: branch coverage {branch_pct:.2f}% is below the {threshold}% threshold')
+              failed = True
+          if failed:
               raise SystemExit(1)
           "
         working-directory: contracts
@@ -82,12 +102,95 @@ jobs:
         # comes after `forge test`, not before it.)
         run: slither . --exclude-informational --exclude-low --exclude-optimization
         working-directory: contracts
+      - name: Install Mythril
+        # setuptools<81 is required, not incidental: mythril's own
+        # dependency chain (py-evm, transitively) still imports the
+        # legacy `pkg_resources` API, which setuptools>=81 no longer
+        # ships by default — found by a real local install attempt
+        # (`ModuleNotFoundError: No module named 'pkg_resources'` with
+        # setuptools 84), not assumed from changelog reading.
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" "setuptools<81" mythril==0.24.8
+      - name: Run Mythril (symbolic execution)
+        # Slither (above) is fast, pattern-based static analysis; Mythril
+        # is slow, sound(er) symbolic execution — genuinely different
+        # techniques that catch different bug classes (e.g. Mythril
+        # reasons about reachable execution PATHS and integer/state
+        # invariants a pattern matcher doesn't model), which is the whole
+        # point of running both rather than either alone.
+        #
+        # Points `solc` at the exact binary `forge build` (above, in this
+        # same job) already fetched via svm, instead of letting Mythril's
+        # bundled py-solc-x try to download its own copy: verified locally
+        # that py-solc-x's default download host
+        # (solc-bin.ethereum.org) doesn't resolve at all — a dead/stale
+        # hostname in the pinned py-solc-x version's URL, not a transient
+        # flake — so relying on it would make this step fail in CI
+        # regardless of contract correctness. Falls back to --solv (the
+        # network path) only if no cached svm binary is found, so this
+        # still works if forge's cache layout ever changes.
+        #
+        # Real per-file run times verified locally (~60-75s/contract at
+        # this execution-timeout): all 7 non-test/non-script .sol files,
+        # zero findings today — this is a real, currently-clean gate, not
+        # an aspirational one; a genuine new finding fails the build, same
+        # policy as Slither above.
+        run: |
+          SOLC_BIN="$(find "$HOME" -maxdepth 6 -type f -name 'solc-0.8.20' 2>/dev/null | head -1)"
+          if [ -n "$SOLC_BIN" ]; then
+            mkdir -p /tmp/solc-bin
+            ln -sf "$SOLC_BIN" /tmp/solc-bin/solc
+            export PATH="/tmp/solc-bin:$PATH"
+            SOLV_FLAG=""
+            echo "Using cached solc from forge's own svm install: $SOLC_BIN"
+          else
+            SOLV_FLAG="--solv 0.8.20"
+            echo "No cached solc found — falling back to Mythril's own network install (--solv)"
+          fi
+
+          cat > /tmp/mythril-solc-settings.json <<'EOF'
+          {"remappings": ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]}
+          EOF
+
+          failed=0
+          for f in src/AgentAuditLog.sol src/AgentIdentityRegistry.sol src/TrustScoreRegistry.sol \
+                   src/v2/AgentAuditLogV2.sol src/v2/AgentIdentityRegistryV2.sol \
+                   src/v2/TrustScoreRegistryV2.sol src/v2/TrustChainRegistry.sol; do
+            echo "=== myth analyze $f ==="
+            myth analyze "$f" --solc-json /tmp/mythril-solc-settings.json $SOLV_FLAG \
+              --execution-timeout 90 -o json > /tmp/myth-out.json 2>/tmp/myth-err.log
+            cat /tmp/myth-err.log >&2
+            python3 -c "
+          import json, sys
+          with open('/tmp/myth-out.json') as fh:
+              result = json.load(fh)
+          issues = result.get('issues', [])
+          if not result.get('success', False) or issues:
+              print(f'FAIL: {len(issues)} Mythril issue(s) in $f, or analysis did not complete')
+              for issue in issues:
+                  print(f\"  - {issue.get('title')}: {issue.get('description')}\")
+              sys.exit(1)
+          print('OK: no Mythril issues in $f')
+          " || failed=1
+          done
+          exit $failed
+        working-directory: contracts
 
   backend:
-    name: Backend (Python)
+    name: Backend (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 + 3.12: the two versions this backend is actually expected
+        # to run on (deploy.yml's production image and everyone's local
+        # dev is 3.12, but nothing before this pinned CI to a single
+        # version, so 3.11-only regressions — a newer stdlib/typing
+        # feature creeping in, a dependency behaving differently across
+        # minor versions — could land unnoticed). fail-fast: false so a
+        # 3.11-only failure doesn't cancel the 3.12 run's own results.
+        python-version: ["3.11", "3.12"]
     services:
       postgres:
         image: postgres:16
@@ -129,7 +232,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - name: Install dependencies
@@ -291,6 +394,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # id-token: write is what lets cosign sign the SBOM KEYLESS — it
+      # exchanges this job's GitHub-issued OIDC token for a short-lived
+      # Fulcio certificate (tied to this exact repo+workflow+ref) instead
+      # of a long-lived private key this repo would otherwise need to
+      # generate, store as a secret, and rotate. The signature and its
+      # Rekor transparency-log entry are what let anyone later confirm
+      # "this SBOM really was produced by this repo's CI," not just
+      # "here's a JSON file someone uploaded."
+      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -403,11 +515,50 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -e ".[dev]"
           pytest tests/ -v
         working-directory: sdk/python
+      - name: Build Python SDK wheel and verify it installs
+        # A package that only ever gets tested via an editable install
+        # (`-e ".[dev]"`, the step above) can still be broken for anyone
+        # who actually `pip install`s it — a missing package in
+        # pyproject.toml's packages list, a MANIFEST gap, anything the
+        # editable install's direct filesystem link papers over. Building
+        # a real wheel and installing THAT into a clean venv is the only
+        # way to catch that class of bug before a real release does.
+        run: |
+          python -m venv /tmp/sdk-wheel-build
+          /tmp/sdk-wheel-build/bin/pip install --quiet build
+          /tmp/sdk-wheel-build/bin/python -m build --wheel
+          python -m venv /tmp/sdk-wheel-install
+          /tmp/sdk-wheel-install/bin/pip install --quiet dist/*.whl
+          /tmp/sdk-wheel-install/bin/python -c "import trustchain_sdk; print('trustchain_sdk imported OK from', trustchain_sdk.__file__)"
+        working-directory: sdk/python
+      - name: Upload Python SDK wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustchain-sdk-python-wheel
+          path: sdk/python/dist/*.whl
       - name: Run TypeScript SDK tests
         run: |
           npm install
           npm test
         working-directory: sdk/typescript
+      - name: Pack TypeScript SDK and verify it installs
+        # Same reasoning as the Python wheel step above: `npm test` runs
+        # against source directly, not the published-shape package —
+        # `files: ["dist"]` in package.json (or an entry missing from it)
+        # is exactly the kind of thing that only breaks for someone who
+        # actually `npm install`s the packed tarball.
+        run: |
+          npm pack
+          mkdir -p /tmp/sdk-npm-install && cd /tmp/sdk-npm-install
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/sdk/typescript"/trustchain-sdk-*.tgz
+          node -e "import('trustchain-sdk').then(m => { if (!m.TrustChain) throw new Error('TrustChain export missing from packed tarball'); console.log('trustchain-sdk imported OK, TrustChain export present'); })"
+        working-directory: sdk/typescript
+      - name: Upload TypeScript SDK tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustchain-sdk-typescript-tarball
+          path: sdk/typescript/trustchain-sdk-*.tgz
       - name: Schemathesis (API fuzzing against the real OpenAPI schema)
         # Property-based fuzzing against the LIVE api container — malformed/
         # boundary/adversarial inputs generated straight from the OpenAPI
@@ -461,11 +612,35 @@ jobs:
           image: trustchain-api:latest
           format: cyclonedx-json
           output-file: sbom-api.cyclonedx.json
-      - name: Upload SBOM
+      - name: Install cosign
+        # v4, not v3: sigstore/cosign-installer's OWN major version tag
+        # installs a DIFFERENT cosign major version by default (v3 of
+        # this action -> cosign 2.x; v4 -> cosign 3.x) — confusingly not
+        # matched. Verified locally against a real cosign v3.1.3 binary
+        # that `sign-blob --bundle` (the flag used below) is that
+        # version's current, non-deprecated form; cosign 2.x might not
+        # accept it identically, so this pins to the installer version
+        # that actually gives the binary this was tested against.
+        uses: sigstore/cosign-installer@v4
+      - name: Sign SBOM (keyless, Sigstore/Fulcio + Rekor)
+        # No --key: cosign requests a short-lived signing cert from Fulcio
+        # using this job's OIDC token (see the job's id-token: write
+        # permission above), signs with that, and publishes the signature
+        # to the public Rekor transparency log — the whole point being
+        # that verification never depends on a secret this repo has to
+        # protect. --bundle writes signature + certificate + Rekor log
+        # entry into one file (cosign's current recommended format;
+        # verified locally against a real cosign v3 binary — the older
+        # --output-signature/--output-certificate flags are deprecated in
+        # favor of this).
+        run: cosign sign-blob --yes --bundle sbom-api.cyclonedx.json.bundle sbom-api.cyclonedx.json
+      - name: Upload SBOM + signature bundle
         uses: actions/upload-artifact@v4
         with:
           name: sbom-api
-          path: sbom-api.cyclonedx.json
+          path: |
+            sbom-api.cyclonedx.json
+            sbom-api.cyclonedx.json.bundle
       - name: Dump service logs on failure
         if: failure()
         run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200

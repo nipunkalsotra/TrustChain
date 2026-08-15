@@ -30,6 +30,9 @@ __pycache__/
 .coverage
 htmlcov/
 *.log
+*.egg-info/
+*.whl
+*.tgz
 
 # ── SQLite (users/runs persistence) ─────────────────────────────────────────
 *.db

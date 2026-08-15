@@ -269,3 +269,39 @@ async def get_platform_stats() -> dict:
         "totalSteps": total_steps,
         "totalAnchoredBatches": total_anchored_batches,
     }
+
+
+# ── Real gas-spend attribution (GET /gas-spend, plan §11.4/O10) ────────
+
+async def get_gas_spend_summary(project_id: int) -> dict:
+    """Real wei spent anchoring THIS project's steps — gas_used and
+    gas_price_wei (db/models.py's AnchorBatch) are read straight off each
+    batch's real confirmation receipt (anchor_worker/submit.py), never
+    estimated. A batch belongs to exactly one run (build_batches groups
+    claimed outbox rows by run_id — see anchor_worker/batch.py), so
+    joining through DISTINCT batch ids (not per-step, which would count
+    one batch's cost once per step it anchors) correctly attributes each
+    batch's cost to exactly the one project that owns its run."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        batch_ids_for_project = (
+            select(Step.anchor_batch_id)
+            .join(Run, Run.run_id == Step.run_id)
+            .where(Run.project_id == project_id, Step.anchor_batch_id.is_not(None))
+            .distinct()
+        )
+        row = (
+            await session.execute(
+                select(
+                    func.count(AnchorBatch.id),
+                    func.coalesce(func.sum(AnchorBatch.gas_used * AnchorBatch.gas_price_wei), 0),
+                )
+                .where(AnchorBatch.id.in_(batch_ids_for_project), AnchorBatch.status == "confirmed")
+            )
+        ).one()
+
+    confirmed_batch_count, total_wei_spent = row
+    return {
+        "confirmedBatchCount": confirmed_batch_count,
+        "totalGasSpentWei": str(total_wei_spent),  # str: real wei totals exceed float64/JS-number precision
+    }

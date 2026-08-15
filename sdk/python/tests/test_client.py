@@ -22,6 +22,7 @@ from trustchain_sdk import (
     NotFoundError,
     RateLimitError,
     TrustChainClient,
+    ValidationError,
 )
 
 BASE_URL = "http://localhost:8000"
@@ -169,17 +170,31 @@ def test_leaderboard_and_audit_log_return_real_data_shapes(api_key):
 
 def test_invalid_api_key_raises_authentication_error():
     with TrustChainClient("tc_test_not_a_real_key_00000000000000000000", base_url=BASE_URL) as client:
-        with pytest.raises(AuthenticationError):
+        with pytest.raises(AuthenticationError) as exc_info:
             client.list_runs()
+    # error_code (backend/errors.py's typed taxonomy) must reach the SDK
+    # exception object, not just the raw response body — this is what a
+    # caller actually branches on instead of parsing .detail strings.
+    assert exc_info.value.error_code == "invalid_api_key"
 
 
-def test_empty_task_raises_bad_request_error(api_key):
-    # main.py checks `if not body.task.strip()` itself and raises 400 —
-    # this is an application-level input check, not a pydantic schema
-    # failure (422), since an empty string IS a valid `str`.
+def test_empty_task_raises_validation_error(api_key):
+    # RunAgentRequest.task has Field(min_length=1) — an empty string is
+    # now rejected at the Pydantic schema layer (422) before main.py's
+    # handler body ever runs, not by its own `if not body.task.strip()`
+    # check (400) — that check is still real, just now only reachable
+    # for a WHITESPACE-only task ("   "), which passes min_length=1
+    # (length 3) but still isn't a usable task.
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
-        with pytest.raises(BadRequestError):
+        with pytest.raises(ValidationError):
             client.run_agent("")
+
+
+def test_whitespace_only_task_raises_bad_request_error(api_key):
+    with TrustChainClient(api_key, base_url=BASE_URL) as client:
+        with pytest.raises(BadRequestError) as exc_info:
+            client.run_agent("   ")
+    assert exc_info.value.error_code == "task_empty"
 
 
 def test_bursting_past_the_rate_limit_raises_rate_limit_error_with_retry_after(api_key):

@@ -329,3 +329,29 @@ def test_internal_errors_do_not_leak_exception_details(client, monkeypatch):
     assert r.status_code == 500
     assert sensitive_detail not in r.text
     assert r.json()["detail"] == "internal error — see server logs for details"
+
+
+def test_error_responses_carry_a_stable_machine_readable_error_code(client):
+    """Typed error taxonomy (errors.py) — every ApiError-raised response
+    must carry error_code as a SIBLING of detail, not a replacement for
+    it (F12's test above proves detail alone stays intact). Three
+    different real failures, three different status codes, three
+    different error_codes — this is exactly what a status-code-only
+    client can't distinguish (all three ARE plausible 4xx "your request
+    was bad" cases) but error_code can."""
+    signup_body = {"email": "dupe_error_code_test@example.com", "name": "Test", "password": "correct horse battery staple"}
+
+    first = client.post("/auth/signup", json=signup_body)
+    assert first.status_code == 200
+
+    dup = client.post("/auth/signup", json=signup_body)
+    assert dup.status_code == 409
+    assert dup.json()["error_code"] == "email_already_registered"
+
+    bad_login = client.post("/auth/login", json={"email": signup_body["email"], "password": "wrong password entirely"})
+    assert bad_login.status_code == 401
+    assert bad_login.json()["error_code"] == "invalid_credentials"
+
+    no_auth = client.get("/runs")
+    assert no_auth.status_code == 401
+    assert no_auth.json()["error_code"] == "missing_bearer_token"

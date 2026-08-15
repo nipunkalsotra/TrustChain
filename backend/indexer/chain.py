@@ -27,3 +27,8 @@ def get_audit_log_contract():
 @lru_cache
 def get_trust_score_contract():
     return build_contract(get_w3(), "TrustScoreRegistryV2")
+
+
+@lru_cache
+def get_identity_registry_contract():
+    return build_contract(get_w3(), "AgentIdentityRegistryV2")

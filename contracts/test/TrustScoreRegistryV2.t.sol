@@ -44,6 +44,20 @@ contract TrustScoreRegistryV2Test is Test {
         registry.pause();
     }
 
+    function test_UpdateScoreResumesAfterUnpause() public {
+        registry.pause();
+
+        vm.prank(relayer);
+        vm.expectRevert();
+        registry.updateScore("researcher", "run1", 80, "r");
+
+        registry.unpause();
+
+        vm.prank(relayer);
+        registry.updateScore("researcher", "run1", 80, "r");
+        assertEq(registry.getScore("researcher", "run1"), 80);
+    }
+
     // ── updateScore ───────────────────────────────────────────────────────
 
     function test_UpdateScore_StoresAndClamps() public {
@@ -52,6 +66,34 @@ contract TrustScoreRegistryV2Test is Test {
         vm.stopPrank();
 
         assertEq(registry.getScore("researcher", "run1"), 100);
+        // scores/lastUpdatedAt/hasScore are hand-written external functions
+        // (see the STORAGE PACKING note in TrustScoreRegistryV2.sol) standing
+        // in for what used to be auto-generated public-mapping getters —
+        // exercise them directly, not just via getScore/getScoreFull.
+        assertEq(registry.scores("researcher", "run1"), 100);
+        assertEq(registry.lastUpdatedAt("researcher", "run1"), block.timestamp);
+        assertTrue(registry.hasScore("researcher", "run1"));
+    }
+
+    function test_GetScoreFull_ReturnsCurrentStateAndUpdateCount() public {
+        vm.startPrank(relayer);
+        registry.updateScore("researcher", "run1", 50, "step1");
+        registry.updateScore("researcher", "run1", 90, "step2");
+        vm.stopPrank();
+
+        TrustScoreRegistryV2.ScoreRecord memory record = registry.getScoreFull("researcher", "run1");
+        assertEq(record.currentScore, 90);
+        assertEq(record.updateCount, 2);
+        assertEq(record.lastUpdatedAt, block.timestamp);
+        assertTrue(record.hasScore);
+    }
+
+    function test_GetScoreFull_UnscoredAgentReturnsZeroedRecord() public view {
+        TrustScoreRegistryV2.ScoreRecord memory record = registry.getScoreFull("researcher", "never_run");
+        assertEq(record.currentScore, 0);
+        assertEq(record.updateCount, 0);
+        assertEq(record.lastUpdatedAt, 0);
+        assertFalse(record.hasScore);
     }
 
     function test_UpdateScore_HistoryAccumulates() public {
@@ -124,6 +166,46 @@ contract TrustScoreRegistryV2Test is Test {
         registry.updateScoresBatch("run1", agents, scores, "r");
     }
 
+    function test_RevertWhen_BatchRunIdEmpty() public {
+        string[] memory agents = new string[](1);
+        agents[0] = "researcher";
+        uint256[] memory scores = new uint256[](1);
+        scores[0] = 80;
+
+        vm.prank(relayer);
+        vm.expectRevert("TrustScoreRegistryV2: runId cannot be empty");
+        registry.updateScoresBatch("", agents, scores, "r");
+    }
+
+    function test_RevertWhen_BatchAgentIdEmpty() public {
+        string[] memory agents = new string[](2);
+        agents[0] = "researcher";
+        agents[1] = "";
+        uint256[] memory scores = new uint256[](2);
+        scores[0] = 80;
+        scores[1] = 70;
+
+        vm.prank(relayer);
+        vm.expectRevert("TrustScoreRegistryV2: agentId cannot be empty");
+        registry.updateScoresBatch("run1", agents, scores, "r");
+    }
+
+    // ── updateScore's validIds modifier — the single-score path has its
+    //    own empty-agentId/empty-runId requires, distinct from
+    //    updateScoresBatch's (tested above) ─────────────────────────────
+
+    function test_RevertWhen_UpdateScoreAgentIdEmpty() public {
+        vm.prank(relayer);
+        vm.expectRevert("TrustScoreRegistryV2: agentId cannot be empty");
+        registry.updateScore("", "run1", 80, "r");
+    }
+
+    function test_RevertWhen_UpdateScoreRunIdEmpty() public {
+        vm.prank(relayer);
+        vm.expectRevert("TrustScoreRegistryV2: runId cannot be empty");
+        registry.updateScore("researcher", "", 80, "r");
+    }
+
     // ── resetRun (admin-only) ────────────────────────────────────────────
 
     function test_ResetRun_ClearsScores() public {
@@ -134,5 +216,46 @@ contract TrustScoreRegistryV2Test is Test {
 
         assertEq(registry.getScore("researcher", "run1"), 0);
         assertFalse(registry.hasScore("researcher", "run1"));
+    }
+
+    function test_ResetRun_ThenRescoringSameAgentDoesNotDuplicateLeaderboardEntry() public {
+        // Regression test for a bug Foundry's stateful fuzzer found in
+        // test/TrustScoreRegistryV2Invariant.t.sol
+        // (invariant_RunLeaderboardHasNoDuplicateAgents): resetRun cleared
+        // each agent's score/history but never cleared runAgents[runId]
+        // itself, so re-scoring the same agent after a reset pushed it
+        // into the leaderboard array a second time.
+        vm.prank(relayer);
+        registry.updateScore("researcher", "run1", 80, "r");
+
+        registry.resetRun("run1");
+
+        vm.prank(relayer);
+        registry.updateScore("researcher", "run1", 90, "r");
+
+        (string[] memory ids,) = registry.getRunLeaderboard("run1");
+        assertEq(ids.length, 1);
+        assertEq(ids[0], "researcher");
+    }
+
+    function test_RevertWhen_ResettingUnknownRunId() public {
+        vm.expectRevert("TrustScoreRegistryV2: runId does not exist");
+        registry.resetRun("never_seen_run");
+    }
+
+    // ── getLatestRunId ────────────────────────────────────────────────────
+
+    function test_GetLatestRunId_EmptyStringWhenNoRunsYet() public view {
+        assertEq(registry.getLatestRunId(), "");
+    }
+
+    function test_GetLatestRunId_ReturnsMostRecentlySeenRun() public {
+        vm.startPrank(relayer);
+        registry.updateScore("researcher", "run1", 80, "r");
+        registry.updateScore("researcher", "run2", 90, "r");
+        vm.stopPrank();
+
+        assertEq(registry.getLatestRunId(), "run2");
+        assertEq(registry.getRunCount(), 2);
     }
 }

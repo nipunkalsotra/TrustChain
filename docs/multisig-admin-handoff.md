@@ -1,15 +1,25 @@
 # Handing V2 contract admin to a Gnosis Safe
 
-`DeployV2.s.sol` deploys `AgentAuditLogV2`, `TrustScoreRegistryV2`, and
-`AgentIdentityRegistryV2` with `DEFAULT_ADMIN_ROLE` held by a single EOA
-(the deployer). That's fine for local dev against Anvil; it is **not**
-how any deployment with real value behind it should stay configured —
-one private key being able to pause every contract, register/revoke
-agents, and reset runs is exactly the single point of failure a
-production security posture avoids.
+**If you haven't deployed yet and already have a Safe address**, you
+don't need this doc at all — pass `SAFE_ADDRESS` to `DeployV2.s.sol`
+directly and it hands off to the Safe atomically as part of the same
+deployment run, with no single-EOA-admin window left afterward to close.
+See `docs/adr/0012-multisig-default-deployment-posture.md` for that
+option and why it isn't the unconditional default (local dev has no
+standing Safe to point at).
+
+This doc covers the other case: **contracts are already deployed** with
+`DEFAULT_ADMIN_ROLE` held by a single EOA (the deployer) — either
+because `SAFE_ADDRESS` wasn't set at deploy time (this repo's own
+local-dev default against Anvil), or because they were deployed before
+that option existed. That's fine for local dev; it is **not** how any
+deployment with real value behind it should stay configured — one
+private key being able to pause every contract, register/revoke agents,
+and reset runs is exactly the single point of failure a production
+security posture avoids.
 
 `script/TransferAdminToMultisig.s.sol` moves that admin role to a Gnosis
-Safe. This doc is the runbook for doing that safely.
+Safe after the fact. This doc is the runbook for doing that safely.
 
 ## What this does and does not cover
 

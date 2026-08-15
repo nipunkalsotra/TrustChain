@@ -8,12 +8,22 @@
 export class TrustChainError extends Error {
   readonly statusCode: number | undefined;
   readonly detail: unknown;
+  /** Machine-readable code from backend/errors.py's typed error taxonomy
+   * — many logically distinct failures share one status code (every 401
+   * here becomes AuthenticationError, whether it was a missing bearer
+   * token, an expired JWT, or a revoked API key), so this is what lets a
+   * caller branch on the SPECIFIC cause without parsing `detail`
+   * strings. undefined for responses from an older API version that
+   * predates error_code, or for client-side errors that never reached
+   * the server. */
+  readonly errorCode: string | undefined;
 
-  constructor(message: string, statusCode?: number, detail?: unknown) {
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
     super(message);
     this.name = "TrustChainError";
     this.statusCode = statusCode;
     this.detail = detail;
+    this.errorCode = errorCode;
   }
 }
 
@@ -23,24 +33,24 @@ export class TrustChainError extends Error {
  * well-formed JSON matching the expected shape, but the value itself
  * isn't acceptable. */
 export class BadRequestError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "BadRequestError";
   }
 }
 
 /** 401 — missing/invalid credentials. */
 export class AuthenticationError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "AuthenticationError";
   }
 }
 
 /** 403 — valid credentials, insufficient scope (see auth.require_scope). */
 export class AuthorizationError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "AuthorizationError";
   }
 }
@@ -50,24 +60,24 @@ export class AuthorizationError extends TrustChainError {
  * confirm another tenant's resource even exists), OR (for a run) exists
  * but hasn't reached a terminal status yet. */
 export class NotFoundError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "NotFoundError";
   }
 }
 
 /** 409 — Idempotency-Key reused with a different request body. */
 export class ConflictError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "ConflictError";
   }
 }
 
 /** 422 — request failed schema validation. */
 export class ValidationError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "ValidationError";
   }
 }
@@ -77,8 +87,11 @@ export class ValidationError extends TrustChainError {
 export class RateLimitError extends TrustChainError {
   readonly retryAfterSeconds: number | undefined;
 
-  constructor(message: string, statusCode?: number, detail?: unknown, retryAfterSeconds?: number) {
-    super(message, statusCode, detail);
+  constructor(
+    message: string, statusCode?: number, detail?: unknown,
+    retryAfterSeconds?: number, errorCode?: string,
+  ) {
+    super(message, statusCode, detail, errorCode);
     this.name = "RateLimitError";
     this.retryAfterSeconds = retryAfterSeconds;
   }
@@ -89,8 +102,8 @@ export class RateLimitError extends TrustChainError {
  * fix) — it's always the fixed "internal error — see server logs"
  * message; anything more specific needs the API's own logs. */
 export class ServerError extends TrustChainError {
-  constructor(message: string, statusCode?: number, detail?: unknown) {
-    super(message, statusCode, detail);
+  constructor(message: string, statusCode?: number, detail?: unknown, errorCode?: string) {
+    super(message, statusCode, detail, errorCode);
     this.name = "ServerError";
   }
 }

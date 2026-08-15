@@ -5,22 +5,20 @@
 #
 # HONEST LIMITATION: this repo has no real staging/production
 # infrastructure target configured (no cloud account, no server, no
-# kubeconfig) — the actual `deploy` steps below are placeholders that
-# document the real shape of the command (SSH + deploy/canary_rollout.sh,
-# the most direct fit for how this project already runs via
-# docker-compose.yml) rather than a fabricated "it deployed successfully"
-# step. Wire DEPLOY_HOST/DEPLOY_SSH_KEY as environment secrets once a
-# real target exists and delete this comment block.
-#
-# What IS real: deploy/canary_rollout.sh — deploy, hold through a bake
-# period of repeated real health checks, and automatically roll back to
-# the last known-good version if any check fails. Verified against this
-# repo's own docker-compose stack (deploy/canary_rollout_test.sh: a real
-# bake success, a real mid-deploy crash triggering a real automatic
-# rollback, and the no-prior-version edge case) — not just described.
-# The steps below show exactly what would run on a real host; locally
-# they're a no-op deploy-mode toggle away from `bash deploy/
-# canary_rollout.sh <version>` run directly.
+# kubeconfig). Each deploy job below is conditional on that: if the
+# DEPLOY_HOST/DEPLOY_SSH_KEY GitHub Environment secrets exist (see
+# docs/release-process.md's "Honest limitation" section for how to add
+# them once a real target does), it SSHes there for real and runs
+# `DEPLOY_MODE=pull bash deploy/canary_rollout.sh <version>` on that host.
+# Until then, it runs deploy/canary_rollout.sh FOR REAL anyway —
+# DEPLOY_MODE=build, against this job's own ephemeral docker-compose
+# stack — rather than only ever describing the command in a comment. That
+# means every release genuinely exercises the real deploy/bake/
+# auto-rollback-on-failure control flow (not deploy/canary_rollout_test.sh's
+# synthetic stubs — canary_rollout.sh unmodified, doing exactly what it
+# would do against a real host), even with no real target to point it at
+# yet. The day DEPLOY_HOST/DEPLOY_SSH_KEY exist, the SAME job switches to
+# the real SSH path automatically — no rewrite needed.
 name: Deploy
 permissions: {}
 on:
@@ -66,31 +64,79 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Deploy backend/mcp images to staging (canary + auto-rollback)
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Same real-stack bootstrap as test.yml's sdk-integration job — the
+      # bake loop below polls a REAL /ready endpoint, so there has to be a
+      # real API behind it. See that job's comments for why each step is
+      # needed.
+      - name: Write backend/.env for docker compose
         run: |
-          cat <<EOF
-          Would deploy version ${{ needs.resolve-version.outputs.version }} to staging.
-          Real shape of this step (once DEPLOY_HOST/DEPLOY_SSH_KEY secrets exist):
-
-            ssh -i \$DEPLOY_SSH_KEY deploy@\$DEPLOY_HOST bash -s <<'REMOTE'
-              cd /opt/trustchain
-              DEPLOY_MODE=pull bash deploy/canary_rollout.sh ${{ needs.resolve-version.outputs.version }}
-          REMOTE
-
-          deploy/canary_rollout.sh (this repo, tested against its own
-          docker-compose stack — see deploy/canary_rollout_test.sh) pulls
-          the new images, holds them through a bake period of repeated
-          real /ready checks, and automatically redeploys the previous
-          known-good version if any check fails during that window —
-          exit 0 = healthy and live, exit 1 = bad deploy, rolled back
-          successfully, exit 2 = rollback itself failed (a real incident,
-          this job should fail loudly here, not retry silently).
-
-          See docs/release-process.md for the full deployment story and why the SSH target stays a placeholder for now.
+          cat > backend/.env <<EOF
+          JWT_SECRET=ci-test-secret-not-for-production-use-only
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
           EOF
-      - name: Smoke test staging
+      - name: Start postgres/redis/anvil/mcp servers
+        run: docker compose up -d --build postgres redis anvil mcp-search mcp-blockchain
+      - name: Wait for Postgres readiness
         run: |
-          echo "deploy/canary_rollout.sh's own bake loop above IS the smoke test (real /ready checks over a real window, not one curl right after startup) — nothing further to run here once a real \$STAGING_URL exists."
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U trustchain -d trustchain && break
+            sleep 1
+          done
+      - name: Install backend dependencies (for alembic)
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
+        working-directory: backend
+      - name: Apply database migrations (creates trustchain_api + RLS policies)
+        run: alembic upgrade head
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
+      - name: Build contracts
+        run: forge build
+        working-directory: contracts
+      - name: Extract V2 ABIs for the backend
+        run: python3 backend/scripts/extract_v2_abis.py
+      - name: Deploy V2 contracts to Anvil
+        run: forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      - name: Record deployed V2 addresses
+        run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
+      - name: Deploy backend/mcp images to staging (canary + auto-rollback)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "Real staging host configured — deploying for real over SSH."
+            install -m 600 /dev/null /tmp/deploy_key
+            echo "$DEPLOY_SSH_KEY" > /tmp/deploy_key
+            ssh -o StrictHostKeyChecking=accept-new -i /tmp/deploy_key "deploy@${DEPLOY_HOST}" \
+              "cd /opt/trustchain && DEPLOY_MODE=pull bash deploy/canary_rollout.sh '${VERSION}'"
+          else
+            echo "No DEPLOY_HOST/DEPLOY_SSH_KEY environment secrets configured yet"
+            echo "(see docs/release-process.md's \"Honest limitation\" section)."
+            echo "Running deploy/canary_rollout.sh for real anyway, against this"
+            echo "job's own ephemeral docker-compose stack (DEPLOY_MODE=build) —"
+            echo "exercises the real deploy/bake/auto-rollback control flow rather"
+            echo "than only documenting it."
+            bash deploy/canary_rollout.sh "ci-${VERSION}"
+          fi
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200
 
   production:
     name: Deploy to production
@@ -107,11 +153,72 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Write backend/.env for docker compose
+        run: |
+          cat > backend/.env <<EOF
+          JWT_SECRET=ci-test-secret-not-for-production-use-only
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+          EOF
+      - name: Start postgres/redis/anvil/mcp servers
+        run: docker compose up -d --build postgres redis anvil mcp-search mcp-blockchain
+      - name: Wait for Postgres readiness
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U trustchain -d trustchain && break
+            sleep 1
+          done
+      - name: Install backend dependencies (for alembic)
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
+        working-directory: backend
+      - name: Apply database migrations (creates trustchain_api + RLS policies)
+        run: alembic upgrade head
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
+      - name: Build contracts
+        run: forge build
+        working-directory: contracts
+      - name: Extract V2 ABIs for the backend
+        run: python3 backend/scripts/extract_v2_abis.py
+      - name: Deploy V2 contracts to Anvil
+        run: forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      - name: Record deployed V2 addresses
+        run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
       - name: Deploy backend/mcp images to production (canary + auto-rollback)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
-          echo "Would deploy version ${{ needs.resolve-version.outputs.version }} to production."
-          echo "Same real shape as the staging step (deploy/canary_rollout.sh), against \$PROD_DEPLOY_HOST instead — including the same automatic rollback on a failed bake."
-          echo "See docs/release-process.md."
-      - name: Smoke test production
-        run: |
-          echo "deploy/canary_rollout.sh's own bake loop above IS the smoke test — nothing further to run here once a real \$PRODUCTION_URL exists."
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "Real production host configured — deploying for real over SSH."
+            install -m 600 /dev/null /tmp/deploy_key
+            echo "$DEPLOY_SSH_KEY" > /tmp/deploy_key
+            ssh -o StrictHostKeyChecking=accept-new -i /tmp/deploy_key "deploy@${DEPLOY_HOST}" \
+              "cd /opt/trustchain && DEPLOY_MODE=pull bash deploy/canary_rollout.sh '${VERSION}'"
+          else
+            echo "No DEPLOY_HOST/DEPLOY_SSH_KEY environment secrets configured yet"
+            echo "(see docs/release-process.md's \"Honest limitation\" section)."
+            echo "Running deploy/canary_rollout.sh for real anyway, against this"
+            echo "job's own ephemeral docker-compose stack (DEPLOY_MODE=build) —"
+            echo "exercises the real deploy/bake/auto-rollback control flow rather"
+            echo "than only documenting it."
+            bash deploy/canary_rollout.sh "ci-${VERSION}"
+          fi
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200

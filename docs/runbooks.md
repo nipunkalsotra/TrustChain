@@ -1,9 +1,13 @@
 # Runbooks
 
-One section per alert defined in `docker/prometheus/alerts.yml` — each
-alert's `runbook` annotation links to the matching `#anchor` here. Written
-for whoever's on call, not whoever wrote the code: assume you're reading
-this at 2am with no other context.
+Two kinds of section below. **Alert runbooks** — one per alert defined in
+`docker/prometheus/alerts.yml`, each alert's `runbook` annotation links to
+the matching `#anchor` here — are reactive: something fired, follow the
+steps. **Operational procedures** are proactive: rehearsed steps for a
+planned or emergency action nothing pages you for on its own (rotating a
+key, pausing a contract, restoring a backup). Written for whoever's on
+call, not whoever wrote the code: assume you're reading this at 2am with
+no other context.
 
 Dashboards: Grafana at `:3002` (local dev — `docker compose up grafana`),
 dashboard "TrustChain". Metrics: `docker/prometheus/prometheus.yml`'s
@@ -13,6 +17,8 @@ JSON via `structlog` (`backend/logging_config.py`) — every line carries
 on those to follow one request or run through everything it caused.
 
 ---
+
+# Alert runbooks
 
 ## High HTTP 5xx rate
 
@@ -139,6 +145,47 @@ produce a receipt.
    `anchor_outbox_pending` (which will have been growing the whole time
    this was silently failing) starts draining.
 
+## Anchor outbox steps dead-lettered
+
+**Fires when:** `anchor_outbox_dead_lettered_total` increases at all in a
+5-minute window — `for: 0m`, not a sustained-condition alert like the
+others above. Severity `critical`, unconditionally: a dead-lettered step
+is permanent — it will never be anchored on-chain without manual
+intervention, breaking this product's core guarantee (every agent step
+gets an immutable, verifiable audit trail) for exactly that step. Two
+distinct `source` label values, from two distinct code paths:
+
+- `source="reaper"` (`anchor_worker/reaper.py`): a claim outlived
+  `anchor_claim_timeout_seconds` AND had already exhausted
+  `anchor_max_attempts` — almost always means the worker crashed/restarted
+  repeatedly while holding the same row (check for `anchor_worker_starting`
+  log lines close together — a genuine crash loop, not one clean restart).
+- `source="submit_failure"` (`anchor_worker/main.py::handle_submit_failure`):
+  a batch's on-chain submission itself (revert or confirmation timeout)
+  failed `anchor_max_attempts` times — see "Anchor batches failing
+  repeatedly" above for what usually causes a revert/timeout in the first
+  place; this fires once THAT keeps happening long enough to exhaust
+  retries for a specific batch's steps.
+
+1. Find the affected rows: `SELECT id, step_id, attempts, last_error FROM
+   anchor_outbox WHERE status = 'dead_letter' ORDER BY id DESC LIMIT 50;`
+   — `last_error` holds the final failure reason from whichever path
+   dead-lettered it.
+2. Root-cause via `last_error` and the two `source` cases above — do NOT
+   just requeue before understanding why, or the same rows dead-letter
+   again on the exact same underlying problem.
+3. Once the root cause is fixed, recovery is manual (deliberately no
+   automatic un-dead-lettering — see "Anchor batches failing repeatedly"'s
+   step 3 for the exact `UPDATE`): reset `status='pending', attempts=0,
+   claimed_by=NULL, claimed_at=NULL, batch_id=NULL` for the affected rows,
+   confirm they anchor cleanly on the next few work loops, and confirm
+   `anchor_outbox_dead_lettered_total`'s rate returns to zero.
+4. If rows were dead-lettered for a reason that can't be fixed after the
+   fact (e.g. a step whose content was somehow lost, not just delayed),
+   this IS a real, permanent audit-trail gap for that step — document it
+   rather than silently requeuing something that will just fail again or
+   masking that the guarantee was actually broken for that data.
+
 ## RPC circuit breaker open
 
 **Fires when:** `rpc_circuit_breaker_open{endpoint=...}` has been `1` for
@@ -182,3 +229,274 @@ last-processed block) exceeds 1000 for 10+ minutes.
    batch was mid-confirmation during this lag window, that batch stays
    at `status='submitted'` in Postgres, even though it may have already
    succeeded on-chain, until the indexer catches back up).
+
+---
+
+# Operational procedures
+
+## Rotating the anchor worker's signing key
+
+**When:** scheduled key rotation, suspected key compromise, or moving a
+deployment from `local` to a KMS-backed `SIGNER_BACKEND` for the first
+time. The anchor worker's key holds `ANCHOR_ROLE` on `AgentAuditLogV2` and
+`TrustScoreRegistryV2` (granted by `DeployV2.s.sol` at deploy time) —
+that's the only privilege it has (it cannot pause, register/revoke
+agents, or reset runs; see `docs/multisig-admin-handoff.md` for those),
+but it's a hot, automated key that signs real transactions on every work
+loop, which is exactly why rotating it without downtime or a stuck outbox
+needs care.
+
+This is about replacing the actual signing key material — distinct from
+what "Anchor wallet balance low" above means by "rotation" in its funding
+note (rotating Vault/KMS *access credentials*, e.g. a Vault token or IAM
+key, without touching the secp256k1 key those credentials protect, which
+indeed leaves the address unchanged and doesn't need any of this). The
+address a REAL key-material rotation produces depends on `SIGNER_BACKEND`
+(`backend/blockchain/signer.py`):
+
+- `local` / `vault_kv`: the signing address is derived from the raw
+  private key, so a **new key means a new address** — the grant/cutover/
+  revoke dance below is required every time.
+- `aws_kms` / `gcp_kms`: AWS KMS does not support automatic rotation for
+  asymmetric keys at all (only symmetric keys can auto-rotate) — rotating
+  a KMS-backed signer always means creating a brand new asymmetric key
+  and pointing `KMS_KEY_ID` at it, which produces a **new address**, same
+  as the local/vault_kv case. Confirm the actual address either way with
+  `signer.address` (or `GET /chain-status`, which reports the currently
+  configured wallet) rather than assuming.
+
+Steps (all four backends share this shape once you have the new
+address):
+
+1. Determine the new signer's address ahead of time without touching the
+   live deployment: `local`/`vault_kv` — derive it from the new key
+   locally (`python3 -c "from eth_account import Account; print(Account.from_key('0x...').address)"`);
+   `aws_kms`/`gcp_kms` — create the new key/version first, then read its
+   address via `AwsKmsSigner(...).address` / `GcpKmsSigner(...).address`
+   (or the provider console's public-key export) before it's live
+   anywhere.
+2. Grant `ANCHOR_ROLE` to the new address on both contracts, from the
+   current `DEFAULT_ADMIN_ROLE` holder (a single EOA in local dev; a
+   Gnosis Safe if `docs/multisig-admin-handoff.md`'s handoff has already
+   run, in which case this grant goes through the Safe's own signing
+   flow instead of a bare `cast send`):
+
+   ```bash
+   cast send <AgentAuditLogV2 address> \
+     "grantRole(bytes32,address)" \
+     "$(cast keccak "ANCHOR_ROLE")" <new signer address> \
+     --rpc-url <rpc> --private-key <current admin key>
+
+   cast send <TrustScoreRegistryV2 address> \
+     "grantRole(bytes32,address)" \
+     "$(cast keccak "ANCHOR_ROLE")" <new signer address> \
+     --rpc-url <rpc> --private-key <current admin key>
+   ```
+
+3. Verify the grant landed on-chain before touching the running worker:
+   `cast call <address> "hasRole(bytes32,address)(bool)" "$(cast keccak "ANCHOR_ROLE")" <new signer address> --rpc-url <rpc>`
+   must return `true` on both contracts.
+4. Fund the new address with enough native token to operate — see
+   "Anchor wallet balance low" above for how much and how to check; an
+   unfunded new key just moves the gas-exhaustion failure mode to a
+   different address.
+5. Update the anchor worker's own configuration to the new signing
+   material and restart it: `PRIVATE_KEY`/`V2_PRIVATE_KEY` for `local`,
+   `VAULT_SECRET_PATH` (pointing at a KV entry already updated with the
+   new key) for `vault_kv`, or `KMS_KEY_ID` for `aws_kms`/`gcp_kms`. Then
+   `docker compose up -d --build anchor-worker` (or redeploy the process
+   in a non-Compose environment) — see this doc's opening note on
+   Compose recreating `anvil` on any `--build` in **local dev only**;
+   this does not apply to a real deployment against a persistent chain.
+6. Confirm the cutover: `GET /chain-status` (or the worker's own startup
+   logs) should report the new address; watch `anchor_batches_submitted_total`
+   /`anchor_outbox_pending` for a few successful work loops — a batch
+   actually confirming on-chain with the new key is the real proof this
+   worked, not just "the process started without erroring."
+7. Only once step 6 has shown several confirmed batches, revoke the role
+   from the OLD address on both contracts (same `cast send` shape as
+   step 2, with `revokeRole` in place of `grantRole`) and verify via
+   `hasRole` returns `false`. Revoking before confirming a working
+   cutover risks the exact same "stuck outbox, no valid signer" failure
+   this rotation was trying to avoid causing.
+
+## Pausing contracts in an emergency
+
+**When:** an `IntegrityViolation` event fires unexpectedly at scale, a
+contract bug is discovered post-deployment, or the anchor worker's key is
+suspected compromised and revoking `ANCHOR_ROLE` (see rotation above)
+isn't fast enough on its own. Only `AgentAuditLogV2` and
+`TrustScoreRegistryV2` are `Pausable` — `AgentIdentityRegistryV2` and
+`TrustChainRegistry` have no pause switch, by design (see each
+contract's own docstring for why); an incident involving those two
+requires revoking the relevant role instead (`REGISTRAR_ROLE` for
+`AgentIdentityRegistryV2`, `ANCHOR_ROLE`/`DEFAULT_ADMIN_ROLE` more
+generally).
+
+`pause()`/`unpause()` both require `DEFAULT_ADMIN_ROLE` — a single EOA in
+local dev, a Gnosis Safe if `docs/multisig-admin-handoff.md`'s handoff has
+run (in which case this needs a Safe signature round, which is slower;
+weigh that against the severity of what you're pausing for when deciding
+whether to pause at all).
+
+1. Pause the affected contract(s):
+
+   ```bash
+   cast send <AgentAuditLogV2 or TrustScoreRegistryV2 address> "pause()" \
+     --rpc-url <rpc> --private-key <admin key, or via Safe>
+   ```
+
+2. Confirm it took effect: `cast call <address> "paused()(bool)" --rpc-url <rpc>`
+   must return `true`. While paused, `anchorBatch`/`updateScore`/
+   `updateScoresBatch` all revert — the anchor worker will keep retrying
+   and its outbox backlog will grow (expected; see "Anchor outbox backlog
+   growing" above — that alert will fire during a deliberate pause, which
+   is normal, not a second incident).
+3. Investigate and fix the root cause with the contract paused — this is
+   the point of pausing: buying time without further on-chain state
+   changes while the actual problem gets diagnosed.
+4. Unpause only once the root cause is actually resolved (a code fix
+   alone doesn't retroactively fix an already-deployed contract — pausing
+   a bug doesn't un-deploy it; a genuine contract bug needs a new
+   deployment and cutover, not just an unpause):
+
+   ```bash
+   cast send <address> "unpause()" --rpc-url <rpc> --private-key <admin key, or via Safe>
+   ```
+
+5. Confirm `paused()` returns `false`, then watch `anchor_outbox_pending`
+   drain and `anchor_batches_submitted_total` resume increasing — the
+   backlog built up during the pause should clear on its own; the anchor
+   worker doesn't need a restart, it just keeps retrying on its normal
+   poll interval the whole time (`ANCHOR_POLL_INTERVAL_SECONDS`).
+
+## Rebuilding the read model from chain
+
+**When:** `rm_scores` or `rm_agent_events` is suspected corrupted or
+inconsistent with on-chain state (e.g. after a manual database edit, a
+restore from an older backup — see below — or a bug in an indexer handler
+that's since been fixed). Both tables are a **pure, deterministic
+function of on-chain events** (invariant I6 — see `db/models.py`'s
+`ReadModelScore` docstring), never source-of-truth data, so the correct
+fix is never a manual `UPDATE`/`INSERT` — it's wiping the affected
+table(s) and the matching indexer cursor(s) and letting the indexer
+replay from genesis. This is the exact technique
+`tests/test_indexer.py::test_indexer_rebuilds_read_model_identically_from_genesis`
+verifies for real, and the same one alembic migration `7c76a6e1b5ee` used
+in production instead of a backfill when `rm_agent_events` gained a new
+NOT NULL column.
+
+1. Stop the indexer first — replaying while it's still polling live
+   creates a race between the wipe and its next iteration:
+
+   ```bash
+   docker compose stop indexer
+   ```
+
+2. Truncate the affected read-model table(s) and delete the matching
+   cursor row(s) — cursor names are exactly what `indexer/main.py::run_once`
+   passes to `_poll_traced` per event stream:
+
+   | Read model table  | Cursor(s) to delete                                                                                              |
+   |--------------------|-------------------------------------------------------------------------------------------------------------|
+   | `rm_scores`        | `TrustScoreRegistryV2`                                                                                         |
+   | `rm_agent_events`  | `AgentIdentityRegistryV2:AgentRegistered`, `AgentIdentityRegistryV2:AgentRevoked`, `AgentIdentityRegistryV2:IntegrityViolation` |
+
+   ```sql
+   TRUNCATE TABLE rm_scores;
+   DELETE FROM indexer_cursor WHERE contract_name = 'TrustScoreRegistryV2';
+
+   -- and/or, for rm_agent_events:
+   TRUNCATE TABLE rm_agent_events;
+   DELETE FROM indexer_cursor WHERE contract_name IN (
+     'AgentIdentityRegistryV2:AgentRegistered',
+     'AgentIdentityRegistryV2:AgentRevoked',
+     'AgentIdentityRegistryV2:IntegrityViolation'
+   );
+   ```
+
+   Deleting a cursor row (rather than zeroing it) is deliberate —
+   `cursor.py::resolve_start_block` treats a missing cursor as "start
+   from `deploy_block`" (every `_poll_traced` call in `indexer/main.py`
+   leaves this at its default of block 0, i.e. genesis, in this
+   codebase), so there's no block number to look up or hardcode here.
+3. Restart the indexer: `docker compose start indexer`. It will re-scan
+   every block from genesis forward on its normal poll loop — for a
+   chain with a large block range since deploy, this
+   can take a while (`indexer_poll_lag_blocks` will show it catching up);
+   for local dev against Anvil it's typically seconds.
+4. Confirm the rebuild actually reproduced the data: spot-check a few
+   known runs via `GET /trust-scores?run_id=...` and a few known agents
+   via `GET /agents/{agent_id}/verify?code_hash=...` (using each agent's
+   currently-registered hash) against what you'd expect from on-chain
+   state (`cast call` the contract directly for the same agent/run)
+   rather than just checking the table is non-empty.
+
+## Restoring the database from a snapshot
+
+**When:** a bad migration, an operational mistake (accidental delete/
+update against `runs`, `steps`, `anchor_outbox`, etc.), or disaster
+recovery. Unlike the read model (rebuildable from chain, see above),
+`users`/`organizations`/`projects`/`api_keys`/`runs`/`steps`/
+`anchor_outbox`/`anchor_batches` are genuine source-of-truth data with no
+on-chain equivalent to replay from — a snapshot restore is the only
+recovery path for those.
+
+**Taking the snapshot** (do this on a schedule, before this procedure is
+ever needed — `pg_dump` against a live database is safe to run
+concurrently, it doesn't block writers):
+
+```bash
+docker compose exec -T postgres pg_dump -U trustchain -d trustchain --format=custom \
+  > "trustchain-$(date -u +%Y%m%dT%H%M%SZ).dump"
+```
+
+**Restoring:**
+
+1. Stop everything that writes to or reads from the database — a restore
+   against a live database races every in-flight write, and a partially-
+   overwritten table is worse than the problem being fixed:
+
+   ```bash
+   docker compose stop api anchor-worker indexer
+   ```
+
+2. Restore into a **fresh** database rather than overwriting the live one
+   in place, so a bad dump file or a restore that fails partway through
+   never leaves you worse off than before you started:
+
+   ```bash
+   docker compose exec -T postgres createdb -U trustchain trustchain_restore
+   docker compose exec -T postgres pg_restore -U trustchain -d trustchain_restore \
+     --no-owner --clean --if-exists < trustchain-<timestamp>.dump
+   ```
+
+3. Sanity-check the restored data before cutting over — row counts on a
+   few key tables, the most recent `runs.created_at`, and the most recent
+   `anchor_outbox` row's `id`, compared against what you expect for the
+   snapshot's timestamp.
+4. Cut over: rename the live database aside and promote the restored one
+   (or point `DATABASE_URL` at `trustchain_restore` and skip the rename —
+   either works, renaming keeps the naming convention `DATABASE_URL`
+   already assumes):
+
+   ```bash
+   docker compose exec -T postgres psql -U trustchain -d postgres -c \
+     "ALTER DATABASE trustchain RENAME TO trustchain_pre_restore_$(date -u +%Y%m%dT%H%M%SZ);"
+   docker compose exec -T postgres psql -U trustchain -d postgres -c \
+     "ALTER DATABASE trustchain_restore RENAME TO trustchain;"
+   ```
+
+5. Run migrations forward if the snapshot predates a schema change since
+   applied elsewhere: `alembic upgrade head` (same command this repo
+   already uses for every other migration — see any of this session's
+   `alembic/versions/*.py` files for precedent).
+6. Restart the stack: `docker compose start api anchor-worker indexer`.
+7. The restored database's `runs`/`steps`/`anchor_outbox` reflect
+   whatever was true at snapshot time — anything written between the
+   snapshot and the incident (or written on-chain but not yet reflected
+   in the restored `anchor_batches`) is now behind chain reality. Follow
+   "Rebuilding the read model from chain" above unconditionally after any
+   restore — it's the only way to know `rm_scores`/`rm_agent_events`
+   actually match what the restored write-model + real chain state say,
+   rather than assuming the restore alone was sufficient.

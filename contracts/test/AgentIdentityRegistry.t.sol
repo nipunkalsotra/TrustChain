@@ -127,6 +127,18 @@ contract AgentIdentityRegistryTest is Test {
         assertTrue(ok);
     }
 
+    function test_VerifyAgentAndLog_ReturnsFalseForUnregistered() public {
+        bool ok = registry.verifyAgentAndLog("ghost", hashV1);
+        assertFalse(ok);
+    }
+
+    function test_VerifyAgentAndLog_ReturnsFalseWhenRevoked() public {
+        registry.registerAgent("researcher", hashV1, "model", "v1");
+        registry.revokeAgent("researcher");
+        bool ok = registry.verifyAgentAndLog("researcher", hashV1);
+        assertFalse(ok);
+    }
+
     // ── verifyAgentFull — UI panel data ────────────────────────────────────
 
     function test_VerifyAgentFull_UnregisteredAgent() public view {

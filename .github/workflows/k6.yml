@@ -1,0 +1,102 @@
+name: k6 load test
+
+# Scheduled + manual only — deliberately NOT on push/pull_request. Unlike
+# test.yml's jobs (seconds each), k6/load-test.js runs for ~3 minutes of
+# sustained concurrent traffic by design (that's the whole point of a load
+# test), and soak-test.js defaults to 10. Gating every push/PR on that
+# would slow the common case for a test class that's about throughput and
+# trend over time, not "did this commit break something" — and shared
+# GitHub Actions runners are noisy neighbors, so a load test's latency
+# thresholds are far more prone to flaking there than the deterministic
+# pass/fail checks in test.yml. Nightly + on-demand catches real
+# regressions without that cost.
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Which k6 script to run"
+        type: choice
+        options: [load-test, soak-test, rate-limit-test]
+        default: load-test
+      duration:
+        description: "Override duration for soak-test (k6 duration string, e.g. 2h) — ignored by the other scripts"
+        type: string
+        default: 10m
+
+jobs:
+  k6:
+    name: k6 (${{ github.event.inputs.script || 'load-test' }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Same real-stack bootstrap as test.yml's sdk-integration job — a
+      # load test against mocks would measure nothing real. See that job's
+      # comments for why each step is needed (JWT_SECRET via .env,
+      # migrate-before-api-starts ordering, rebuild-after-addresses-exist).
+      - name: Write backend/.env for docker compose
+        run: |
+          cat > backend/.env <<EOF
+          JWT_SECRET=ci-test-secret-not-for-production-use-only
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+          EOF
+      - name: Start postgres/redis/anvil/mcp servers
+        run: docker compose up -d --build postgres redis anvil mcp-search mcp-blockchain
+      - name: Wait for Postgres readiness
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U trustchain -d trustchain && break
+            sleep 1
+          done
+      - name: Install backend dependencies (for alembic)
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
+        working-directory: backend
+      - name: Apply database migrations (creates trustchain_api + RLS policies)
+        run: alembic upgrade head
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
+      - name: Start api/anchor-worker/indexer
+        run: docker compose up -d --build api anchor-worker indexer
+      - name: Build contracts
+        run: forge build
+        working-directory: contracts
+      - name: Extract V2 ABIs for the backend
+        run: python3 backend/scripts/extract_v2_abis.py
+      - name: Deploy V2 contracts to Anvil
+        run: forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      - name: Record deployed V2 addresses
+        run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
+      - name: Restart api/anchor-worker/indexer with fresh contract addresses
+        run: docker compose up -d --build api anchor-worker indexer
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/ready && break
+            sleep 2
+          done
+      - name: Run k6 ${{ github.event.inputs.script || 'load-test' }}.js
+        run: |
+          docker run --rm --network host -v "$GITHUB_WORKSPACE/k6:/scripts" \
+            -e BASE_URL=http://localhost:8000 \
+            -e DURATION="${{ github.event.inputs.duration || '10m' }}" \
+            grafana/k6 run "/scripts/${{ github.event.inputs.script || 'load-test' }}.js"
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs api anchor-worker indexer mcp-search mcp-blockchain --tail 200

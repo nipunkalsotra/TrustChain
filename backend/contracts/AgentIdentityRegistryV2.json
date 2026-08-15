@@ -43,8 +43,8 @@
       "inputs": [
         {
           "name": "",
-          "type": "string",
-          "internalType": "string"
+          "type": "bytes32",
+          "internalType": "bytes32"
         }
       ],
       "outputs": [
@@ -62,11 +62,16 @@
       "inputs": [
         {
           "name": "",
-          "type": "string",
-          "internalType": "string"
+          "type": "bytes32",
+          "internalType": "bytes32"
         }
       ],
       "outputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -110,6 +115,11 @@
       "name": "getAgent",
       "inputs": [
         {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
           "name": "agentId",
           "type": "string",
           "internalType": "string"
@@ -121,6 +131,11 @@
           "type": "tuple",
           "internalType": "struct AgentIdentityRegistryV2.AgentRecord",
           "components": [
+            {
+              "name": "projectId",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
             {
               "name": "agentId",
               "type": "string",
@@ -178,6 +193,11 @@
       "type": "function",
       "name": "getCodeHash",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -260,8 +280,8 @@
       "inputs": [
         {
           "name": "",
-          "type": "string",
-          "internalType": "string"
+          "type": "bytes32",
+          "internalType": "bytes32"
         }
       ],
       "outputs": [
@@ -277,6 +297,11 @@
       "type": "function",
       "name": "registerAgent",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -303,7 +328,7 @@
     },
     {
       "type": "function",
-      "name": "registeredAgentIds",
+      "name": "registeredKeys",
       "inputs": [
         {
           "name": "",
@@ -314,8 +339,8 @@
       "outputs": [
         {
           "name": "",
-          "type": "string",
-          "internalType": "string"
+          "type": "bytes32",
+          "internalType": "bytes32"
         }
       ],
       "stateMutability": "view"
@@ -342,6 +367,11 @@
       "type": "function",
       "name": "revokeAgent",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -393,6 +423,11 @@
       "name": "verifyAgent",
       "inputs": [
         {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
           "name": "agentId",
           "type": "string",
           "internalType": "string"
@@ -417,6 +452,11 @@
       "name": "verifyAgentAndLog",
       "inputs": [
         {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
           "name": "agentId",
           "type": "string",
           "internalType": "string"
@@ -440,6 +480,11 @@
       "type": "function",
       "name": "verifyAgentFull",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -502,6 +547,12 @@
       "name": "AgentRegistered",
       "inputs": [
         {
+          "name": "projectId",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
           "name": "agentId",
           "type": "string",
           "indexed": false,
@@ -533,6 +584,12 @@
       "name": "AgentRevoked",
       "inputs": [
         {
+          "name": "projectId",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
           "name": "agentId",
           "type": "string",
           "indexed": false,
@@ -557,6 +614,12 @@
       "type": "event",
       "name": "AgentUpdated",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",
@@ -588,6 +651,12 @@
       "type": "event",
       "name": "IntegrityViolation",
       "inputs": [
+        {
+          "name": "projectId",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
         {
           "name": "agentId",
           "type": "string",

@@ -78,6 +78,23 @@ groups:
           description: "anchor_wallet_balance_wei={{ $value }} — every anchorBatch call fails at the pre-send stage (not a revert — see submit.py's reason=build_or_send), so AnchorBatchesFailingRepeatedly may not fire before the queue backs up. Fund the wallet before it hits zero."
           runbook: "docs/runbooks.md#anchor-wallet-balance-low"
 
+      - alert: AnchorOutboxStepsDeadLettered
+        # `for: 0m` (fires immediately, not after a window) is deliberate:
+        # unlike the other anchor-worker alerts here, this isn't a
+        # degraded-but-recovering condition — a dead-lettered step is
+        # permanent, unrecoverable data loss for THIS product's core
+        # guarantee (every agent step gets an on-chain audit trail). Even
+        # one is worth paging on immediately, not waiting to see if it
+        # keeps happening.
+        expr: sum(increase(anchor_outbox_dead_lettered_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A step was permanently given up on and will never be anchored"
+          description: "{{ $value }} step(s) dead-lettered in the last 5m (source={{ $labels.source }} — reaper: exhausted a stale claim's retries; submit_failure: exhausted a failing batch's retries). Check anchor_outbox.last_error for the specific rows and docs/runbooks.md for recovery."
+          runbook: "docs/runbooks.md#anchor-outbox-steps-dead-lettered"
+
   - name: trustchain-indexer
     rules:
       - alert: IndexerFallingBehind

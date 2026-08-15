@@ -8,12 +8,23 @@ class TrustChainError(Exception):
     `detail` mirror the API's own error shape (`{"detail": "..."}` or
     FastAPI's validation-error list) when the error came from an HTTP
     response; both are None for client-side errors (e.g. a stream
-    timeout) that never got as far as the server."""
+    timeout) that never got as far as the server.
 
-    def __init__(self, message: str, status_code: int = None, detail=None):
+    `error_code` (backend/errors.py's typed error taxonomy) is the
+    machine-readable field this SDK's own exception CLASS can't express
+    on its own — many logically distinct failures share one status code
+    (e.g. every 401 here becomes AuthenticationError, whether it was a
+    missing bearer token, an expired JWT, or a revoked API key), so this
+    is what lets a caller branch on the SPECIFIC cause without parsing
+    `detail` strings. None for responses from an older API version that
+    predates error_code, or for client-side errors that never reached
+    the server — always check for None before comparing."""
+
+    def __init__(self, message: str, status_code: int = None, detail=None, error_code: str = None):
         super().__init__(message)
         self.status_code = status_code
         self.detail = detail
+        self.error_code = error_code
 
 
 class BadRequestError(TrustChainError):
@@ -42,8 +53,11 @@ class RateLimitError(TrustChainError):
     """429 — rate limit or monthly quota exceeded. `retry_after_seconds`
     is parsed from the response's Retry-After header when present."""
 
-    def __init__(self, message: str, status_code: int = None, detail=None, retry_after_seconds: float = None):
-        super().__init__(message, status_code, detail)
+    def __init__(
+        self, message: str, status_code: int = None, detail=None,
+        retry_after_seconds: float = None, error_code: str = None,
+    ):
+        super().__init__(message, status_code, detail, error_code)
         self.retry_after_seconds = retry_after_seconds
 
 

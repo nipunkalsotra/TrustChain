@@ -16,6 +16,7 @@ from typing import Optional
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
+from blockchain.gas import build_fee_params
 from blockchain.hashing_utils import AGENTS, compute_hash
 from blockchain.resilient_provider import FallbackHTTPProvider
 from config import get_settings
@@ -401,12 +402,12 @@ class BlockchainBridge:
     def _keccak(self, text: str) -> bytes:
         return Web3.solidity_keccak(["string"], [text])
 
-    def _build_and_send(self, fn, nonce: int) -> str:
+    def _build_and_send(self, fn, nonce: int, fee_params: dict) -> str:
         tx = fn.build_transaction({
-            "from":     self.account.address,
-            "nonce":    nonce,
-            "gasPrice": self.w3.eth.gas_price,
-            "gas":      500_000,
+            "from":  self.account.address,
+            "nonce": nonce,
+            "gas":   500_000,
+            **fee_params,
         })
         signed  = self.w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
@@ -424,7 +425,12 @@ class BlockchainBridge:
                 self._pending_nonce = on_chain
             nonce = self._pending_nonce
             self._pending_nonce += 1
-        return await asyncio.to_thread(self._build_and_send, fn, nonce)
+        # F8: try EIP-1559 dynamic fees first, same as every V2 write path
+        # (blockchain/gas.py) — this fetch has to happen outside the nonce
+        # lock (it's an RPC round trip that doesn't touch _pending_nonce),
+        # but still before handing off to the sync _build_and_send.
+        fee_params = await build_fee_params(self.w3)
+        return await asyncio.to_thread(self._build_and_send, fn, nonce, fee_params)
 
     def _wait(self, tx_hash_hex: str, timeout: int = 30) -> dict:
         receipt = self.w3.eth.wait_for_transaction_receipt(

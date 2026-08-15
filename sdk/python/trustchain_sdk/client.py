@@ -45,31 +45,37 @@ def _raise_for_status(response: httpx.Response) -> None:
     except ValueError:
         body = None
     detail = body.get("detail") if isinstance(body, dict) else body
+    # error_code (backend/errors.py) is None for responses that predate
+    # the typed error taxonomy, or a validation-error body (422's `detail`
+    # is FastAPI's own list-of-errors shape, not this API's ApiError at
+    # all — Pydantic validation never goes through ApiError).
+    error_code = body.get("error_code") if isinstance(body, dict) else None
 
     status = response.status_code
     message = f"TrustChain API returned {status}: {detail}"
 
     if status == 400:
-        raise BadRequestError(message, status, detail)
+        raise BadRequestError(message, status, detail, error_code=error_code)
     if status == 401:
-        raise AuthenticationError(message, status, detail)
+        raise AuthenticationError(message, status, detail, error_code=error_code)
     if status == 403:
-        raise AuthorizationError(message, status, detail)
+        raise AuthorizationError(message, status, detail, error_code=error_code)
     if status == 404:
-        raise NotFoundError(message, status, detail)
+        raise NotFoundError(message, status, detail, error_code=error_code)
     if status == 409:
-        raise ConflictError(message, status, detail)
+        raise ConflictError(message, status, detail, error_code=error_code)
     if status == 422:
-        raise ValidationError(message, status, detail)
+        raise ValidationError(message, status, detail, error_code=error_code)
     if status == 429:
         retry_after = response.headers.get("Retry-After")
         raise RateLimitError(
             message, status, detail,
             retry_after_seconds=float(retry_after) if retry_after is not None else None,
+            error_code=error_code,
         )
     if status >= 500:
-        raise ServerError(message, status, detail)
-    raise TrustChainError(message, status, detail)
+        raise ServerError(message, status, detail, error_code=error_code)
+    raise TrustChainError(message, status, detail, error_code=error_code)
 
 
 def _parse_sse_line(line: str) -> Optional[dict]:

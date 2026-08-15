@@ -57,3 +57,19 @@ def test_run_agent_rejects_missing_bearer_prefix(client):
     token = signup.json()["token"]
     r = client.post("/run-agent", json={"task": "do something"}, headers={"Authorization": token})
     assert r.status_code == 401
+
+
+def test_run_agent_rejects_empty_task(client):
+    signup = client.post("/auth/signup", json={"name": "Alice", "email": "alice@test.com", "password": "hunter22"})
+    token = signup.json()["token"]
+    r = client.post("/run-agent", json={"task": ""}, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 422
+
+
+def test_run_agent_rejects_task_over_10000_chars(client):
+    """A cost/DoS bound on the task string — it's fed to 4 LLM calls in
+    the pipeline, so an unbounded task multiplies cost 4x, not 1x."""
+    signup = client.post("/auth/signup", json={"name": "Alice", "email": "alice@test.com", "password": "hunter22"})
+    token = signup.json()["token"]
+    r = client.post("/run-agent", json={"task": "x" * 10_001}, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 422

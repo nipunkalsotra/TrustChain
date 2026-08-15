@@ -17,25 +17,33 @@ role distinct from both DEFAULT_ADMIN_ROLE and ANCHOR_ROLE.
 import asyncio
 
 from anchor_worker.chain import get_identity_registry_contract, get_signer, get_w3
+from blockchain.gas import build_fee_params
 from logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-async def register_agent(agent_id: str, code_hash: str, model: str, version: str) -> str:
+async def register_agent(project_id: int, agent_id: str, code_hash: str, model: str, version: str) -> str:
     """Signs, sends, and waits for confirmation of one registerAgent()
     call. Returns the tx hash. Raises on revert or confirmation timeout —
     the caller (main.py's POST /agents) surfaces that as a 502, not a
-    silently-accepted registration that never actually landed on chain."""
+    silently-accepted registration that never actually landed on chain.
+
+    project_id is the on-chain namespacing key (see
+    AgentIdentityRegistryV2.sol's docstring) — without it, two tenants
+    registering the same agent_id (e.g. both "researcher") would
+    silently collide on-chain; main.py always passes the caller's own
+    authenticated principal.project_id, never anything client-supplied."""
     w3 = get_w3()
     signer = get_signer()
     contract = get_identity_registry_contract()
 
     code_hash_bytes = bytes.fromhex(code_hash.removeprefix("0x"))
-    fn = contract.functions.registerAgent(agent_id, code_hash_bytes, model, version)
+    fn = contract.functions.registerAgent(project_id, agent_id, code_hash_bytes, model, version)
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
-    tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": 400_000, "gasPrice": gas_price})
+    tx_params = {"from": signer.address, "nonce": nonce, "gas": 400_000}
+    tx_params.update(await build_fee_params(w3))
+    tx = fn.build_transaction(tx_params)
     signed = signer.sign_transaction(tx)
     tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
@@ -48,15 +56,16 @@ async def register_agent(agent_id: str, code_hash: str, model: str, version: str
     return tx_hash_hex
 
 
-async def revoke_agent(agent_id: str) -> str:
+async def revoke_agent(project_id: int, agent_id: str) -> str:
     w3 = get_w3()
     signer = get_signer()
     contract = get_identity_registry_contract()
 
-    fn = contract.functions.revokeAgent(agent_id)
+    fn = contract.functions.revokeAgent(project_id, agent_id)
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
-    tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": 200_000, "gasPrice": gas_price})
+    tx_params = {"from": signer.address, "nonce": nonce, "gas": 200_000}
+    tx_params.update(await build_fee_params(w3))
+    tx = fn.build_transaction(tx_params)
     signed = signer.sign_transaction(tx)
     tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
@@ -69,17 +78,20 @@ async def revoke_agent(agent_id: str) -> str:
     return tx_hash_hex
 
 
-async def verify_agent(agent_id: str, current_hash: str) -> dict:
+async def verify_agent(project_id: int, agent_id: str, current_hash: str) -> dict:
     """Read-only live verification (§7.3) — recomputes nothing itself
     (the caller already hashed the live config client-side or the
     backend recomputed it server-side; either way this just asks the
     chain), calling verifyAgentFull() so a single round trip returns
     isValid/isActive/hashMatches/storedHash together instead of needing
-    three separate calls."""
+    three separate calls. project_id scopes this to the caller's OWN
+    registration for this agent_id, not whichever tenant happened to
+    register that name first (see AgentIdentityRegistryV2.sol's
+    project-namespacing docstring)."""
     contract = get_identity_registry_contract()
     current_hash_bytes = bytes.fromhex(current_hash.removeprefix("0x"))
     result = await asyncio.to_thread(
-        lambda: contract.functions.verifyAgentFull(agent_id, current_hash_bytes).call()
+        lambda: contract.functions.verifyAgentFull(project_id, agent_id, current_hash_bytes).call()
     )
     return {
         "agentId": agent_id,

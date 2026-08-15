@@ -16,9 +16,8 @@ implemented; see the plan's O10) are what actually bound worst-case spend.
 
 import time
 
-from fastapi import HTTPException
-
 import observability
+from errors import ApiError, ErrorCode
 from redis_client import get_redis
 
 _TOKEN_BUCKET_LUA = """
@@ -75,19 +74,26 @@ async def check_rate_limit(bucket_key: str, capacity: float, refill_per_second: 
         raise RateLimitExceeded(retry_after)
 
 
-async def enforce_rate_limit(bucket_key: str, capacity: float, refill_per_second: float, cost: float = 1.0) -> None:
+async def enforce_rate_limit(
+    bucket_key: str, capacity: float, refill_per_second: float, cost: float = 1.0, kind: str = "run_agent",
+) -> None:
     """FastAPI-endpoint-friendly wrapper — raises HTTPException(429) with
     Retry-After, matching the plan's "standard 429 responses carrying
     Retry-After and X-RateLimit-* headers" (the X-RateLimit-* headers
     themselves need response-object access FastAPI dependencies don't
     have without a middleware; Retry-After is the load-bearing one for
-    clients that actually back off, so it's what's implemented here)."""
+    clients that actually back off, so it's what's implemented here).
+
+    `kind` labels observability.RATE_LIMIT_REJECTIONS_TOTAL — defaults to
+    "run_agent" (this function's original, only caller) so that call site
+    didn't need updating when this became a shared helper for
+    register_agent/log_step's own buckets too."""
     try:
         await check_rate_limit(bucket_key, capacity, refill_per_second, cost)
     except RateLimitExceeded as e:
-        observability.RATE_LIMIT_REJECTIONS_TOTAL.labels(kind="run_agent").inc()
-        raise HTTPException(
-            status_code=429, detail="rate limit exceeded",
+        observability.RATE_LIMIT_REJECTIONS_TOTAL.labels(kind=kind).inc()
+        raise ApiError(
+            429, "rate limit exceeded", ErrorCode.RATE_LIMIT_EXCEEDED,
             headers={"Retry-After": str(int(e.retry_after_seconds) + 1)},
         )
 
@@ -137,8 +143,8 @@ async def check_login_backoff(email: str, ip: str) -> None:
         elapsed_since_failure = _BACKOFF_WINDOW_SECONDS - max(0, ttl)
         if elapsed_since_failure < delay:
             observability.RATE_LIMIT_REJECTIONS_TOTAL.labels(kind="login").inc()
-            raise HTTPException(
-                status_code=429, detail="too many failed login attempts",
+            raise ApiError(
+                429, "too many failed login attempts", ErrorCode.LOGIN_BACKOFF_ACTIVE,
                 headers={"Retry-After": str(int(delay - elapsed_since_failure) + 1)},
             )
 

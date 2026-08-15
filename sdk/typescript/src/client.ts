@@ -58,29 +58,37 @@ async function raiseForStatus(response: Response): Promise<void> {
     body = undefined;
   }
   const detail = body && typeof body === "object" && "detail" in body ? (body as any).detail : body;
+  // error_code (backend/errors.py) is undefined for responses that
+  // predate the typed error taxonomy, or a validation-error body (422's
+  // `detail` is FastAPI's own list-of-errors shape, not this API's
+  // ApiError at all — Pydantic validation never goes through ApiError).
+  const errorCode =
+    body && typeof body === "object" && "error_code" in body ? (body as any).error_code : undefined;
   const status = response.status;
   const message = `TrustChain API returned ${status}: ${JSON.stringify(detail)}`;
 
   switch (status) {
     case 400:
-      throw new BadRequestError(message, status, detail);
+      throw new BadRequestError(message, status, detail, errorCode);
     case 401:
-      throw new AuthenticationError(message, status, detail);
+      throw new AuthenticationError(message, status, detail, errorCode);
     case 403:
-      throw new AuthorizationError(message, status, detail);
+      throw new AuthorizationError(message, status, detail, errorCode);
     case 404:
-      throw new NotFoundError(message, status, detail);
+      throw new NotFoundError(message, status, detail, errorCode);
     case 409:
-      throw new ConflictError(message, status, detail);
+      throw new ConflictError(message, status, detail, errorCode);
     case 422:
-      throw new ValidationError(message, status, detail);
+      throw new ValidationError(message, status, detail, errorCode);
     case 429: {
       const retryAfter = response.headers.get("Retry-After");
-      throw new RateLimitError(message, status, detail, retryAfter !== null ? Number(retryAfter) : undefined);
+      throw new RateLimitError(
+        message, status, detail, retryAfter !== null ? Number(retryAfter) : undefined, errorCode,
+      );
     }
     default:
-      if (status >= 500) throw new ServerError(message, status, detail);
-      throw new TrustChainError(message, status, detail);
+      if (status >= 500) throw new ServerError(message, status, detail, errorCode);
+      throw new TrustChainError(message, status, detail, errorCode);
   }
 }
 

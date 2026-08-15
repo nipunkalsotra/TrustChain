@@ -20,6 +20,7 @@ together into the system as it actually exists today.
 | [0009](0009-rpc-fallback-and-circuit-breaker.md) | RPC fallback + circuit breaker |
 | [0010](0010-jwt-issuer-and-audience-claims.md) | JWT issuer/audience claims |
 | [0011](0011-canary-rollout-for-a-single-host-deploy.md) | Canary rollout for a single-host deploy |
+| [0012](0012-multisig-default-deployment-posture.md) | Default deployment posture for multisig admin |
 
 ## Format
 

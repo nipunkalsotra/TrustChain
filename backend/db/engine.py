@@ -109,6 +109,6 @@ async def truncate_all_tables() -> None:
             text(
                 "TRUNCATE TABLE users, organizations, projects, memberships, api_keys, "
                 "idempotency_keys, audit_events, refresh_tokens, runs, steps, anchor_outbox, "
-                "anchor_batches, rm_scores, indexer_cursor RESTART IDENTITY CASCADE"
+                "anchor_batches, rm_scores, rm_agent_events, indexer_cursor RESTART IDENTITY CASCADE"
             )
         )

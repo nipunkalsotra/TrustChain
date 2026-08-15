@@ -112,6 +112,16 @@ services:
       MCP_BLOCKCHAIN_URL: http://mcp-blockchain:8002/mcp
     ports:
       - "8000:8000"
+    # F14 (Graceful shutdown): Docker's own default here is 10s SIGTERM ->
+    # SIGKILL, which is LESS than uvicorn's own --timeout-graceful-shutdown
+    # (10s, see the Dockerfile CMD) alone — SIGKILL would already have
+    # fired before uvicorn even finishes draining HTTP/SSE connections,
+    # let alone before main.py's lifespan shutdown (which drains in-flight
+    # /run-agent background tasks, api_shutdown_drain_timeout_seconds
+    # default 5s) ever runs. 30s comfortably covers
+    # uvicorn's 10s + the drain's 5s + margin for the DB writes shutdown
+    # does along the way, without indefinitely blocking a redeploy.
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -150,6 +160,17 @@ services:
       # V1's BlockchainBridge — the anchor worker talks to `anvil`, not
       # Monad testnet, in this compose file.
       PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # Production's default (config.py's anchor_max_batch_age_seconds,
+      # 30.0) is right for a real deployment where batching efficiency
+      # matters more than per-step latency — but that same default here
+      # means a single locally-logged step (SDK examples, local demos,
+      # anyone manually poking POST /steps) can sit unanchored for up to
+      # 30+ real seconds before this worker's accumulation window even
+      # considers it stale enough to flush, a real responsiveness
+      # regression for local dev/demo use that this override exists to
+      # avoid — found via a real SDK integration test's 30s polling
+      # deadline actually timing out against this exact default.
+      ANCHOR_MAX_BATCH_AGE_SECONDS: "5"
     ports:
       - "9101:9101"   # Prometheus /metrics — see backend/observability.py
     depends_on:
@@ -188,6 +209,29 @@ services:
       - anchor-worker
       - indexer
 
+  loki:
+    image: grafana/loki:2.9.8
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./docker/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - trustchain_loki_data:/loki
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./docker/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # Read-only access to every container's own log files + the Docker
+      # socket (for docker_sd_configs' container auto-discovery/labeling)
+      # — this is what lets promtail ship every OTHER service's stdout
+      # without a per-service scrape config to maintain.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
   grafana:
     image: grafana/grafana:11.3.1
     environment:
@@ -204,6 +248,8 @@ services:
       - "3002:3000"
     depends_on:
       - prometheus
+      - loki
 
 volumes:
   trustchain_postgres_data:
+  trustchain_loki_data:

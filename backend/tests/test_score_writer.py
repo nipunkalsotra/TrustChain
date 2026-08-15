@@ -38,3 +38,13 @@ def test_write_score_lands_on_chain(chain_settings):
     contract = chain_module.get_trust_score_contract()
     stored_score = contract.functions.scores("reporter", run_id).call()
     assert stored_score == 91
+
+    # F8: this must actually be an EIP-1559 dynamic-fee tx (type 2, with
+    # maxFeePerGas/maxPriorityFeePerGas), not a legacy gasPrice tx — Anvil
+    # exposes baseFeePerGas by default, so blockchain.gas.build_fee_params
+    # should always take the EIP-1559 branch here.
+    w3 = chain_module.get_w3()
+    onchain_tx = w3.eth.get_transaction(tx_hash)
+    assert onchain_tx["type"] == 2
+    assert onchain_tx["maxFeePerGas"] > 0
+    assert onchain_tx["maxPriorityFeePerGas"] > 0

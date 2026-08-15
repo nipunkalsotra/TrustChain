@@ -19,13 +19,37 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
  * small, fixed vocabulary (4 agent ids) looked up directly by every read
  * path, and hashing them would only add an indirection cost with no
  * storage-cost benefit worth the readability loss.
+ *
+ * STORAGE PACKING: the original layout stored score/lastUpdatedAt/
+ * hasScore as three SEPARATE `uint256`/`uint256`/`bool` mappings — three
+ * full 32-byte storage slots per (agentId, runId) pair, and three
+ * separate SSTOREs on every _updateScore() call, even though `score` is
+ * always 0-100 (fits in a uint8) and `timestamp` is a unix second count
+ * (fits comfortably in a uint40 — valid until roughly the year 36,812).
+ * Packed into one `ScoreState` struct (uint8 + uint40 + bool = 6 of 32
+ * bytes, one slot), every _updateScore() call now does exactly ONE SSTORE
+ * for this data instead of three. Same packing applied to `ScoreUpdate`
+ * (the per-run history array `scoreHistory` grows by one entry on EVERY
+ * score update ever recorded, making it the single highest-frequency
+ * write path in this contract) — score+timestamp share one slot there
+ * too, `reason` keeps its own dynamic slot as before (a string can't
+ * pack into a fixed-size struct slot regardless).
+ *
+ * scores/lastUpdatedAt/hasScore stay PUBLIC, EXTERNAL FUNCTIONS below
+ * with the exact same name/signature/return-type Solidity's own
+ * auto-generated mapping getters produced before this change — every
+ * existing caller (contract.functions.scores(...), .hasScore(...),
+ * .lastUpdatedAt(...) — see backend/tests/test_score_writer.py and
+ * contracts/test/TrustScoreRegistryV2.t.sol) keeps working completely
+ * unchanged; only the underlying storage layout is different, not the
+ * ABI.
  */
 contract TrustScoreRegistryV2 is AccessControl, Pausable {
     bytes32 public constant ANCHOR_ROLE = keccak256("ANCHOR_ROLE");
 
     struct ScoreUpdate {
-        uint256 score;
-        uint256 timestamp;
+        uint8 score;
+        uint40 timestamp;
         string reason;
     }
 
@@ -36,10 +60,14 @@ contract TrustScoreRegistryV2 is AccessControl, Pausable {
         bool hasScore;
     }
 
-    mapping(string => mapping(string => uint256)) public scores;
+    struct ScoreState {
+        uint8 score;
+        uint40 lastUpdatedAt;
+        bool hasScore;
+    }
+
+    mapping(string => mapping(string => ScoreState)) internal _scoreState;
     mapping(string => mapping(string => ScoreUpdate[])) public scoreHistory;
-    mapping(string => mapping(string => uint256)) public lastUpdatedAt;
-    mapping(string => mapping(string => bool)) public hasScore;
     mapping(string => string[]) public runAgents;
     mapping(string => bool) public runExists;
     string[] public allRunIds;
@@ -112,14 +140,19 @@ contract TrustScoreRegistryV2 is AccessControl, Pausable {
             emit RunStarted(runId, block.timestamp);
         }
 
-        if (!hasScore[agentId][runId]) {
+        if (!_scoreState[agentId][runId].hasScore) {
             runAgents[runId].push(agentId);
         }
 
-        scores[agentId][runId] = safeScore;
-        lastUpdatedAt[agentId][runId] = block.timestamp;
-        hasScore[agentId][runId] = true;
-        scoreHistory[agentId][runId].push(ScoreUpdate({score: safeScore, timestamp: block.timestamp, reason: reason}));
+        // casting to 'uint8' is safe because safeScore is clamped to <= 100 above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        ScoreState memory newState =
+            ScoreState({score: uint8(safeScore), lastUpdatedAt: uint40(block.timestamp), hasScore: true});
+        _scoreState[agentId][runId] = newState;
+        // forge-lint: disable-next-line(unsafe-typecast)
+        ScoreUpdate memory newUpdate =
+            ScoreUpdate({score: uint8(safeScore), timestamp: uint40(block.timestamp), reason: reason});
+        scoreHistory[agentId][runId].push(newUpdate);
 
         emit ScoreUpdated(agentId, runId, safeScore, block.timestamp, reason);
     }
@@ -130,23 +163,53 @@ contract TrustScoreRegistryV2 is AccessControl, Pausable {
         string[] storage agents = runAgents[runId];
         for (uint256 i = 0; i < agents.length; i++) {
             string memory agentId = agents[i];
-            scores[agentId][runId] = 0;
-            lastUpdatedAt[agentId][runId] = 0;
-            hasScore[agentId][runId] = false;
+            delete _scoreState[agentId][runId];
             delete scoreHistory[agentId][runId];
         }
+        // Without this, re-scoring an agent after a reset would push it
+        // into runAgents[runId] a SECOND time — _updateScore only guards
+        // against duplicate pushes via hasScore, which resetRun already
+        // clears above, but never clears the list itself. Found by the
+        // updateScore -> resetRun -> updateScore(batch) sequence Foundry's
+        // stateful fuzzer discovered in
+        // test/TrustScoreRegistryV2Invariant.t.sol's
+        // invariant_RunLeaderboardHasNoDuplicateAgents.
+        delete runAgents[runId];
+    }
+
+    /// @notice Current score for (agentId, runId). Hand-written to match the
+    ///         exact name/signature Solidity's auto-generated getter for the
+    ///         original standalone `scores` mapping produced — see the
+    ///         STORAGE PACKING note above.
+    function scores(string calldata agentId, string calldata runId) external view returns (uint256) {
+        return _scoreState[agentId][runId].score;
+    }
+
+    /// @notice Unix timestamp of the last score update, or 0 if none yet.
+    ///         Hand-written to match the original `lastUpdatedAt` mapping
+    ///         getter's name/signature — see the STORAGE PACKING note above.
+    function lastUpdatedAt(string calldata agentId, string calldata runId) external view returns (uint256) {
+        return _scoreState[agentId][runId].lastUpdatedAt;
+    }
+
+    /// @notice Whether (agentId, runId) has ever received a score. Hand-
+    ///         written to match the original `hasScore` mapping getter's
+    ///         name/signature — see the STORAGE PACKING note above.
+    function hasScore(string calldata agentId, string calldata runId) external view returns (bool) {
+        return _scoreState[agentId][runId].hasScore;
     }
 
     function getScore(string calldata agentId, string calldata runId) external view returns (uint256) {
-        return scores[agentId][runId];
+        return _scoreState[agentId][runId].score;
     }
 
     function getScoreFull(string calldata agentId, string calldata runId) external view returns (ScoreRecord memory) {
+        ScoreState memory state = _scoreState[agentId][runId];
         return ScoreRecord({
-            currentScore: scores[agentId][runId],
+            currentScore: state.score,
             updateCount: scoreHistory[agentId][runId].length,
-            lastUpdatedAt: lastUpdatedAt[agentId][runId],
-            hasScore: hasScore[agentId][runId]
+            lastUpdatedAt: state.lastUpdatedAt,
+            hasScore: state.hasScore
         });
     }
 
@@ -171,7 +234,7 @@ contract TrustScoreRegistryV2 is AccessControl, Pausable {
 
         for (uint256 i = 0; i < count; i++) {
             agentIds[i] = agents[i];
-            agentScores[i] = scores[agents[i]][runId];
+            agentScores[i] = _scoreState[agents[i]][runId].score;
         }
     }
 

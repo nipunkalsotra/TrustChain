@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import observability
+
 
 async def reap_stale_claims(session: AsyncSession, claim_timeout_seconds: int, max_attempts: int) -> dict:
     now = int(datetime.now(timezone.utc).timestamp())
@@ -34,6 +36,8 @@ async def reap_stale_claims(session: AsyncSession, claim_timeout_seconds: int, m
         {"cutoff": cutoff, "max_attempts": max_attempts},
     )
     dead_ids = [row.id for row in dead]
+    if dead_ids:
+        observability.ANCHOR_OUTBOX_DEAD_LETTERED_TOTAL.labels(source="reaper").inc(len(dead_ids))
 
     reset = await session.execute(
         text("""
@@ -45,6 +49,8 @@ async def reap_stale_claims(session: AsyncSession, claim_timeout_seconds: int, m
         {"cutoff": cutoff, "max_attempts": max_attempts, "now": now},
     )
     reset_ids = [row.id for row in reset]
+    if reset_ids:
+        observability.ANCHOR_REAPER_RESET_TOTAL.inc(len(reset_ids))
 
     await session.commit()
     return {"reset": reset_ids, "dead_lettered": dead_ids}

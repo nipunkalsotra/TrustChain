@@ -42,10 +42,13 @@ import time
 from typing import Optional
 
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Header
+
+from errors import ApiError, ErrorCode
 
 from config import get_settings
 from db.engine import current_org_id, current_project_id
+from logging_config import bind_tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -109,18 +112,21 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Curre
     header (never an API key — see get_current_principal for endpoints
     that accept both)."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
+        raise ApiError(401, "missing bearer token", ErrorCode.MISSING_BEARER_TOKEN)
 
     token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = decode_token(token)
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="invalid or expired token")
+        raise ApiError(401, "invalid or expired token", ErrorCode.INVALID_TOKEN)
 
     # Sets the RLS session context for every DB transaction this request
-    # opens from here on — see db/engine.py's module docstring.
+    # opens from here on — see db/engine.py's module docstring. Also
+    # binds the same identity onto every subsequent log line for this
+    # request (F11 — see logging_config.py's bind_tenant_context).
     current_project_id.set(payload["project_id"])
     current_org_id.set(payload["org_id"])
+    bind_tenant_context(payload["project_id"], payload["org_id"])
 
     return CurrentUser(
         email=payload["sub"], name=payload.get("name", ""),
@@ -135,7 +141,7 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
     used by every endpoint an SDK consumer can also call (runs, audit-log,
     scores), so a third-party agent never needs a human login."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
+        raise ApiError(401, "missing bearer token", ErrorCode.MISSING_BEARER_TOKEN)
 
     token = authorization.removeprefix("Bearer ").strip()
 
@@ -144,9 +150,10 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
 
         key_info = await tenancy.verify_api_key(token, now=int(time.time()))
         if key_info is None:
-            raise HTTPException(status_code=401, detail="invalid, revoked, or expired API key")
+            raise ApiError(401, "invalid, revoked, or expired API key", ErrorCode.INVALID_API_KEY)
         current_project_id.set(key_info["projectId"])
         current_org_id.set(key_info["orgId"])
+        bind_tenant_context(key_info["projectId"], key_info["orgId"])
         return Principal(
             project_id=key_info["projectId"], org_id=key_info["orgId"],
             actor=f"api_key:{key_info['id']}", scopes=key_info["scopes"],
@@ -155,10 +162,11 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
     try:
         payload = decode_token(token)
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="invalid or expired token")
+        raise ApiError(401, "invalid or expired token", ErrorCode.INVALID_TOKEN)
 
     current_project_id.set(payload["project_id"])
     current_org_id.set(payload["org_id"])
+    bind_tenant_context(payload["project_id"], payload["org_id"])
     return Principal(project_id=payload["project_id"], org_id=payload["org_id"], actor=payload["sub"], scopes=None)
 
 
@@ -167,4 +175,4 @@ def require_scope(principal: Principal, scope: str) -> None:
     their own project). For an API key, 403s if the requested scope
     wasn't granted at key-creation time — least privilege by default."""
     if principal.scopes is not None and scope not in principal.scopes:
-        raise HTTPException(status_code=403, detail=f"API key is missing required scope: {scope}")
+        raise ApiError(403, f"API key is missing required scope: {scope}", ErrorCode.INSUFFICIENT_SCOPE)

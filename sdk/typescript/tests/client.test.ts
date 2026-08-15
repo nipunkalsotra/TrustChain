@@ -20,6 +20,7 @@ import {
   NotFoundError,
   RateLimitError,
   TrustChainClient,
+  ValidationError,
 } from "../src/index.js";
 
 const BASE_URL = "http://localhost:8000";
@@ -145,12 +146,43 @@ test("invalid API key raises AuthenticationError", { skip: !up }, async () => {
   await assert.rejects(() => client.listRuns(), AuthenticationError);
 });
 
-test("empty task raises BadRequestError", { skip: !up }, async () => {
-  // main.py checks `if not body.task.strip()` itself and raises 400 —
-  // an application-level input check, not a pydantic schema failure
-  // (422), since an empty string IS a valid string.
+test("invalid API key's error carries the typed errorCode", { skip: !up }, async () => {
+  // error_code (backend/errors.py's typed taxonomy) must reach the SDK
+  // error object, not just the raw response body — this is what a
+  // caller actually branches on instead of parsing .detail strings.
+  const client = new TrustChainClient("tc_test_not_a_real_key_00000000000000000000", { baseUrl: BASE_URL });
+  try {
+    await client.listRuns();
+    assert.fail("expected listRuns() to reject");
+  } catch (e) {
+    assert.ok(e instanceof AuthenticationError);
+    assert.equal((e as AuthenticationError).errorCode, "invalid_api_key");
+  }
+});
+
+test("empty task raises ValidationError", { skip: !up }, async () => {
+  // RunAgentRequest.task has Field(min_length=1) — an empty string is
+  // rejected at the Pydantic schema layer (422) before main.py's
+  // handler body (and its own `if not body.task.strip()` check, still
+  // real but now only reachable for a WHITESPACE-only task) ever runs.
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
-  await assert.rejects(() => client.runAgent(""), BadRequestError);
+  await assert.rejects(() => client.runAgent(""), ValidationError);
+});
+
+test("whitespace-only task raises BadRequestError", { skip: !up }, async () => {
+  const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
+  await assert.rejects(() => client.runAgent("   "), BadRequestError);
+});
+
+test("whitespace-only task's error carries the typed errorCode", { skip: !up }, async () => {
+  const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
+  try {
+    await client.runAgent("   ");
+    assert.fail("expected runAgent() to reject");
+  } catch (e) {
+    assert.ok(e instanceof BadRequestError);
+    assert.equal((e as BadRequestError).errorCode, "task_empty");
+  }
 });
 
 test("bursting past the rate limit raises RateLimitError with retryAfterSeconds", { skip: !up }, async () => {

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 # Must run before any other import in this file (or any test module) has a
 # chance to `import main` -> `import auth` -> `config.get_settings()`.
@@ -16,6 +17,18 @@ os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain",
 )
+# Off by default across the suite: dozens of existing tests reuse a small
+# handful of fixed passwords (seed_user_and_token's "testpassword123",
+# test_auth.py's "hunter22", ...) purely as functional test fixtures, and
+# — unsurprisingly for such well-known strings — every one of them IS a
+# real HIBP breach hit (verified directly against the real API while
+# building this check). Leaving the check on by default here would make
+# nearly every signup-based test in the suite fail for a reason that has
+# nothing to do with what that test actually verifies. The feature itself
+# (auth_pwned.py, wired into POST /auth/signup) is still exercised for
+# real, with the check deliberately re-enabled per test, in
+# tests/test_auth_pwned.py.
+os.environ.setdefault("CHECK_PWNED_PASSWORDS", "false")
 
 import pytest
 from web3 import Web3
@@ -69,6 +82,22 @@ def chain_settings(monkeypatch):
         anchor_max_batch_size=256,
         anchor_claim_timeout_seconds=5,
         anchor_max_attempts=3,
+        # Near-zero, not zero (Field(gt=0)) — FLOOR()s to a 0s delay in
+        # handle_submit_failure's SQL, so existing tests that requeue a
+        # failed batch and immediately expect it reclaimable keep working
+        # unchanged. test_exponential_backoff_delays_retry (below) uses
+        # its own real, larger value to verify backoff actually delays.
+        anchor_backoff_base_seconds=0.001,
+        anchor_backoff_max_seconds=0.001,
+        # 0 (ge=0, a deliberately valid value — see config.py's own
+        # comment on why NOT a tiny positive number) — `now - oldest >=
+        # 0` is always true since age can never be negative, so existing
+        # tests that seed a couple of steps and expect them anchored on
+        # the very next run_once() call keep working unchanged.
+        # value to verify accumulation + age-triggered flush actually
+        # happens (test_max_batch_age_flush_trigger, below), not just
+        # that "flush every cycle" (this default) still works.
+        anchor_max_batch_age_seconds=0,
         indexer_poll_interval_seconds=0.5,
     )
     monkeypatch.setattr("anchor_worker.chain.get_settings", lambda: test_settings)
@@ -274,3 +303,168 @@ def client_with_fake_bridge(monkeypatch):
 
     with TestClient(main.app) as c:
         yield c
+
+
+# ── unit/integration markers (plan's testing-pyramid categorization) ───────
+#
+# This suite is deliberately integration-heavy by design (see e.g.
+# test_anchor_worker.py's/test_indexer.py's own module docstrings on why
+# real Postgres/Anvil beats mocking them) — most tests genuinely ARE
+# integration tests, not unit tests mislabeled. Rather than hand-annotate
+# 260+ existing test functions (high effort, easy to let drift out of
+# date), `pytest_collection_modifyitems` below classifies every collected
+# item automatically: any test whose body — OR whose test-module-local
+# helper functions, OR whose requested fixtures — references something
+# that talks to a real dependency (a live app via TestClient, a real DB
+# session, a real chain connection, a real subprocess/Docker call,
+# outbound HTTP) is "integration"; everything else is "unit". Checking
+# only the test function's own source isn't enough: a test like
+# test_row_level_security.py's test_no_context_set_sees_zero_rows calls
+# a local `_seed_two_projects()` helper (which touches real Postgres)
+# and takes a real-Postgres-connecting `api_role_session_factory`
+# fixture — neither of those strings appear in the TEST's own body, only
+# in the helper/fixture it uses — found by this classifier's own
+# verification pass initially misclassifying exactly that test (and
+# test_db.py's test_run_lifecycle, which similarly only calls
+# `db.create_user(...)`-style module helpers) as unit.
+_INTEGRATION_SOURCE_MARKERS = (
+    "TestClient", "get_sessionmaker", "get_engine", "requires_anvil",
+    "chain_settings", "seed_project", "seed_user_and_token", "docker",
+    "subprocess", "Web3(Web3.HTTPProvider", "Web3(HTTPProvider",
+    "Web3(FallbackHTTPProvider", "Web3(provider", "httpx.", "requests.",
+    "redis_client", "get_redis", "run_once", "client_with_fake_bridge",
+    "db.", "agents.base", "log_step", "anchor_worker.", "indexer.",
+    "blockchain.client", "score_writer", "identity_writer", "tenancy.",
+    "create_async_engine", "session_factory", "get_audit_log_contract",
+    "get_signer", "get_w3", "claim_batch", "build_batches", "submit_batch",
+    "poll_once", "reconcile_batch_anchored", "index_score_updated",
+    "reap_stale_claims", "is_password_pwned",
+)
+# Checked separately (word-boundary-ish) rather than folded into the plain
+# substring list above: "client." alone is too generic (matches inside
+# ordinary prose like "boto3's KMS client." in a docstring) to be a
+# reliable substring marker even after comment/docstring stripping still
+# leaves easy false positives — require it followed by a real attribute
+# access pattern most consistent with the `client` pytest fixture.
+_INTEGRATION_REGEX_MARKERS = (re.compile(r"\bclient\.(get|post|put|delete|patch)\("),)
+
+
+def _strip_comments_and_docstrings(source: str) -> str:
+    """Drop `# ...` line comments AND `\"\"\"...\"\"\"`/`'''...'''` triple-
+    quoted strings before keyword matching — a docstring explaining
+    unrelated code (e.g. "Stands in for boto3's KMS client." in
+    test_kms_signer.py's FakeAwsKmsClient) shouldn't count as this test
+    itself touching a real client any more than a `#` comment should
+    (test_hashing_utils.py's test_compute_hash_format hit exactly that
+    class of false positive via a `#` comment first; test_kms_signer.py's
+    tests hit the docstring version during this classifier's own
+    verification). Not a full tokenizer — a `#`/triple-quote appearing
+    inside a *single*-quoted string literal would still survive, and any
+    single- or double-quoted string content is left alone; acceptable
+    here since a false negative (missing a real dependency mentioned only
+    in a short string literal) is far less likely in this codebase's
+    style than the false positives this exists to fix."""
+    no_comments = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+    return re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'', "", no_comments)
+
+
+def _module_helper_source(module, seed_source: str) -> str:
+    """Source of only the module-local, non-test helper functions
+    TRANSITIVELY reachable from `seed_source` (a test's own body, or a
+    helper already pulled in) — not every helper defined anywhere in the
+    file. Scanning every helper unconditionally over-corrects the other
+    way: test_resilient_provider.py's pure CircuitBreaker tests never
+    call `_anvil_is_up()`, but early versions of this classifier still
+    pulled its real `httpx.post(...)` call into their scan just because
+    it happened to live in the same file, misclassifying them as
+    integration too (found during this classifier's own verification,
+    same file as the test_kms_signer.py docstring false positive above —
+    both directions of the same "which helpers actually apply to THIS
+    test" problem). A test_* function is never itself pulled in as a
+    "helper" of another test — vars(module) lists every test in the
+    file, not just its private helpers."""
+    import inspect
+
+    candidates = {}
+    for name in vars(module):
+        if name.startswith(("__", "test_")):
+            continue
+        obj = getattr(module, name, None)
+        if inspect.isfunction(obj) and getattr(obj, "__module__", None) == module.__name__:
+            try:
+                candidates[name] = inspect.getsource(obj)
+            except (TypeError, OSError):
+                pass
+
+    included: dict[str, str] = {}
+    frontier = seed_source
+    changed = True
+    while changed:
+        changed = False
+        for name, src in candidates.items():
+            if name in included:
+                continue
+            if re.search(rf"\b{re.escape(name)}\s*\(", frontier):
+                included[name] = src
+                frontier += "\n" + src
+                changed = True
+    return "\n".join(included.values())
+
+
+# autouse=True in this file — applied to literally every test regardless
+# of whether IT touches Postgres/Redis, so including their source in the
+# scan would (and, before this exclusion existed, did) pull the entire
+# suite to "integration" including genuinely pure tests. Explicit
+# (non-autouse) fixtures like `client`/`chain_settings`/a test-module-
+# local `api_role_session_factory` are still scanned normally — a test
+# only picks those up by actually requesting them.
+_AMBIENT_AUTOUSE_FIXTURES = {"isolated_db", "_schema"}
+
+
+def _fixture_source(item) -> str:
+    """Source of every non-ambient fixture this test requests (skipping
+    pytest/pluggy built-ins like monkeypatch/capsys/tmp_path, and the
+    autouse fixtures above) — a fixture like api_role_session_factory
+    (tests/test_row_level_security.py) is where the real Postgres
+    connection actually happens, not in the test body that merely
+    receives it as a parameter."""
+    import inspect
+
+    chunks = []
+    for name, fixturedef in item._fixtureinfo.name2fixturedefs.items():
+        if name in _AMBIENT_AUTOUSE_FIXTURES:
+            continue
+        for definition in fixturedef:
+            func = definition.func
+            if getattr(func, "__module__", "").startswith(("_pytest", "pluggy")):
+                continue
+            try:
+                chunks.append(inspect.getsource(func))
+            except (TypeError, OSError):
+                pass
+    return "\n".join(chunks)
+
+
+def pytest_collection_modifyitems(config, items):
+    import inspect
+
+    for item in items:
+        try:
+            own_source = inspect.getsource(item.function)
+        except (TypeError, OSError):
+            own_source = ""
+        try:
+            helper_source = _module_helper_source(item.module, own_source)
+        except Exception:
+            helper_source = ""
+        try:
+            fixture_source = _fixture_source(item)
+        except Exception:
+            fixture_source = ""
+
+        combined = _strip_comments_and_docstrings(own_source + "\n" + helper_source + "\n" + fixture_source)
+        is_integration = (
+            any(marker in combined for marker in _INTEGRATION_SOURCE_MARKERS)
+            or any(regex.search(combined) for regex in _INTEGRATION_REGEX_MARKERS)
+        )
+        item.add_marker(pytest.mark.integration if is_integration else pytest.mark.unit)
