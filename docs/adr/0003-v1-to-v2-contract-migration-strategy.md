@@ -42,6 +42,30 @@ identity, trust scores) goes through V2 exclusively.
   turning them off loses working functionality for no benefit, and V1
   costs nothing to leave running (no writes, no maintenance).
 
+## Indexer scope (added once Phase 2.2's indexer existed to have a scope)
+
+The indexer (`indexer/`) only polls V2 contracts (`AgentAuditLogV2`,
+`TrustScoreRegistryV2`, `AgentIdentityRegistryV2`) and only maintains V2
+read models (`rm_scores`, `rm_agent_events`, `anchor_batches`
+reconciliation). It does not poll V1's contracts and there is no
+`rm_scores`-equivalent for V1 data. This follows directly from the
+decision above, not a separate one: V1 is read-only and already served by
+direct on-chain reads (`/verify`, `/verify/tamper-demo`,
+`/verify-audit`) — a read model exists to make repeated/aggregate queries
+cheap without hammering the RPC, but V1 has no such query surface (no
+`/v1/trust-scores/history`, no V1 leaderboard) and isn't gaining one, so
+there's nothing for a V1 indexer to serve. Building one anyway would mean
+maintaining a second full set of read-model tables + indexer polling loops
+for a contract generation this ADR already decided gets no new investment.
+
+If a future feature genuinely needs indexed V1 history (e.g. a
+cross-generation leaderboard spanning pre- and post-migration runs), that
+new requirement — and its own read-model schema, since V1's per-step
+single-tenant shape doesn't map onto `rm_scores`/`rm_agent_events` any
+more cleanly than it maps onto V2's other tables (see "Alternatives
+considered" above) — should get its own ADR rather than retrofitting this
+one.
+
 ## Consequences
 
 - Two chain connections exist side by side in the API process

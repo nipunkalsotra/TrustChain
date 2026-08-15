@@ -22,6 +22,7 @@ with test_anchor_worker.py) since they exercise real on-chain writes.
 """
 
 import asyncio
+import json
 import uuid
 
 from web3 import Web3
@@ -64,11 +65,71 @@ def test_v1_prefixed_and_unprefixed_routes_are_the_same_handler(client):
 def test_v1_prefixed_post_run_agent_route_exists(client, monkeypatch):
     # Doesn't need a real pipeline run — just proves POST /v1/run-agent
     # resolves to the exact same handler as POST /run-agent (both reject
-    # an empty task with the identical 400, same as
-    # test_empty_task_raises_bad_request_error in the SDK's own suite).
+    # an empty task identically — 422, Pydantic's min_length=1 on
+    # RunAgentRequest.task, not a 400 from handler-body validation).
     user = seed_user_and_token()
     r = client.post("/v1/run-agent", json={"task": ""}, headers=_auth_headers(user["token"]))
-    assert r.status_code == 400
+    assert r.status_code == 422
+
+
+# ── Appendix-A-aligned /v1 alias routes — 3 routes whose legacy
+#    unprefixed name doesn't literally match the plan's documented /v1
+#    path for the same operation, so `router`'s ordinary dual-mount (same
+#    path, with/without /v1/) can't cover them; main.py's v1_only_router
+#    adds exactly these 3 additional names, mounted under /v1 only. ────
+
+def test_v1_keys_is_an_alias_for_api_keys(client):
+    user = seed_user_and_token()
+    headers = _auth_headers(user["token"])
+
+    legacy = client.post("/api-keys", json={"scopes": ["runs:read"]}, headers=headers)
+    versioned = client.post("/v1/keys", json={"scopes": ["runs:read"]}, headers=headers)
+    assert legacy.status_code == versioned.status_code == 200, (legacy.text, versioned.text)
+    # Different keys minted (each call is a real, distinct create) — same
+    # RESPONSE SHAPE is what's actually being asserted here.
+    assert set(legacy.json().keys()) == set(versioned.json().keys()) == {"id", "raw_key", "last_four", "scopes"}
+
+    key_id = versioned.json()["id"]
+    revoked = client.delete(f"/v1/keys/{key_id}", headers=headers)
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json() == {"ok": True}
+
+
+def test_v1_runs_post_is_an_alias_for_run_agent(client, monkeypatch):
+    # Same "doesn't need a real pipeline run" reasoning as the
+    # /v1/run-agent test above — 422 on both proves the SAME handler
+    # (RunAgentRequest.task's min_length=1) is wired at both names.
+    user = seed_user_and_token()
+    r = client.post("/v1/runs", json={"task": ""}, headers=_auth_headers(user["token"]))
+    assert r.status_code == 422
+
+
+def test_v1_runs_stream_is_an_alias_for_stream(client, monkeypatch):
+    # GET /stream/{run_id} long-polls Redis for up to 120s on an unknown
+    # run_id before yielding its own timeout error event — same
+    # short-timeout monkeypatch test_sse.py's own tests use, so this
+    # proves the ALIAS resolves to the identical handler without
+    # actually waiting out that real 120s (see run_events.read_events).
+    import main
+    import run_events as run_events_module
+
+    original_read_events = run_events_module.read_events
+
+    async def _short_timeout_read_events(run_id, timeout_seconds=120):
+        async for evt in original_read_events(run_id, timeout_seconds=1):
+            yield evt
+
+    monkeypatch.setattr(main.run_events, "read_events", _short_timeout_read_events)
+
+    with client.stream("GET", "/v1/runs/nonexistent-run-id/stream") as r:
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        lines = [line for line in r.iter_lines() if line.startswith("data: ")]
+
+    assert len(lines) == 1
+    event = json.loads(lines[0].removeprefix("data: "))
+    assert event["type"] == "error"
+    assert "timeout" in event["message"]
 
 
 # ── POST /agents, GET /agents/{id}/verify ────────────────────────────────
@@ -92,6 +153,15 @@ def test_register_agent_then_verify_matches(client, chain_settings):
     assert body["agent_id"] == agent_id
     assert body["tx_hash"].startswith("0x")
 
+    # F8: blockchain/identity_writer.py must submit an EIP-1559 dynamic-fee
+    # tx (type 2), not a legacy gasPrice one — Anvil exposes baseFeePerGas
+    # by default so blockchain.gas.build_fee_params takes that branch.
+    from anchor_worker import chain as chain_module
+    onchain_tx = chain_module.get_w3().eth.get_transaction(body["tx_hash"])
+    assert onchain_tx["type"] == 2
+    assert onchain_tx["maxFeePerGas"] > 0
+    assert onchain_tx["maxPriorityFeePerGas"] > 0
+
     v = client.get(f"/agents/{agent_id}/verify", params={"code_hash": code_hash}, headers=headers)
     assert v.status_code == 200, v.text
     result = v.json()
@@ -99,6 +169,73 @@ def test_register_agent_then_verify_matches(client, chain_settings):
     assert result["isActive"] is True
     assert result["hashMatches"] is True
     assert result["storedHash"] == code_hash
+
+
+@requires_anvil
+def test_two_tenants_registering_the_same_agent_id_do_not_collide(client, chain_settings):
+    """Real, end-to-end proof of AgentIdentityRegistryV2's project
+    namespacing (contracts/src/v2/AgentIdentityRegistryV2.sol's docstring)
+    through the actual HTTP API two real tenants would use — not a
+    contract-unit-test with a hand-picked projectId, but two genuinely
+    separate signed-up accounts (main.py injects principal.project_id
+    server-side; a client never supplies it) both registering an agent
+    named "researcher" with DIFFERENT code hashes. Before this fix, the
+    second registration would have silently overwritten the first
+    tenant's on-chain record."""
+    alice = seed_user_and_token(f"alice_namespacing_{uuid.uuid4().hex[:8]}@example.com", "Alice")
+    bob = seed_user_and_token(f"bob_namespacing_{uuid.uuid4().hex[:8]}@example.com", "Bob")
+    alice_headers = _auth_headers(alice["token"])
+    bob_headers = _auth_headers(bob["token"])
+
+    shared_agent_id = "researcher"  # same name, deliberately — the whole point
+    alice_config = {"agentId": shared_agent_id, "model": "gpt-4o", "version": "alice-v1"}
+    bob_config = {"agentId": shared_agent_id, "model": "claude-3", "version": "bob-v1"}
+    alice_hash = _code_hash_for(alice_config)
+    bob_hash = _code_hash_for(bob_config)
+    assert alice_hash != bob_hash
+
+    r1 = client.post(
+        "/agents",
+        json={"agent_id": shared_agent_id, "code_hash": alice_hash, "model": "gpt-4o", "version": "alice-v1"},
+        headers=alice_headers,
+    )
+    assert r1.status_code == 200, r1.text
+
+    r2 = client.post(
+        "/agents",
+        json={"agent_id": shared_agent_id, "code_hash": bob_hash, "model": "claude-3", "version": "bob-v1"},
+        headers=bob_headers,
+    )
+    assert r2.status_code == 200, r2.text
+
+    # The real assertion: Alice's registration must be COMPLETELY
+    # UNTOUCHED by Bob registering the same agentId after her.
+    alice_verify = client.get(
+        f"/agents/{shared_agent_id}/verify", params={"code_hash": alice_hash}, headers=alice_headers
+    )
+    assert alice_verify.status_code == 200, alice_verify.text
+    alice_result = alice_verify.json()
+    assert alice_result["isValid"] is True
+    assert alice_result["hashMatches"] is True
+    assert alice_result["storedHash"] == alice_hash
+
+    bob_verify = client.get(
+        f"/agents/{shared_agent_id}/verify", params={"code_hash": bob_hash}, headers=bob_headers
+    )
+    assert bob_verify.status_code == 200, bob_verify.text
+    bob_result = bob_verify.json()
+    assert bob_result["isValid"] is True
+    assert bob_result["hashMatches"] is True
+    assert bob_result["storedHash"] == bob_hash
+
+    # Cross-check: Alice's OWN hash must NOT verify against Bob's project
+    # context, and vice versa — proves this isn't just "both happen to
+    # read back their own last write" but genuine per-project isolation.
+    alice_hash_under_bob = client.get(
+        f"/agents/{shared_agent_id}/verify", params={"code_hash": alice_hash}, headers=bob_headers
+    )
+    assert alice_hash_under_bob.status_code == 200, alice_hash_under_bob.text
+    assert alice_hash_under_bob.json()["hashMatches"] is False
 
 
 @requires_anvil
@@ -203,6 +340,61 @@ def test_get_step_proof_for_unknown_step_is_404(client):
     user = seed_user_and_token()
     r = client.get("/steps/999999999/proof", headers=_auth_headers(user["token"]))
     assert r.status_code == 404
+
+
+# ── GET /gas-spend — real gas-spend attribution ─────────────────────────
+
+@requires_anvil
+def test_gas_spend_reflects_real_confirmed_batch_cost(client, chain_settings):
+    """Real end-to-end: log steps, anchor them for real, and confirm GET
+    /gas-spend reports the exact real cost (gas_used * gas_price_wei) the
+    confirming transaction's own receipt recorded — not an estimate, and
+    not another project's spend."""
+    from anchor_worker.main import run_once
+
+    user = seed_user_and_token()
+    headers = _auth_headers(user["token"])
+    run_id = f"gas_spend_run_{uuid.uuid4().hex[:8]}"
+
+    zero = client.get("/gas-spend", headers=headers)
+    assert zero.status_code == 200, zero.text
+    assert zero.json() == {"confirmedBatchCount": 0, "totalGasSpentWei": "0"}
+
+    r = client.post(
+        "/steps",
+        json={"run_id": run_id, "agent_id": "gas_test_agent", "action": "step", "input": "in", "output": "out"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    anchored = run(run_once("gas-spend-test-worker", chain_settings))
+    assert anchored == 1
+
+    from db.engine import get_sessionmaker
+    from db.models import AnchorBatch, Step
+    from sqlalchemy import select
+
+    async def _fetch_real_batch():
+        async with get_sessionmaker()() as session:
+            step = (await session.execute(select(Step).where(Step.run_id == run_id))).scalar_one()
+            return await session.get(AnchorBatch, step.anchor_batch_id)
+
+    real_batch = run(_fetch_real_batch())
+    expected_wei = real_batch.gas_used * real_batch.gas_price_wei
+    assert expected_wei > 0
+
+    spend = client.get("/gas-spend", headers=headers)
+    assert spend.status_code == 200, spend.text
+    body = spend.json()
+    assert body["confirmedBatchCount"] == 1
+    assert body["totalGasSpentWei"] == str(expected_wei)
+
+    # Isolation (invariant I7): a different project sees zero, not this
+    # project's spend.
+    other_user = seed_user_and_token(f"gas_spend_other_{uuid.uuid4().hex[:8]}@example.com", "Other")
+    other = client.get("/gas-spend", headers=_auth_headers(other_user["token"]))
+    assert other.status_code == 200, other.text
+    assert other.json() == {"confirmedBatchCount": 0, "totalGasSpentWei": "0"}
 
 
 def test_log_external_step_is_idempotent(client):

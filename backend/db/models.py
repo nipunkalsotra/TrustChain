@@ -236,6 +236,18 @@ class AnchorBatch(Base):
     tx_hash:          Mapped[Optional[str]] = mapped_column(String(66), nullable=True, index=True)
     onchain_anchor_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     block_number:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Real gas-spend attribution (plan §11.4/O10) — the REAL cost this
+    # specific batch's confirmation actually incurred, read straight off
+    # the transaction receipt (gasUsed) and the receipt's own
+    # effectiveGasPrice (the actual EIP-1559 price paid, not the
+    # maxFeePerGas ceiling submit.py was willing to pay — see
+    # blockchain/gas.py) — not estimated, not the RBF attempt's asking
+    # price if a replacement was needed. gas_used * gas_price_wei = real
+    # wei spent on this one confirmation; joined through
+    # steps.anchor_batch_id -> runs.project_id, this is what lets a
+    # project see its own real cumulative on-chain spend (GET /gas-spend).
+    gas_used:         Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    gas_price_wei:    Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     last_error:       Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at:       Mapped[int] = mapped_column(BigInteger, nullable=False)
     submitted_at:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -320,6 +332,46 @@ class ReadModelScore(Base):
     tx_hash:      Mapped[str] = mapped_column(String(66), nullable=False)
     log_index:    Mapped[int] = mapped_column(Integer, nullable=False)
     indexed_at:   Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ReadModelAgentEvent(Base):
+    """
+    Pure read model, mirroring AgentIdentityRegistryV2's AgentRegistered /
+    AgentRevoked / IntegrityViolation events — one table for all three
+    (event_type discriminates) rather than three tables, since they share
+    the same "one agent, one point-in-time occurrence" shape and no query
+    so far needs more than agent_id + event_type to filter. Same invariant
+    I6 rebuildable-from-genesis property as rm_scores (see ReadModelScore's
+    docstring): every field is carried in full by the event itself.
+
+    project_id: the contract's own on-chain namespacing key (see
+    AgentIdentityRegistryV2.sol's project-namespacing docstring) — two
+    tenants can register the same agent_id, so agent_id ALONE is not a
+    safe filter for a per-tenant view of this table; (project_id,
+    agent_id) is the real composite identity, matching the contract's own
+    (projectId, agentId) mapping key.
+    """
+
+    __tablename__ = "rm_agent_events"
+    __table_args__ = (UniqueConstraint("tx_hash", "log_index", name="uq_rm_agent_events_tx_hash_log_index"),)
+
+    id:            Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    event_type:    Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    project_id:    Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    agent_id:      Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    # actor: registeredBy (AgentRegistered) or revokedBy (AgentRevoked);
+    # NULL for IntegrityViolation, which the contract emits with no actor
+    # arg (verifyAgentAndLog can be called by anyone — it's a check, not a
+    # privileged action).
+    actor:         Mapped[Optional[str]] = mapped_column(String(42), nullable=True)
+    code_hash:     Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    expected_hash: Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    provided_hash: Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    timestamp:     Mapped[int] = mapped_column(BigInteger, nullable=False)
+    block_number:  Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tx_hash:       Mapped[str] = mapped_column(String(66), nullable=False)
+    log_index:     Mapped[int] = mapped_column(Integer, nullable=False)
+    indexed_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class IndexerCursor(Base):

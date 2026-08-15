@@ -211,6 +211,136 @@ def test_indexer_is_idempotent_on_rerun(chain_settings):
     assert run(_count()) == 1
 
 
+def _unique_agent_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+# Arbitrary but fixed project id for tests that call the contract
+# directly (not through the HTTP API, which injects the real
+# authenticated principal's project_id) — just needs to be a real
+# uint256 the contract's own namespacing key can hash.
+_TEST_PROJECT_ID = 424242
+
+
+def _code_hash_for(config: dict) -> bytes:
+    import json
+
+    from web3 import Web3
+    return Web3.keccak(text=json.dumps(config, sort_keys=True))
+
+
+@requires_anvil
+def test_indexer_indexes_agent_registered_and_revoked(chain_settings):
+    """A real registerAgent() then revokeAgent() call, each producing a
+    real on-chain event this must actually decode and store — not just
+    invoke without raising. Registered/revoked go through in the same
+    test since revokeAgent requires an already-registered agent, and
+    registering fresh each time (agentId) means AgentRegistered actually
+    fires (registerAgent on an EXISTING id emits AgentUpdated instead,
+    per the contract's own branch — see AgentIdentityRegistryV2.sol)."""
+    contract = indexer_chain_module.get_identity_registry_contract()
+    signer = chain_module.get_signer()
+    w3 = indexer_chain_module.get_w3()
+
+    agent_id = _unique_agent_id("run_indexer_identity_test")
+    code_hash = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"})
+
+    def _send(fn, gas):
+        nonce = w3.eth.get_transaction_count(signer.address, "pending")
+        tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": gas, "gasPrice": w3.eth.gas_price})
+        signed = signer.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        return "0x" + tx_hash.hex()
+
+    register_tx_hash = _send(
+        contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, code_hash, "gpt-4o", "2026-01"), 400_000
+    )
+    revoke_tx_hash = _send(contract.functions.revokeAgent(_TEST_PROJECT_ID, agent_id), 200_000)
+
+    handled = run(run_once())
+    assert handled >= 2
+
+    async def _fetch():
+        from sqlalchemy import select
+
+        from db.models import ReadModelAgentEvent
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(
+                select(ReadModelAgentEvent)
+                .where(ReadModelAgentEvent.agent_id == agent_id)
+                .order_by(ReadModelAgentEvent.id)
+            )).scalars().all()
+            return rows
+
+    rows = run(_fetch())
+    assert [r.event_type for r in rows] == ["AgentRegistered", "AgentRevoked"]
+
+    registered, revoked = rows
+    assert registered.project_id == _TEST_PROJECT_ID
+    assert registered.actor == signer.address
+    assert registered.code_hash == "0x" + code_hash.hex()
+    assert registered.tx_hash == register_tx_hash
+
+    assert revoked.project_id == _TEST_PROJECT_ID
+    assert revoked.actor == signer.address
+    assert revoked.tx_hash == revoke_tx_hash
+
+
+@requires_anvil
+def test_indexer_indexes_integrity_violation(chain_settings):
+    """A real verifyAgentAndLog() call with a deliberately WRONG hash
+    against a real registered agent — the contract's actual tamper-alarm
+    path (distinct from verifyAgentFull, the view-only call
+    identity_writer.verify_agent uses for GET /agents/{id}/verify, which
+    can't emit events at all)."""
+    contract = indexer_chain_module.get_identity_registry_contract()
+    signer = chain_module.get_signer()
+    w3 = indexer_chain_module.get_w3()
+
+    agent_id = _unique_agent_id("run_indexer_violation_test")
+    real_hash = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"})
+    tampered_hash = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "2099-01"})
+
+    def _send(fn, gas):
+        nonce = w3.eth.get_transaction_count(signer.address, "pending")
+        tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": gas, "gasPrice": w3.eth.gas_price})
+        signed = signer.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        return "0x" + tx_hash.hex()
+
+    _send(contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, real_hash, "gpt-4o", "2026-01"), 400_000)
+    violation_tx_hash = _send(
+        contract.functions.verifyAgentAndLog(_TEST_PROJECT_ID, agent_id, tampered_hash), 200_000
+    )
+
+    handled = run(run_once())
+    assert handled >= 1
+
+    async def _fetch():
+        from sqlalchemy import select
+
+        from db.models import ReadModelAgentEvent
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(
+                select(ReadModelAgentEvent).where(
+                    ReadModelAgentEvent.agent_id == agent_id,
+                    ReadModelAgentEvent.event_type == "IntegrityViolation",
+                )
+            )).scalars().all()
+            return rows
+
+    rows = run(_fetch())
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.project_id == _TEST_PROJECT_ID
+    assert row.expected_hash == "0x" + real_hash.hex()
+    assert row.provided_hash == "0x" + tampered_hash.hex()
+    assert row.actor is None
+    assert row.tx_hash == violation_tx_hash
+
+
 @requires_anvil
 def test_indexer_run_once_samples_circuit_breaker_state(chain_settings, monkeypatch):
     """indexer/main.py::run_once must publish each configured RPC
@@ -234,3 +364,136 @@ def test_indexer_run_once_samples_circuit_breaker_state(chain_settings, monkeypa
     healthy_state = observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=anvil_rpc)._value.get()
     assert dead_state == 1.0  # tripped after the first real connection-refused failure
     assert healthy_state == 0.0
+
+
+@requires_anvil
+def test_indexer_finality_gating_defers_recent_events(chain_settings):
+    """A real ScoreUpdated event, emitted this block, must NOT be indexed
+    while it's still within indexer_finality_confirmations blocks of the
+    chain tip — only once enough real blocks have been mined on top of it.
+    Proactive gating (indexer/poll.py's `latest_block = chain_tip -
+    finality_confirmations`), distinct from cursor.py's reactive
+    hash-mismatch rewind: this test proves the event is never even
+    fetched in the first place, not that it gets fetched-then-corrected."""
+    gated_settings = chain_settings.model_copy(update={"indexer_finality_confirmations": 5})
+
+    contract = indexer_chain_module.get_trust_score_contract()
+    signer = chain_module.get_signer()
+    w3 = indexer_chain_module.get_w3()
+
+    run_id = _unique_run_id("run_finality_test")
+    nonce = w3.eth.get_transaction_count(signer.address, "pending")
+    fn = contract.functions.updateScore("researcher", run_id, 55, "finality_gating_check")
+    tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": 400_000, "gasPrice": w3.eth.gas_price})
+    signed = signer.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+
+    async def _count():
+        from sqlalchemy import func, select
+
+        from db.models import ReadModelScore
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(func.count()).select_from(ReadModelScore).where(ReadModelScore.run_id == run_id)
+            )
+            return result.scalar_one()
+
+    # Still within the 5-block finality window (Anvil auto-mines one block
+    # per tx, so the event's block is chain_tip itself right now) -> must
+    # be deferred, not indexed.
+    run(run_once(gated_settings))
+    assert run(_count()) == 0
+
+    # Mine 5 more real blocks (plain 0-value self-transfers — Anvil has no
+    # bare evm_mine-N convenience here, and this repo's infra can't set
+    # interval mining without disturbing the shared Anvil instance's
+    # automine setting for other tests) so the event's block is now
+    # exactly finality_confirmations behind the tip.
+    for _ in range(5):
+        filler_nonce = w3.eth.get_transaction_count(signer.address, "pending")
+        filler_tx = {
+            "from": signer.address, "to": signer.address, "value": 0,
+            "nonce": filler_nonce, "gas": 21_000, "gasPrice": w3.eth.gas_price,
+        }
+        filler_signed = signer.sign_transaction(filler_tx)
+        filler_hash = w3.eth.send_raw_transaction(filler_signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(filler_hash, timeout=30)
+
+    handled_once_final = run(run_once(gated_settings))
+    assert handled_once_final >= 1
+    assert run(_count()) == 1
+
+
+@requires_anvil
+def test_indexer_rebuilds_read_model_identically_from_genesis(chain_settings):
+    """Invariant I6 (db/models.py's ReadModelScore docstring): rm_scores
+    and rm_agent_events are a pure function of chain events and must be
+    exactly reconstructable by wiping the read model + cursor and
+    replaying from genesis — not merely "doesn't error," but genuinely
+    produces the same content back."""
+    score_contract = indexer_chain_module.get_trust_score_contract()
+    identity_contract = indexer_chain_module.get_identity_registry_contract()
+    signer = chain_module.get_signer()
+    w3 = indexer_chain_module.get_w3()
+
+    def _send(fn, gas):
+        nonce = w3.eth.get_transaction_count(signer.address, "pending")
+        tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": gas, "gasPrice": w3.eth.gas_price})
+        signed = signer.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        return "0x" + tx_hash.hex()
+
+    run_id = _unique_run_id("run_i6_test")
+    agent_id = _unique_agent_id("run_i6_agent")
+    code_hash = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"})
+
+    _send(score_contract.functions.updateScore("researcher", run_id, 73, "i6_replay_check"), 400_000)
+    _send(
+        identity_contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, code_hash, "gpt-4o", "2026-01"),
+        400_000,
+    )
+
+    handled_first_pass = run(run_once())
+    assert handled_first_pass >= 2
+
+    async def _snapshot():
+        from sqlalchemy import select
+
+        from db.models import ReadModelAgentEvent, ReadModelScore
+        async with get_sessionmaker()() as session:
+            scores = (await session.execute(
+                select(ReadModelScore).where(ReadModelScore.run_id == run_id)
+            )).scalars().all()
+            agent_events = (await session.execute(
+                select(ReadModelAgentEvent).where(ReadModelAgentEvent.agent_id == agent_id)
+            )).scalars().all()
+            return (
+                [(s.agent_id, s.run_id, s.score, s.reason, s.timestamp, s.tx_hash, s.log_index) for s in scores],
+                [(e.event_type, e.agent_id, e.actor, e.code_hash, e.timestamp, e.tx_hash, e.log_index)
+                 for e in agent_events],
+            )
+
+    before_scores, before_agent_events = run(_snapshot())
+    assert len(before_scores) == 1
+    assert len(before_agent_events) == 1
+
+    # Wipe exactly the I6-covered tables (read model + cursor) — NOT the
+    # whole DB (runs/users/etc. aren't part of this invariant and the
+    # events above don't even depend on a `runs` row existing) — then
+    # replay every stream from its own deploy_block=0 default.
+    async def _wipe_read_model_and_cursor():
+        async with get_sessionmaker()() as session:
+            await session.execute(text("DELETE FROM rm_scores"))
+            await session.execute(text("DELETE FROM rm_agent_events"))
+            await session.execute(text("DELETE FROM indexer_cursor"))
+            await session.commit()
+    run(_wipe_read_model_and_cursor())
+
+    handled_replay = run(run_once())
+    assert handled_replay >= 2
+
+    after_scores, after_agent_events = run(_snapshot())
+    assert after_scores == before_scores
+    assert after_agent_events == before_agent_events

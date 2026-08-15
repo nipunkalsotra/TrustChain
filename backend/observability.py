@@ -52,7 +52,14 @@ PIPELINE_RUN_DURATION_SECONDS = Histogram(
     buckets=(1, 2, 5, 10, 20, 30, 60, 120, 300, 600),
 )
 RATE_LIMIT_REJECTIONS_TOTAL = Counter(
-    "rate_limit_rejections_total", "Requests rejected by rate limiting", ["kind"]  # run_agent|login
+    "rate_limit_rejections_total", "Requests rejected by rate limiting",
+    ["kind"],  # run_agent|login|register_agent|log_step
+)
+SIGNUP_PWNED_PASSWORD_REJECTIONS_TOTAL = Counter(
+    "signup_pwned_password_rejections_total",
+    "Signups rejected because the chosen password appears in Have I Been Pwned's "
+    "breach corpus (auth_pwned.py) — distinct from rate-limit rejections above, this "
+    "is a content-based rejection, not a request-volume one.",
 )
 
 # ── Anchor worker (anchor_worker process) ───────────────────────────────
@@ -62,6 +69,11 @@ ANCHOR_BATCHES_SUBMITTED_TOTAL = Counter(
 ANCHOR_BATCHES_FAILED_TOTAL = Counter(
     "anchor_batches_failed_total", "AnchorBatch submissions that failed", ["reason"]
 )
+ANCHOR_BATCHES_REPLACED_TOTAL = Counter(
+    "anchor_batches_replaced_total",
+    "Replace-by-fee resubmissions of a batch's tx at the same nonce with a bumped fee, "
+    "because the previous attempt didn't confirm within confirm_timeout",
+)
 ANCHOR_BATCH_SIZE_STEPS = Histogram(
     "anchor_batch_size_steps",
     "Number of steps anchored per batch",
@@ -69,6 +81,27 @@ ANCHOR_BATCH_SIZE_STEPS = Histogram(
 )
 ANCHOR_OUTBOX_PENDING = Gauge(
     "anchor_outbox_pending", "Steps in anchor_outbox awaiting a batch (sampled each work loop)"
+)
+ANCHOR_OUTBOX_DEAD_LETTERED_TOTAL = Counter(
+    "anchor_outbox_dead_lettered_total",
+    "Steps permanently given up on (exhausted anchor_max_attempts) — these will NEVER make it "
+    "on-chain without manual intervention (see docs/runbooks.md's dead-lettered-steps entry). "
+    "Two distinct code paths increment this: reaper.py (a claim that outlived "
+    "anchor_claim_timeout_seconds too many times — a repeatedly-crashing worker) and "
+    "main.py::handle_submit_failure (a batch that failed submission — revert or timeout — too "
+    "many times). Before this metric existed, both paths only logged (dead_lettered=N /  "
+    "last_error), invisible to Prometheus/alerting — a real gap for a product whose entire "
+    "point is a complete audit trail: silently losing a step here breaks that guarantee for "
+    "exactly the step it happens to.",
+    ["source"],  # reaper|submit_failure
+)
+ANCHOR_REAPER_RESET_TOTAL = Counter(
+    "anchor_reaper_reset_total",
+    "Outbox rows the reaper reset back to 'pending' after their claim went stale "
+    "(anchor_claim_timeout_seconds elapsed with no confirmation) — recovered from a worker "
+    "crash/restart, not lost. A high rate here across short windows is a crash-loop signal "
+    "worth its own alert even though no data was actually lost (distinct from "
+    "anchor_outbox_dead_lettered_total, which IS data loss).",
 )
 ANCHOR_SUBMIT_DURATION_SECONDS = Histogram(
     "anchor_submit_duration_seconds", "Time from tx submit to confirmed receipt"

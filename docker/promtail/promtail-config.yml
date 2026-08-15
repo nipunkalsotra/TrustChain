@@ -1,0 +1,51 @@
+# docker/promtail/promtail-config.yml — ships every container's stdout
+# (each process already emits structured JSON — see
+# backend/logging_config.py — so LogQL's `| json` pipe parses fields at
+# QUERY time; nothing is pre-parsed/pre-indexed here, which would risk
+# turning high-cardinality fields like the free-form `event` name into
+# separate label streams, a real Loki anti-pattern) into Loki.
+#
+# docker_sd_configs auto-discovers every running container via the
+# Docker socket — no per-service scrape config to maintain as services
+# are added/removed from docker-compose.yml.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Docker service discovery is host-wide by design — on a shared
+      # Docker host running other, unrelated projects/containers (found
+      # locally: an old, long-running unrelated container caused Loki to
+      # reject entire batches outright with "timestamp too old" once its
+      # weeks-old log backlog got scraped alongside this project's own),
+      # this keeps promtail scoped to ONLY this compose project's own
+      # containers, matching what a real shared host would need anyway.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        regex: "trustchain"
+        action: keep
+      # Raw container name (e.g. "/trustchain-api-1") -> "api-1"-ish;
+      # mainly useful as a fallback when the compose service label below
+      # isn't present (a container docker-compose didn't create).
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      # docker-compose sets this label on every container it creates —
+      # "api", "anchor-worker", "indexer", etc. This is the label worth
+      # filtering on in Grafana ({service="anchor-worker"}), not the
+      # raw container name above (which includes a numeric suffix and
+      # changes across `docker compose up --build` recreations).
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: "service"
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: "stream"

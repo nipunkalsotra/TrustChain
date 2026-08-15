@@ -218,13 +218,13 @@
           "components": [
             {
               "name": "score",
-              "type": "uint256",
-              "internalType": "uint256"
+              "type": "uint8",
+              "internalType": "uint8"
             },
             {
               "name": "timestamp",
-              "type": "uint256",
-              "internalType": "uint256"
+              "type": "uint40",
+              "internalType": "uint40"
             },
             {
               "name": "reason",
@@ -283,12 +283,12 @@
       "name": "hasScore",
       "inputs": [
         {
-          "name": "",
+          "name": "agentId",
           "type": "string",
           "internalType": "string"
         },
         {
-          "name": "",
+          "name": "runId",
           "type": "string",
           "internalType": "string"
         }
@@ -307,12 +307,12 @@
       "name": "lastUpdatedAt",
       "inputs": [
         {
-          "name": "",
+          "name": "agentId",
           "type": "string",
           "internalType": "string"
         },
         {
-          "name": "",
+          "name": "runId",
           "type": "string",
           "internalType": "string"
         }
@@ -461,13 +461,13 @@
       "outputs": [
         {
           "name": "score",
-          "type": "uint256",
-          "internalType": "uint256"
+          "type": "uint8",
+          "internalType": "uint8"
         },
         {
           "name": "timestamp",
-          "type": "uint256",
-          "internalType": "uint256"
+          "type": "uint40",
+          "internalType": "uint40"
         },
         {
           "name": "reason",
@@ -482,12 +482,12 @@
       "name": "scores",
       "inputs": [
         {
-          "name": "",
+          "name": "agentId",
           "type": "string",
           "internalType": "string"
         },
         {
-          "name": "",
+          "name": "runId",
           "type": "string",
           "internalType": "string"
         }

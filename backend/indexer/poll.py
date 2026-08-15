@@ -28,13 +28,20 @@ async def poll_once(
     handler,
     cursor_name: str,
     deploy_block: int = 0,
+    finality_confirmations: int = 0,
 ) -> int:
     """Returns the number of events actually handled (a handler returning
     False for "already applied" doesn't count) — 0 means nothing new,
     used by main.py to decide whether to poll again immediately or wait."""
     start_block = await resolve_start_block(session, w3, cursor_name, deploy_block)
-    latest_block = await asyncio.to_thread(lambda: w3.eth.block_number)
-    observability.INDEXER_POLL_LAG_BLOCKS.set(max(0, latest_block - start_block))
+    chain_tip = await asyncio.to_thread(lambda: w3.eth.block_number)
+    # Finality gating (see config.py's indexer_finality_confirmations):
+    # never advance the cursor past chain_tip - finality_confirmations,
+    # even though chain_tip itself is available — a block that recent
+    # might not survive a reorg yet. max(deploy_block - 1, ...) keeps this
+    # from going negative / below where this stream is allowed to start.
+    latest_block = max(deploy_block - 1, chain_tip - finality_confirmations)
+    observability.INDEXER_POLL_LAG_BLOCKS.set(max(0, chain_tip - start_block))
     if start_block > latest_block:
         return 0
 

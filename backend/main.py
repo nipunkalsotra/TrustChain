@@ -20,18 +20,20 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import auth
+import auth_pwned
 import db
 import observability
 import rate_limit
 import refresh
 import run_events
 from db import idempotency, read_model, tenancy
+from errors import ApiError, ErrorCode
 from config import get_settings
 from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
 from blockchain.client import get_bridge
@@ -53,6 +55,27 @@ observability.init_tracing(get_settings().otel_service_name, get_settings().otel
 #  FastAPI app + lifespan
 # ─────────────────────────────────────────────────────────────────────────────
 
+# F14 (Graceful shutdown): tasks POST /run-agent hands to
+# asyncio.create_task() are fully detached — nothing tracks them, and
+# uvicorn's own graceful-shutdown accounting only covers in-flight HTTP
+# requests/responses, not arbitrary background tasks the app spawned. A
+# task cancelled or abandoned mid-run never reaches
+# _run_pipeline_background's `except Exception` clause (CancelledError
+# derives from BaseException, not Exception) or its db.fail_run() calls,
+# so without this the run stays at status='running' in Postgres forever —
+# the exact failure mode plan F14 exists to close. run_id -> Task (not a
+# plain set) so the shutdown path below can name/fail the SPECIFIC runs
+# still in flight rather than just counting them.
+_background_tasks: dict[asyncio.Task, str] = {}
+
+
+def _spawn_background_pipeline_run(task: str, run_id: str) -> asyncio.Task:
+    bg_task = asyncio.create_task(_run_pipeline_background(task, run_id))
+    _background_tasks[bg_task] = run_id
+    bg_task.add_done_callback(lambda t: _background_tasks.pop(t, None))
+    return bg_task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("backend_starting")
@@ -62,7 +85,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("bridge_init_failed_non_fatal", error=str(e))
     yield
-    logger.info("backend_shutting_down")
+    logger.info("backend_shutting_down", in_flight_runs=len(_background_tasks))
+    if _background_tasks:
+        settings = get_settings()
+        pending_tasks = list(_background_tasks.keys())
+        _done, pending = await asyncio.wait(pending_tasks, timeout=settings.api_shutdown_drain_timeout_seconds)
+        for bg_task in pending:
+            run_id = _background_tasks.get(bg_task)
+            bg_task.cancel()
+            logger.warning("shutdown_drain_timeout_abandoning_run", run_id=run_id)
+            if run_id is None:
+                continue
+            try:
+                # fail_run_if_still_running, not fail_run: cancellation and
+                # this write aren't atomic with whatever the task itself
+                # might still be doing, so this guards against clobbering
+                # a run that raced to a real completion in that narrow
+                # window with a spurious "interrupted by shutdown" status.
+                await db.fail_run_if_still_running(run_id, "server shutdown before run completed", int(time.time()))
+            except Exception:
+                logger.exception("shutdown_fail_run_failed", run_id=run_id)
 
 
 app = FastAPI(
@@ -131,6 +173,24 @@ async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    """Renders error_code as a SIBLING field alongside `detail`, not a
+    replacement for it — see errors.py's module docstring for why this
+    has to stay additive. A plain `raise HTTPException(...)` (not yet
+    migrated to ApiError, or raised by FastAPI/Starlette itself — a 422
+    from Pydantic validation, a 404 from an unmatched route) is NOT
+    caught here; it falls through to FastAPI's own default handler and
+    gets a body with no error_code field at all, same as before this
+    existed."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error_code": exc.error_code.value},
+        headers=exc.headers,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  API versioning (F-item, plan §13.4/Appendix A): every route below lives
 #  on `router`, mounted TWICE at the bottom of this file — once unprefixed
@@ -146,6 +206,20 @@ async def metrics():
 
 from fastapi import APIRouter
 router = APIRouter()
+
+# A handful of routes' legacy (unprefixed) names don't literally match
+# Appendix A's documented /v1 path for the same operation (POST
+# /api-keys vs. the spec's POST /v1/keys; POST /run-agent vs. POST
+# /v1/runs; GET /stream/{run_id} vs. GET /v1/runs/{id}/stream) — found by
+# diffing this file's actual routes against the plan's Appendix A table
+# directly, not by inspection alone. `router`'s dual-mount above covers
+# "same path, with or without /v1/" fine, but can't rename a path only
+# under one prefix. v1_only_router holds exactly these 3 differently-named
+# aliases, mounted under /v1 ONLY (not unprefixed) below — the legacy
+# names keep working exactly as before (still on `router`, still
+# dual-mounted), this just adds the additional, spec-exact name where the
+# two didn't already match.
+v1_only_router = APIRouter()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,7 +259,7 @@ def get_bridge_or_503():
         return get_bridge()
     except Exception as e:
         logger.error("v1_bridge_unavailable", error=str(e))
-        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
+        raise ApiError(503, "V1 blockchain bridge unavailable — see server logs for details", ErrorCode.BRIDGE_UNAVAILABLE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +267,14 @@ def get_bridge_or_503():
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunAgentRequest(BaseModel):
-    task:   str
+    # Bounded to stop an unbounded task string from becoming an
+    # unbounded LLM cost/DoS vector — every agent in the pipeline sees
+    # this same string, so its length multiplies across 4 LLM calls,
+    # not just one. 10,000 chars (~2,500 tokens for English prose) is
+    # generous for a real task description while still bounding the
+    # worst case; a legitimate caller needing more should split the
+    # work, not send one unbounded prompt.
+    task:   str = Field(..., min_length=1, max_length=10_000)
     run_id: Optional[str] = None
 
 
@@ -312,13 +393,23 @@ class ApiKeyListItem(BaseModel):
 
 @router.post("/auth/signup", response_model=AuthResponse)
 async def signup(body: SignupRequest):
+    settings = get_settings()
+    if settings.check_pwned_passwords:
+        if await auth_pwned.is_password_pwned(body.password, settings.pwned_passwords_timeout_seconds):
+            observability.SIGNUP_PWNED_PASSWORD_REJECTIONS_TOTAL.inc()
+            raise ApiError(
+                400,
+                "this password has appeared in a known data breach — please choose a different one",
+                ErrorCode.PASSWORD_PWNED,
+            )
+
     try:
         user = await db.create_user(
             email=body.email, name=body.name, password=body.password,
             created_at=int(time.time()),
         )
     except ValueError:
-        raise HTTPException(status_code=409, detail="email already registered")
+        raise ApiError(409, "email already registered", ErrorCode.EMAIL_ALREADY_REGISTERED)
 
     token = auth.create_token(
         email=user["email"], name=user["name"],
@@ -338,7 +429,7 @@ async def login(body: LoginRequest, request: Request):
     user = await db.authenticate_user(email=body.email, password=body.password)
     if user is None:
         await rate_limit.record_login_failure(body.email, client_ip)
-        raise HTTPException(status_code=401, detail="invalid email or password")
+        raise ApiError(401, "invalid email or password", ErrorCode.INVALID_CREDENTIALS)
 
     await rate_limit.clear_login_failures(body.email, client_ip)
     token = auth.create_token(
@@ -376,7 +467,7 @@ async def refresh_token_pair(body: RefreshRequest):
         pair = await refresh.rotate_refresh_token(body.refresh_token)
     except refresh.RefreshError as e:
         logger.warning("refresh_token_rejected", reason=str(e))
-        raise HTTPException(status_code=401, detail="invalid, expired, or reused refresh token")
+        raise ApiError(401, "invalid, expired, or reused refresh token", ErrorCode.INVALID_REFRESH_TOKEN)
     return TokenPairResponse(
         access_token=pair["accessToken"], refresh_token=pair["refreshToken"], expires_in=pair["expiresIn"]
     )
@@ -397,10 +488,11 @@ async def logout(body: RefreshRequest):
 async def _require_admin(current_user: auth.CurrentUser) -> None:
     role = await tenancy.get_membership_role(current_user.user_id, current_user.org_id)
     if role not in ("owner", "admin"):
-        raise HTTPException(status_code=403, detail="owner or admin role required")
+        raise ApiError(403, "owner or admin role required", ErrorCode.INSUFFICIENT_ROLE)
 
 
 @router.post("/api-keys", response_model=ApiKeyCreatedResponse)
+@v1_only_router.post("/keys", response_model=ApiKeyCreatedResponse)  # Appendix A: POST /v1/keys
 async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
     try:
@@ -408,7 +500,7 @@ async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUs
             current_user.project_id, body.scopes, int(time.time()), environment=body.environment,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise ApiError(400, str(e), ErrorCode.API_KEY_CREATE_FAILED)
 
     await audit_log_admin_action(current_user, "api_key.created", target=f"api_key:{key['id']}")
     return ApiKeyCreatedResponse(id=key["id"], raw_key=key["rawKey"], last_four=key["lastFour"], scopes=key["scopes"])
@@ -422,11 +514,12 @@ async def list_api_keys(current_user: auth.CurrentUser = Depends(auth.get_curren
 
 
 @router.delete("/api-keys/{key_id}")
+@v1_only_router.delete("/keys/{key_id}")  # Appendix A: DELETE /v1/keys/{id}
 async def revoke_api_key(key_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
     revoked = await tenancy.revoke_api_key(key_id, current_user.project_id, int(time.time()))
     if not revoked:
-        raise HTTPException(status_code=404, detail="API key not found (or already revoked)")
+        raise ApiError(404, "API key not found (or already revoked)", ErrorCode.API_KEY_NOT_FOUND)
     await audit_log_admin_action(current_user, "api_key.revoked", target=f"api_key:{key_id}")
     return {"ok": True}
 
@@ -508,6 +601,7 @@ async def _run_pipeline_background(task: str, run_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/run-agent", response_model=RunAgentResponse)
+@v1_only_router.post("/runs", response_model=RunAgentResponse)  # Appendix A: POST /v1/runs
 async def run_agent(
     body: RunAgentRequest,
     principal: auth.Principal = Depends(auth.get_current_principal),
@@ -521,7 +615,7 @@ async def run_agent(
     dropped response doesn't start the pipeline twice."""
     auth.require_scope(principal, "runs:write")
     if not body.task.strip():
-        raise HTTPException(status_code=400, detail="task cannot be empty")
+        raise ApiError(400, "task cannot be empty", ErrorCode.TASK_EMPTY)
 
     request_body_bytes = body.model_dump_json().encode()
 
@@ -531,7 +625,7 @@ async def run_agent(
                 principal.project_id, idempotency_key, "POST", "/run-agent", request_body_bytes,
             )
         except idempotency.IdempotencyConflict as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise ApiError(409, str(e), ErrorCode.IDEMPOTENCY_CONFLICT)
         if cached is not None:
             return cached["body"]
 
@@ -545,12 +639,12 @@ async def run_agent(
     window_start = int(time.time()) - 30 * 24 * 3600
     run_count = await tenancy.count_org_runs_in_window(principal.org_id, window_start)
     if run_count >= settings.monthly_run_quota_per_org:
-        raise HTTPException(status_code=429, detail="monthly run quota exceeded for this organization")
+        raise ApiError(429, "monthly run quota exceeded for this organization", ErrorCode.QUOTA_EXCEEDED)
 
     run_id = body.run_id or make_run_id()
     user_email = principal.actor if not principal.is_api_key else None
     await db.create_run(run_id, principal.project_id, body.task, user_email, int(time.time()))
-    asyncio.create_task(_run_pipeline_background(body.task, run_id))
+    _spawn_background_pipeline_run(body.task, run_id)
     logger.info("run_started", run_id=run_id, actor=principal.actor, project_id=principal.project_id, task=body.task)
 
     response = RunAgentResponse(run_id=run_id, task=body.task, status="started", stream_url=f"/stream/{run_id}")
@@ -577,6 +671,7 @@ async def run_agent(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/stream/{run_id}")
+@v1_only_router.get("/runs/{run_id}/stream")  # Appendix A: GET /v1/runs/{id}/stream
 async def stream_events(run_id: str):
     async def event_generator():
         try:
@@ -631,7 +726,7 @@ async def get_audit_log(
         return {"entries": entries, "total": len(entries)}
     except Exception as e:
         logger.error("api_error", endpoint="audit-log", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -649,7 +744,7 @@ async def get_trust_scores(
         return {"runId": run_id, "scores": scores}
     except Exception as e:
         logger.error("api_error", endpoint="trust-scores", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -667,7 +762,7 @@ async def get_trust_score_history(
         return {"runId": run_id, "history": history}
     except Exception as e:
         logger.error("api_error", endpoint="trust-scores/history", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -692,7 +787,27 @@ async def get_leaderboard(
         return await read_model.get_leaderboard(principal.project_id, max_runs=max_runs)
     except Exception as e:
         logger.error("api_error", endpoint="leaderboard", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GET /gas-spend — real gas-spend attribution (plan §11.4/O10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/gas-spend")
+async def get_gas_spend(principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Real cumulative wei spent anchoring this project's own steps —
+    read straight off each confirming batch's own transaction receipt
+    (anchor_worker/submit.py), not estimated. See db/read_model.py's
+    get_gas_spend_summary for why one project can never see another's
+    (invariant I7) or double-count a batch across the many steps it
+    anchors."""
+    auth.require_scope(principal, "runs:read")
+    try:
+        return await read_model.get_gas_spend_summary(principal.project_id)
+    except Exception as e:
+        logger.error("api_error", endpoint="gas-spend", error=str(e))
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -707,7 +822,7 @@ async def verify_integrity(body: VerifyRequest):
         return result
     except Exception as e:
         logger.error("api_error", endpoint="verify", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 @router.get("/verify/tamper-demo")
@@ -721,10 +836,10 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
     try:
         return await bridge.tamper_demo(agent_id)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise ApiError(404, str(e), ErrorCode.TAMPER_DEMO_AGENT_NOT_FOUND)
     except Exception as e:
         logger.error("api_error", endpoint="tamper-demo", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 @router.get("/verify-audit")
@@ -776,7 +891,7 @@ async def verify_audit(run_id: str = Query(...)):
 
     except Exception as e:
         logger.error("api_error", endpoint="verify-audit", error=str(e))
-        raise HTTPException(status_code=500, detail="internal error — see server logs for details")
+        raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -831,7 +946,7 @@ async def health():
         chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
     except Exception as e:
         logger.error("v1_bridge_unavailable", error=str(e))
-        raise HTTPException(status_code=503, detail="V1 blockchain bridge unavailable — see server logs for details")
+        raise ApiError(503, "V1 blockchain bridge unavailable — see server logs for details", ErrorCode.BRIDGE_UNAVAILABLE)
     return {
         "status":   "ok",
         "chain_id": chain_id,
@@ -903,9 +1018,9 @@ async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_curr
     # negligible latency at the cost of that correctness gap.
     run = await db.get_run(run_id, principal.project_id)
     if run is None:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        raise ApiError(404, f"Run '{run_id}' not found", ErrorCode.RUN_NOT_FOUND)
     if run["status"] == "running":
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not yet complete")
+        raise ApiError(404, f"Run '{run_id}' not yet complete", ErrorCode.RUN_NOT_COMPLETE)
     return run["result"] if run["result"] is not None else run
 
 
@@ -923,11 +1038,20 @@ async def register_agent(
     principal: auth.Principal = Depends(auth.get_current_principal),
 ):
     auth.require_scope(principal, "agents:register")
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:register-agent:{principal.project_id}",
+        settings.register_agent_rate_limit_capacity,
+        settings.register_agent_rate_limit_refill_per_second,
+        kind="register_agent",
+    )
     try:
-        tx_hash = await identity_writer.register_agent(body.agent_id, body.code_hash, body.model, body.version)
+        tx_hash = await identity_writer.register_agent(
+            principal.project_id, body.agent_id, body.code_hash, body.model, body.version,
+        )
     except Exception as e:
         logger.error("api_error", endpoint="agents.register", error=str(e))
-        raise HTTPException(status_code=502, detail="on-chain registration failed — see server logs for details")
+        raise ApiError(502, "on-chain registration failed — see server logs for details", ErrorCode.AGENT_REGISTRATION_FAILED)
     return RegisterAgentResponse(agent_id=body.agent_id, tx_hash=tx_hash)
 
 
@@ -947,10 +1071,10 @@ async def verify_agent(
     anyone's."""
     auth.require_scope(principal, "agents:read")
     try:
-        return await identity_writer.verify_agent(agent_id, code_hash)
+        return await identity_writer.verify_agent(principal.project_id, agent_id, code_hash)
     except Exception as e:
         logger.error("api_error", endpoint="agents.verify", error=str(e))
-        raise HTTPException(status_code=502, detail="on-chain verification failed — see server logs for details")
+        raise ApiError(502, "on-chain verification failed — see server logs for details", ErrorCode.AGENT_VERIFICATION_FAILED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,6 +1095,13 @@ async def log_external_step(
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     auth.require_scope(principal, "logs:write")
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:log-step:{principal.project_id}",
+        settings.log_step_rate_limit_capacity,
+        settings.log_step_rate_limit_refill_per_second,
+        kind="log_step",
+    )
 
     request_body_bytes = body.model_dump_json().encode()
     if idempotency_key:
@@ -979,13 +1110,13 @@ async def log_external_step(
                 principal.project_id, idempotency_key, "POST", "/steps", request_body_bytes,
             )
         except idempotency.IdempotencyConflict as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise ApiError(409, str(e), ErrorCode.IDEMPOTENCY_CONFLICT)
         if cached is not None:
             return cached["body"]
 
     owned = await db.get_or_create_run_for_project(body.run_id, principal.project_id, int(time.time()))
     if not owned:
-        raise HTTPException(status_code=404, detail=f"Run '{body.run_id}' not found")
+        raise ApiError(404, f"Run '{body.run_id}' not found", ErrorCode.RUN_NOT_FOUND)
 
     step_index = await db.next_step_index(body.run_id)
     _, event = await log_step(
@@ -1016,9 +1147,9 @@ async def get_step_proof(step_id: int, principal: auth.Principal = Depends(auth.
     auth.require_scope(principal, "runs:read")
     proof = await read_model.get_step_proof(step_id, principal.project_id)
     if proof is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Step {step_id} not found, not yours, or not yet anchored in a batch",
+        raise ApiError(
+            404, f"Step {step_id} not found, not yours, or not yet anchored in a batch",
+            ErrorCode.STEP_NOT_FOUND,
         )
     return proof
 
@@ -1042,3 +1173,8 @@ async def platform_stats():
 
 app.include_router(router)
 app.include_router(router, prefix="/v1")
+# v1_only_router (defined above `router`) holds the 3 routes whose
+# Appendix-A-documented /v1 name doesn't literally match their legacy
+# unprefixed name — mounted under /v1 ONLY, since there is no
+# corresponding unprefixed legacy path to also register it under.
+app.include_router(v1_only_router, prefix="/v1")

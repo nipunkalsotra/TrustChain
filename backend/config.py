@@ -68,6 +68,44 @@ class Settings(BaseSettings):
     jwt_issuer: str = Field(default="trustchain-api")
     jwt_audience: str = Field(default="trustchain-clients")
 
+    # ── Credential-stuffing defence (plan §11.3) ─────────────────────────
+    # "optional breach check against Have I Been Pwned using the k-
+    # anonymity range API" — only the SHA-1 hash's first 5 hex chars ever
+    # leave this process (see auth_pwned.py), never the password or its
+    # full hash, so this can't leak a candidate password to the third
+    # party it's checking against. Default on, but a real toggle (not just
+    # documentation) — an air-gapped/offline deployment, or one that
+    # can't depend on a third-party API's uptime for signup to work at
+    # all, can turn it off outright rather than relying on the fail-open
+    # behavior alone.
+    check_pwned_passwords: bool = Field(default=True)
+    # A fresh httpx.AsyncClient is created per check (no persistent
+    # connection pool — signup isn't hot enough to justify one), so every
+    # call pays full DNS + TLS-handshake cost, not just the request
+    # itself. Repeatedly observed empirically: isolated, this check
+    # reliably completes in under 3s; run as part of the full ~170-test
+    # suite (many tests concurrently hammering real Postgres/Redis/Anvil
+    # for host CPU/network), it occasionally exceeded even a 5s timeout
+    # (httpx.ConnectTimeout/ReadTimeout, not an HIBP outage — reproduced
+    # the same call in isolation immediately after and it succeeded in
+    # under a second). 8s comfortably absorbs that contention without
+    # being long enough to make a genuine outage look like a hung signup.
+    pwned_passwords_timeout_seconds: float = Field(default=8.0, gt=0)
+
+    # ── Graceful shutdown (F14) ──────────────────────────────────────────
+    # On SIGTERM, main.py's lifespan waits up to this long for any
+    # in-flight POST /run-agent background pipeline task to finish
+    # naturally before force-marking it failed in Postgres (see lifespan's
+    # own docstring) — "drain in-flight work on SIGTERM; never abandon a
+    # ...transaction without recording it" (plan F14). 5s is short by
+    # design: a pipeline run can legitimately take minutes
+    # (PIPELINE_RUN_DURATION_SECONDS's histogram buckets go up to 600s),
+    # far too long to block a deploy on — this bounds the WAIT, not the
+    # run itself; anything not done in time gets a recorded, explicit
+    # "interrupted by shutdown" failure instead of hanging at
+    # status='running' forever with no explanation.
+    api_shutdown_drain_timeout_seconds: float = Field(default=5.0, gt=0)
+
     # ── LLM / search providers ──────────────────────────────────────────
     # "groq" is the only implementation today — see
     # agents/llm_provider.py's module docstring for why this is a config
@@ -151,9 +189,55 @@ class Settings(BaseSettings):
     anchor_claim_timeout_seconds: int = Field(default=120, ge=1)
     anchor_poll_interval_seconds: float = Field(default=2.0, gt=0)
     anchor_max_attempts: int = Field(default=8, ge=1)
+    # A failed submit's requeued outbox rows get next_attempt_at = now +
+    # min(backoff_base * 2^(attempts-1), backoff_max) — not an immediate
+    # retry. A transient failure (RPC hiccup, momentary insufficient
+    # funds) retried instantly just re-fails instantly too, burning
+    # attempts against ANCHOR_MAX_ATTEMPTS for no benefit; backoff gives
+    # whatever caused the failure real time to clear before trying again.
+    anchor_backoff_base_seconds: float = Field(default=5.0, gt=0)
+    anchor_backoff_max_seconds: float = Field(default=300.0, gt=0)
+    # Batches also flush when the oldest pending outbox row has been
+    # waiting this long, not just when batch_size is reached — otherwise
+    # low traffic (a trickle of steps that never fills a full batch)
+    # waits indefinitely for anchoring with no latency bound. 0 (ge=0,
+    # not gt=0 like the backoff fields above) is a deliberately valid
+    # value meaning "no accumulation delay at all, flush every poll
+    # cycle" — `now - oldest >= 0` is always true since age can never be
+    # negative, unlike a small-but-positive threshold which can still
+    # fail to trigger for a row created in the same integer-second
+    # timestamp as `now` (found while wiring this up: tests seed a step
+    # and immediately call run_once(), often under 1s later).
+    anchor_max_batch_age_seconds: float = Field(default=30.0, ge=0)
+    # A submitted anchor tx that doesn't confirm within confirm_timeout
+    # isn't necessarily reverted — it may just be underpriced for current
+    # network conditions and sitting in the mempool. Abandoning it (as a
+    # plain SubmitError would) and submitting a fresh tx at the next nonce
+    # doesn't fix that: the fresh tx queues behind the still-pending one at
+    # the earlier nonce and can never mine until that one resolves one way
+    # or the other, potentially blocking the signer indefinitely. Instead,
+    # submit_batch resubmits at the SAME nonce with a bumped fee (standard
+    # "speed up" / replace-by-fee) up to anchor_rbf_max_attempts times
+    # before finally giving up.
+    anchor_rbf_max_attempts: int = Field(default=3, ge=1)
+    anchor_rbf_fee_bump_fraction: float = Field(default=0.15, gt=0)
 
     # ── Indexer (Phase 2.2) ──────────────────────────────────────────────
     indexer_poll_interval_seconds: float = Field(default=2.0, gt=0)
+    # Finality gating: the indexer only scans up to (chain tip -
+    # finality_confirmations), never the raw tip itself. cursor.py's
+    # hash-comparison reorg detection is REACTIVE — it catches a reorg
+    # and rewinds only after already having indexed blocks that later got
+    # orphaned. This is the complementary PROACTIVE half: waiting for N
+    # confirmations before indexing a block at all means most reorgs (an
+    # Anvil/Monad single-sequencer chain reorganizing only its most recent
+    # few blocks) never get indexed in the first place, so the reactive
+    # path has less to clean up. 0 (the default) means no gating —
+    # appropriate for local Anvil dev, where there are no other nodes to
+    # reorg against; real Monad testnet deployments should set this above
+    # 0. Not `gt=0`: 0 is a real, valid "finality gating disabled" value,
+    # not a placeholder.
+    indexer_finality_confirmations: int = Field(default=0, ge=0)
 
     # ── Rate limiting (Phase 2.3) ────────────────────────────────────────
     # POST /run-agent spends both LLM credits and gas — real money — so it
@@ -163,6 +247,24 @@ class Settings(BaseSettings):
     run_agent_rate_limit_capacity: float = Field(default=5.0, gt=0)
     run_agent_rate_limit_refill_per_second: float = Field(default=5.0 / 60, gt=0)
     monthly_run_quota_per_org: int = Field(default=1000, ge=0)
+    # POST /agents (register_agent) spends real gas on every call, same
+    # as /run-agent — was completely unlimited until this field existed
+    # (found while auditing which write endpoints had NO rate limit at
+    # all despite spending money). Rarer than /run-agent in normal usage
+    # (once per agent config change, not once per pipeline run), so a
+    # smaller bucket is appropriate.
+    register_agent_rate_limit_capacity: float = Field(default=10.0, gt=0)
+    register_agent_rate_limit_refill_per_second: float = Field(default=10.0 / 60, gt=0)
+    # POST /steps (log_external_step) doesn't spend gas synchronously
+    # (steps go through the outbox + anchor worker's batching, same as
+    # the internal pipeline's own steps), but it's still unbounded
+    # Postgres write volume from an unauthenticated-cost perspective —
+    # a caller could otherwise flood the outbox/anchor-worker backlog
+    # (see AnchorOutboxBacklogGrowing, docker/prometheus/alerts.yml) for
+    # free. Generous relative to run-agent since one real agent run
+    # legitimately logs many steps.
+    log_step_rate_limit_capacity: float = Field(default=120.0, gt=0)
+    log_step_rate_limit_refill_per_second: float = Field(default=120.0 / 60, gt=0)
 
     # ── Observability (P2.6) ─────────────────────────────────────────────
     log_level: str = Field(default="INFO")

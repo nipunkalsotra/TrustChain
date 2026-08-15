@@ -43,6 +43,8 @@ async def submit_batch(
     signer,
     w3: Web3,
     confirm_timeout: int = 60,
+    rbf_max_attempts: int = 3,
+    rbf_fee_bump_fraction: float = 0.15,
 ) -> dict:
     # metaURI: optional IPFS/Arweave content-address for the batch's full
     # leaf set (AgentAuditLogV2.anchorBatch's 4th param — see its
@@ -66,44 +68,96 @@ async def submit_batch(
     # status='building' forever instead of being detached and retried.
     try:
         nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
+    except Exception as e:
+        observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="build_or_send").inc()
+        raise SubmitError(f"failed to submit batch {batch['batch_id']}: {e}") from e
+
+    async def _fee_params(previous: dict | None) -> dict:
+        # A node's mempool only accepts a same-nonce replacement if its fee
+        # is at least rbf_fee_bump_fraction higher than the ALREADY-PENDING
+        # tx's fee (go-ethereum's PriceBump rule) — bumping only the
+        # priority-fee component isn't enough to satisfy this when the base
+        # fee term dominates maxFeePerGas (e.g. base_fee=20gwei*2=40gwei vs
+        # a 1gwei priority tip: a 15% priority bump barely moves the total).
+        # So each field is bumped directly off the PREVIOUS attempt's own
+        # value, then floored against a fresh read of current network
+        # conditions — the fresh floor matters too: base fee can drift
+        # upward between attempts, and a bump that clears PriceBump but is
+        # still below the current base fee would be accepted by the
+        # mempool yet never actually get mined.
         try:
             latest = await asyncio.to_thread(w3.eth.get_block, "latest")
             base_fee = latest.get("baseFeePerGas")
         except Exception:
             base_fee = None
-
-        tx_params = {"from": signer.address, "nonce": nonce, "gas": 300_000}
         if base_fee is not None:
-            priority_fee = w3.to_wei(1, "gwei")
-            tx_params["maxPriorityFeePerGas"] = priority_fee
-            tx_params["maxFeePerGas"] = base_fee * 2 + priority_fee
+            fresh_priority_fee = w3.to_wei(1, "gwei")
+            if previous is not None:
+                bumped_priority_fee = int(previous["maxPriorityFeePerGas"] * (1.0 + rbf_fee_bump_fraction))
+                priority_fee = max(bumped_priority_fee, fresh_priority_fee)
+            else:
+                priority_fee = fresh_priority_fee
+            fresh_max_fee = base_fee * 2 + priority_fee
+            if previous is not None:
+                bumped_max_fee = int(previous["maxFeePerGas"] * (1.0 + rbf_fee_bump_fraction))
+                max_fee = max(bumped_max_fee, fresh_max_fee)
+            else:
+                max_fee = fresh_max_fee
+            return {"maxPriorityFeePerGas": priority_fee, "maxFeePerGas": max_fee}
+        fresh_gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
+        if previous is not None:
+            gas_price = max(int(previous["gasPrice"] * (1.0 + rbf_fee_bump_fraction)), fresh_gas_price)
         else:
-            tx_params["gasPrice"] = await asyncio.to_thread(lambda: w3.eth.gas_price)
+            gas_price = fresh_gas_price
+        return {"gasPrice": gas_price}
 
-        tx = fn.build_transaction(tx_params)
-        signed = signer.sign_transaction(tx)
-        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
-    except Exception as e:
-        observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="build_or_send").inc()
-        raise SubmitError(f"failed to submit batch {batch['batch_id']}: {e}") from e
-    tx_hash_hex = "0x" + tx_hash.hex()
+    receipt = None
+    tx_hash_hex = None
+    previous_fee_params = None
+    for attempt in range(1, rbf_max_attempts + 1):
+        try:
+            tx_params = {"from": signer.address, "nonce": nonce, "gas": 300_000}
+            fee_params = await _fee_params(previous_fee_params)
+            tx_params.update(fee_params)
+            previous_fee_params = fee_params
+            tx = fn.build_transaction(tx_params)
+            signed = signer.sign_transaction(tx)
+            tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
+        except Exception as e:
+            observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="build_or_send").inc()
+            raise SubmitError(f"failed to submit batch {batch['batch_id']}: {e}") from e
+        tx_hash_hex = "0x" + tx_hash.hex()
 
-    logger.info("batch_submitted", batch_id=batch["batch_id"], tx_hash=tx_hash_hex, nonce=nonce)
+        if attempt == 1:
+            logger.info("batch_submitted", batch_id=batch["batch_id"], tx_hash=tx_hash_hex, nonce=nonce)
+        else:
+            observability.ANCHOR_BATCHES_REPLACED_TOTAL.inc()
+            logger.warning(
+                "batch_submit_replaced_by_fee", batch_id=batch["batch_id"], tx_hash=tx_hash_hex,
+                nonce=nonce, attempt=attempt,
+            )
 
-    await session.execute(
-        text("""
-            UPDATE anchor_batches SET status = 'submitted', tx_hash = :tx_hash, submitted_at = :now
-            WHERE id = :batch_id
-        """),
-        {"tx_hash": tx_hash_hex, "now": _now(), "batch_id": batch["batch_id"]},
-    )
-    await session.commit()
+        await session.execute(
+            text("""
+                UPDATE anchor_batches SET status = 'submitted', tx_hash = :tx_hash, submitted_at = :now
+                WHERE id = :batch_id
+            """),
+            {"tx_hash": tx_hash_hex, "now": _now(), "batch_id": batch["batch_id"]},
+        )
+        await session.commit()
 
-    try:
-        receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, confirm_timeout)
-    except (TimeExhausted, TransactionNotFound) as e:
-        observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="timeout").inc()
-        raise SubmitError(f"tx {tx_hash_hex} not confirmed within {confirm_timeout}s: {e}") from e
+        try:
+            receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, confirm_timeout)
+            break
+        except (TimeExhausted, TransactionNotFound) as e:
+            if attempt >= rbf_max_attempts:
+                observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="timeout").inc()
+                raise SubmitError(
+                    f"tx {tx_hash_hex} not confirmed within {confirm_timeout}s after "
+                    f"{rbf_max_attempts} replace-by-fee attempts: {e}"
+                ) from e
+            # Same nonce, bumped fee, loop again — this IS the
+            # replacement, not a giveup-and-requeue.
 
     if receipt.status != 1:
         observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="revert").inc()
@@ -123,16 +177,30 @@ async def submit_batch(
     decoded = contract.events.BatchAnchored().process_receipt(receipt)
     onchain_anchor_id = decoded[0]["args"]["anchorId"] if decoded else None
 
+    # Real gas-spend attribution (see db/models.py's AnchorBatch docstring
+    # for the field-level reasoning): effectiveGasPrice is the receipt's
+    # own record of what was ACTUALLY paid per gas unit, not the
+    # maxFeePerGas ceiling this batch's tx was willing to pay — the two
+    # only coincide when the network's base fee happens to eat the whole
+    # budget, which isn't the common case. Falls back to the tx's own
+    # gasPrice for a chain/receipt that doesn't surface effectiveGasPrice
+    # (a legacy, pre-EIP-1559 chain) rather than leaving this NULL.
+    gas_price_wei = receipt.get("effectiveGasPrice")
+    if gas_price_wei is None:
+        sent_tx = await asyncio.to_thread(w3.eth.get_transaction, tx_hash)
+        gas_price_wei = sent_tx.get("gasPrice")
+
     await session.execute(
         text("""
             UPDATE anchor_batches
             SET status = 'confirmed', block_number = :block_number, confirmed_at = :now,
-                onchain_anchor_id = :onchain_anchor_id
+                onchain_anchor_id = :onchain_anchor_id, gas_used = :gas_used, gas_price_wei = :gas_price_wei
             WHERE id = :batch_id
         """),
         {
             "block_number": receipt.blockNumber, "now": _now(), "batch_id": batch["batch_id"],
             "onchain_anchor_id": onchain_anchor_id,
+            "gas_used": receipt.gasUsed, "gas_price_wei": gas_price_wei,
         },
     )
     await session.execute(

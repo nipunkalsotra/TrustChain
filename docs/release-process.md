@@ -91,29 +91,48 @@ against a local `docker compose up` stack: `bash deploy/canary_rollout_test.sh`.
 
 ## Honest limitation: no real deployment target yet
 
-`deploy.yml`'s actual deploy steps are placeholders — this repo has no
-real staging or production server/cluster configured (no cloud account,
-no kubeconfig, no SSH target). What's real: the release computation
-(verified via a real `semantic-release --dry-run` against this repo's
-actual commit history and GitHub remote — it correctly resolved the repo
-URL and reached the push-permission check, only failing on
-authentication because no real write-scoped token was used for that
-verification run), the image build/push wiring, the environment-gate
-structure, and the canary/rollback script itself (see above — that part
-runs and is tested for real, today, against this repo's own compose
-stack). The deploy steps document the real shape of the command (SSH +
-`deploy/canary_rollout.sh`, the most direct fit given this project
-already runs via `docker-compose.yml`) rather than fabricating a
-"deployed successfully" step against nothing. Once a real target exists:
+This repo has no real staging or production server/cluster configured (no
+cloud account, no kubeconfig, no SSH target) — `deploy.yml`'s `staging`
+and `production` jobs are conditional on that, not silent placeholders:
 
-1. Add `DEPLOY_SSH_KEY` / `DEPLOY_HOST` (and the production equivalents)
-   as environment secrets on the `staging`/`production` GitHub
-   Environments (not repo-wide secrets — environment secrets are only
-   readable by jobs targeting that environment).
-2. Replace each placeholder `run:` step's `echo`/`cat` block with the
-   real `ssh ... 'DEPLOY_MODE=pull bash deploy/canary_rollout.sh ...'`
-   command it's already documenting.
-3. Replace the placeholder `environment.url` values with the real
+- **If `DEPLOY_HOST`/`DEPLOY_SSH_KEY` GitHub Environment secrets exist**
+  on that job's Environment, it SSHes there for real and runs
+  `DEPLOY_MODE=pull bash deploy/canary_rollout.sh <version>` on that
+  host, exactly as documented below.
+- **Until then**, the same job runs `deploy/canary_rollout.sh` FOR REAL
+  anyway — `DEPLOY_MODE=build`, against that job's own ephemeral
+  docker-compose stack (bootstrapped the same way `test.yml`'s
+  `sdk-integration` job is: postgres/redis/anvil/mcp servers, migrations,
+  V2 contracts deployed to Anvil). This is `canary_rollout.sh` itself,
+  unmodified — not `canary_rollout_test.sh`'s stubbed `deploy_version()`
+  — genuinely deploying, baking against real `/ready` checks, and rolling
+  back automatically on a failed bake, exactly like it would against a
+  real host. Verified locally end-to-end (`bash deploy/canary_rollout.sh
+  ci-test-1.0.0` against this repo's own running stack: real startup
+  wait, six real health checks over a real 30s bake window, a real
+  `deploy/.last_known_good` write on success).
+
+What's ALSO real (and unaffected by whether a host exists): the release
+computation (verified via a real `semantic-release --dry-run` against
+this repo's actual commit history and GitHub remote — it correctly
+resolved the repo URL and reached the push-permission check, only failing
+on authentication because no real write-scoped token was used for that
+verification run), the image build/push wiring, the environment-gate
+structure, and the canary/rollback script's own control flow (see above —
+`canary_rollout_test.sh`'s synthetic bake/crash/rollback scenarios, run
+separately from the real end-to-end run described above).
+
+Once a real target exists, only two things change — the job code itself
+doesn't need touching, it already branches on these:
+
+1. Add `DEPLOY_SSH_KEY` / `DEPLOY_HOST` (and the production equivalents —
+   GitHub Environment secrets are scoped per-environment, so `staging`'s
+   and `production`'s own values of the same-named secret are already
+   kept separate) as environment secrets on the `staging`/`production`
+   GitHub Environments (not repo-wide secrets — environment secrets are
+   only readable by jobs targeting that environment). The job's `if`
+   branch picks up the real SSH path automatically the next run.
+2. Replace the placeholder `environment.url` values with the real
    staging/production URLs (they show up as clickable links on the
    deployment in GitHub's UI once real).
 

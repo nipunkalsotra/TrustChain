@@ -1,0 +1,41 @@
+# docker/loki/loki-config.yml — single-binary Loki, local filesystem
+# storage. This is a local-dev/single-host setup (matches this whole
+# compose stack's topology — see docs/adr/0011 on the single-host
+# deploy reality) — a real multi-node deployment would swap the
+# filesystem store for object storage (S3/GCS) and split reader/writer/
+# backend components, neither of which this repo's actual infra needs.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Every process in this stack logs structured JSON with a request_id/
+  # run_id per line (see backend/logging_config.py) rather than high-
+  # cardinality per-user streams, so the default low limits are more than
+  # enough locally — raised slightly so a k6 load test run (k6/load-test.js)
+  # doesn't trip rate limiting while exercising this stack.
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32

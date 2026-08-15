@@ -35,12 +35,24 @@ def make_worker_id() -> str:
     return f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
 
 
-async def handle_submit_failure(session, batch: dict, error: Exception, max_attempts: int) -> None:
+async def handle_submit_failure(
+    session, batch: dict, error: Exception, max_attempts: int,
+    backoff_base_seconds: float = 5.0, backoff_max_seconds: float = 300.0,
+) -> None:
     """A batch's on-chain submission failed permanently (revert or
     confirmation timeout) — the batch itself is abandoned (retrying an
     identical root would just revert identically), so its steps are
     detached from it and either requeued for rebatching or dead-lettered,
-    depending on how many attempts they have left."""
+    depending on how many attempts they have left.
+
+    Requeued rows get an EXPONENTIAL backoff on next_attempt_at, computed
+    per-row from that row's own `attempts` (already incremented at claim
+    time — see claim.py), not a flat `now`: an immediate retry after a
+    transient failure (RPC hiccup, momentary insufficient funds) just
+    re-fails immediately too, burning attempts against max_attempts for
+    no benefit. attempts=1 (first failure) -> wait backoff_base seconds;
+    attempts=2 -> backoff_base*2; ... capped at backoff_max_seconds so a
+    row that's failed many times doesn't wait for days."""
     now = int(datetime.now(timezone.utc).timestamp())
     logger.error("batch_submit_failed", batch_id=batch["batch_id"], error=str(error))
 
@@ -48,22 +60,30 @@ async def handle_submit_failure(session, batch: dict, error: Exception, max_atte
         text("UPDATE anchor_batches SET status = 'failed', last_error = :err WHERE id = :batch_id"),
         {"err": str(error), "batch_id": batch["batch_id"]},
     )
-    await session.execute(
+    dead_lettered = await session.execute(
         text("""
             UPDATE anchor_outbox
             SET status = 'dead_letter', last_error = :err, batch_id = NULL
             WHERE batch_id = :batch_id AND attempts >= :max_attempts
+            RETURNING id
         """),
         {"err": str(error), "batch_id": batch["batch_id"], "max_attempts": max_attempts},
     )
+    dead_lettered_count = len(dead_lettered.fetchall())
+    if dead_lettered_count:
+        observability.ANCHOR_OUTBOX_DEAD_LETTERED_TOTAL.labels(source="submit_failure").inc(dead_lettered_count)
     await session.execute(
         text("""
             UPDATE anchor_outbox
             SET status = 'pending', batch_id = NULL, claimed_by = NULL, claimed_at = NULL,
-                next_attempt_at = :now, last_error = :err
+                next_attempt_at = :now + FLOOR(LEAST(:backoff_base * POWER(2, GREATEST(attempts, 1) - 1), :backoff_max))::bigint,
+                last_error = :err
             WHERE batch_id = :batch_id AND attempts < :max_attempts
         """),
-        {"now": now, "err": str(error), "batch_id": batch["batch_id"], "max_attempts": max_attempts},
+        {
+            "now": now, "err": str(error), "batch_id": batch["batch_id"], "max_attempts": max_attempts,
+            "backoff_base": backoff_base_seconds, "backoff_max": backoff_max_seconds,
+        },
     )
     await session.execute(
         text("UPDATE steps SET anchor_batch_id = NULL WHERE anchor_batch_id = :batch_id"),
@@ -87,11 +107,24 @@ async def run_once(worker_id: str, settings) -> int:
         logger.info("reaper_ran", reset=len(reaped["reset"]), dead_lettered=len(reaped["dead_lettered"]))
 
     async with session_factory() as session:
-        pending_count = (
-            await session.execute(text("SELECT COUNT(*) FROM anchor_outbox WHERE status = 'pending'"))
-        ).scalar_one()
+        pending_stats = (
+            await session.execute(text(
+                "SELECT COUNT(*) AS cnt, MIN(created_at) AS oldest FROM anchor_outbox WHERE status = 'pending'"
+            ))
+        ).first()
+    pending_count = pending_stats.cnt
     observability.ANCHOR_OUTBOX_PENDING.set(pending_count)
 
+    # Wallet balance / RPC circuit-breaker telemetry is sampled every
+    # poll cycle unconditionally — an operator needs both regardless of
+    # whether there happens to be anchoring work to do this round (a
+    # wallet running dry, or an RPC endpoint degrading, matters even
+    # during a quiet period). Moving this below the flush-or-defer check
+    # below would silently stop updating these during any cycle that
+    # defers — found by this change's own test suite, which caught
+    # test_run_once_samples_real_wallet_balance regressing to a stale
+    # value once the (originally unconditional) sampling briefly moved
+    # after an early return.
     try:
         balance = await asyncio.to_thread(w3.eth.get_balance, signer.address)
         observability.ANCHOR_WALLET_BALANCE_WEI.set(balance)
@@ -100,6 +133,31 @@ async def run_once(worker_id: str, settings) -> int:
 
     for endpoint, state in sample_breaker_states(w3).items():
         observability.RPC_CIRCUIT_BREAKER_OPEN.labels(endpoint=endpoint).set(1 if state == "open" else 0)
+
+    if pending_count == 0:
+        return 0
+
+    # Flush now if there's a full batch's worth pending OR the oldest
+    # pending row has been waiting past anchor_max_batch_age_seconds —
+    # otherwise hold and let more accumulate. Without an age bound, low
+    # traffic (a trickle that never reaches anchor_max_batch_size) would
+    # wait indefinitely for a batch that never fills; without a size
+    # cap, one poll cycle could try to cram an unbounded number of
+    # leaves into a single transaction. Every step still gets its own
+    # accurate created_at-based age check next poll if it's not flushed
+    # this round — nothing is lost, just deferred.
+    now = int(datetime.now(timezone.utc).timestamp())
+    oldest_age_seconds = now - pending_stats.oldest
+    should_flush = (
+        pending_count >= settings.anchor_max_batch_size
+        or oldest_age_seconds >= settings.anchor_max_batch_age_seconds
+    )
+    if not should_flush:
+        logger.info(
+            "batch_age_flush_deferred", pending_count=pending_count,
+            oldest_age_seconds=oldest_age_seconds, max_batch_age_seconds=settings.anchor_max_batch_age_seconds,
+        )
+        return 0
 
     async with session_factory() as session:
         claimed = await claim_batch(session, worker_id, settings.anchor_max_batch_size)
@@ -110,20 +168,35 @@ async def run_once(worker_id: str, settings) -> int:
     async with session_factory() as session:
         batches = await build_batches(session, claimed)
 
+    tracer = observability.get_tracer(__name__)
     anchored = 0
     for batch in batches:
         async with session_factory() as session:
-            try:
-                result = await submit_batch(session, batch, contract, signer, w3)
-                logger.info(
-                    "batch_confirmed",
-                    batch_id=batch["batch_id"],
-                    tx_hash=result["tx_hash"],
-                    block=result["block_number"],
-                )
-                anchored += batch["step_count"]
-            except SubmitError as e:
-                await handle_submit_failure(session, batch, e, settings.anchor_max_attempts)
+            with tracer.start_as_current_span("anchor_batch_submit") as span:
+                span.set_attribute("batch_id", batch["batch_id"])
+                span.set_attribute("run_id", batch["run_id"])
+                span.set_attribute("step_count", batch["step_count"])
+                try:
+                    result = await submit_batch(
+                        session, batch, contract, signer, w3,
+                        rbf_max_attempts=settings.anchor_rbf_max_attempts,
+                        rbf_fee_bump_fraction=settings.anchor_rbf_fee_bump_fraction,
+                    )
+                    span.set_attribute("tx_hash", result["tx_hash"])
+                    span.set_attribute("block_number", result["block_number"])
+                    logger.info(
+                        "batch_confirmed",
+                        batch_id=batch["batch_id"],
+                        tx_hash=result["tx_hash"],
+                        block=result["block_number"],
+                    )
+                    anchored += batch["step_count"]
+                except SubmitError as e:
+                    span.set_attribute("error", str(e))
+                    await handle_submit_failure(
+                        session, batch, e, settings.anchor_max_attempts,
+                        settings.anchor_backoff_base_seconds, settings.anchor_backoff_max_seconds,
+                    )
 
     return anchored
 
@@ -134,6 +207,13 @@ async def main() -> None:
     logger.info("anchor_worker_starting", worker_id=worker_id)
     observability.start_metrics_server(settings.anchor_worker_metrics_port)
     observability.init_sentry(settings.sentry_dsn, settings.environment, settings.sentry_traces_sample_rate)
+    # A distinct service name from the API's own ("trustchain-api", see
+    # config.py's otel_service_name default) — not settings.otel_service_name,
+    # which is the API-process-specific field. Without this, every batch
+    # submit span would show up under "trustchain-api" in Jaeger/whatever
+    # OTLP backend is configured, indistinguishable from the process that
+    # actually served the HTTP request that queued the work.
+    observability.init_tracing("trustchain-anchor-worker", settings.otel_exporter_otlp_endpoint)
 
     # F14 (Phase 2 plan's fix list): drain in-flight work on SIGTERM,
     # never abandon a submitted-but-unconfirmed transaction without

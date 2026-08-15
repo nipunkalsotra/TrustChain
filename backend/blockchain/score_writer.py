@@ -17,6 +17,7 @@ docstring.
 import asyncio
 
 from anchor_worker.chain import get_signer, get_trust_score_contract, get_w3
+from blockchain.gas import build_fee_params
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -34,8 +35,9 @@ async def write_score(agent_id: str, run_id: str, score: int, reason: str) -> st
 
     fn = contract.functions.updateScore(agent_id, run_id, score, reason)
     nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
-    tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": 400_000, "gasPrice": gas_price})
+    tx_params = {"from": signer.address, "nonce": nonce, "gas": 400_000}
+    tx_params.update(await build_fee_params(w3))
+    tx = fn.build_transaction(tx_params)
     signed = signer.sign_transaction(tx)
     tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 

@@ -30,7 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from db import tenancy
-from db.engine import get_sessionmaker
+from db.engine import get_sessionmaker, rls_bypass
 from db.models import Run, Step, User
 
 _PBKDF2_ITERATIONS = 260_000
@@ -186,6 +186,46 @@ async def complete_run(run_id: str, result: dict, completed_at: int) -> None:
 
 async def fail_run(run_id: str, message: str, completed_at: int) -> None:
     await _set_run_status(run_id, "error", {"message": message}, completed_at)
+
+
+async def fail_run_if_still_running(run_id: str, message: str, completed_at: int) -> bool:
+    """Same terminal-state write as fail_run(), but guarded by `WHERE
+    status = 'running'` and reporting whether it actually changed
+    anything — used by main.py's shutdown drain (F14) to mark an
+    abandoned in-flight run as failed WITHOUT a chance of clobbering a run
+    that raced to a real completion in the same narrow window (the
+    cancelled task's own finally-block could theoretically still be
+    writing complete_run()/fail_run() concurrently with shutdown calling
+    this). fail_run()/complete_run() themselves stay blind UPDATEs — every
+    other caller already owns the only write to a given run's terminal
+    status, so the extra guard would be pure overhead there.
+
+    Wrapped in rls_bypass(): called from main.py's lifespan shutdown, not
+    from inside a request, so there is no Principal-derived
+    current_project_id ContextVar set for this write's session to pick
+    up — under the api service's RLS-bound `trustchain_api` role (see
+    alembic/versions/9f3a1c7d5e2b), that meant this UPDATE silently
+    matched zero rows every time (RLS policies fail closed, not an
+    error) rather than actually recording the abandoned run, found by
+    testing a real SIGTERM against a real running container rather than
+    only against pytest's superuser-role test database, which bypasses
+    RLS unconditionally and so never exercised this path. Justified the
+    same way read_model.get_platform_stats' cross-tenant read is: a
+    genuinely tenant-agnostic, server-initiated operation, not a gap in
+    per-tenant isolation for real request traffic."""
+    from sqlalchemy import update
+
+    session_factory = get_sessionmaker()
+    with rls_bypass():
+        async with session_factory() as session:
+            stmt = (
+                update(Run)
+                .where(Run.run_id == run_id, Run.status == "running")
+                .values(status="error", result_json=json.dumps({"message": message}), completed_at=completed_at)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
 
 
 async def get_run(run_id: str, project_id: int) -> Optional[dict]:
