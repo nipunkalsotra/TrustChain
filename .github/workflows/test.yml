@@ -592,33 +592,36 @@ jobs:
         # /agents/{agent_id}/verify — a different, V2-only endpoint that
         # doesn't touch V1's bridge at all.
         #
-        # --suppress-health-check too_slow,filter_too_much: most of this
-        # API's 47 tested operations require auth Schemathesis is never
-        # given (deliberately — see above, unauthenticated fuzzing is the
-        # actual point), so its Stateful phase — which tries to chain
-        # operations via inferred OpenAPI links — ends up discarding most
-        # candidate link sequences as unusable. That's already surfaced,
-        # correctly, as the non-fatal "Missing authentication"/"Schema
-        # validation mismatch" WARNINGS below; the underlying Hypothesis
-        # engine ALSO separately raises a hard FailedHealthCheck for the
-        # exact same condition, and which specific check trips
-        # (HealthCheck.too_slow vs HealthCheck.filter_too_much) varies by
-        # random seed — reproduced locally as both, back to back, using
-        # two different seeds against this same running API with zero
-        # code changes in between. A real CI run failed on
-        # HealthCheck.too_slow specifically (exit code 1, 1769/1769
-        # generated cases still passed) even though the actual
-        # correctness check (not_a_server_error) never failed once —
-        # gating the build on Hypothesis's own generation-efficiency
-        # meta-check, for a condition already reported informationally,
-        # isn't a real regression signal for an unattended CI gate.
+        # --suppress-health-check all: most of this API's 47 tested
+        # operations require auth Schemathesis is never given (deliberately
+        # — see above, unauthenticated fuzzing is the actual point), so
+        # candidate generated/chained inputs get discarded as unusable far
+        # more often than Hypothesis expects for a "normal" test. That's
+        # already surfaced correctly as the non-fatal "Missing
+        # authentication"/"Schema validation mismatch" WARNINGS below; the
+        # underlying Hypothesis engine ALSO separately raises a hard
+        # FailedHealthCheck for the exact same condition — and WHICH
+        # specific check trips (HealthCheck.too_slow vs
+        # HealthCheck.filter_too_much) AND in which phase (Stateful vs
+        # Fuzzing) varies by random seed and by CI runner load, not by
+        # anything this workflow controls. First suppressing only
+        # too_slow,filter_too_much (after reproducing both locally) still
+        # left a real CI run failing minutes later — same error class,
+        # different specific check, different phase (Fuzzing this time),
+        # 1870/1870 generated cases still passing regardless. Individually
+        # allow-listing which Hypothesis health check is "the" flaky one
+        # doesn't converge; `all` is the correct fix for a scenario
+        # Hypothesis's own docs describe exactly this way (a schema whose
+        # real-world filtering rate is inherently high, not a test bug) —
+        # not_a_server_error, the check that actually verifies API
+        # correctness, is completely unaffected by this flag.
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" schemathesis==4.24.3
           schemathesis run http://localhost:8000/openapi.json \
             --max-examples=5 --request-timeout=15 \
             --exclude-path-regex 'run-agent|stream|^/(v1/)?verify(-audit|/tamper-demo)?$|^/health$' \
             --checks not_a_server_error \
-            --suppress-health-check too_slow,filter_too_much
+            --suppress-health-check all
       - name: Trivy (container image vulnerability scan, non-blocking)
         # Scans the actual images this compose stack just built and ran
         # against, not a hypothetical Dockerfile lint. Non-blocking:
