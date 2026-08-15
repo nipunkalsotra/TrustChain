@@ -532,7 +532,7 @@ jobs:
           /tmp/sdk-wheel-install/bin/python -c "import trustchain_sdk; print('trustchain_sdk imported OK from', trustchain_sdk.__file__)"
         working-directory: sdk/python
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trustchain-sdk-python-wheel
           path: sdk/python/dist/*.whl
@@ -562,7 +562,7 @@ jobs:
           node -e "import('trustchain-sdk').then(m => { if (!m.TrustChain) throw new Error('TrustChain export missing from packed tarball'); console.log('trustchain-sdk imported OK, TrustChain export present'); })"
         working-directory: sdk/typescript
       - name: Upload TypeScript SDK tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trustchain-sdk-typescript-tarball
           path: sdk/typescript/trustchain-sdk-*.tgz
@@ -681,7 +681,7 @@ jobs:
         # favor of this).
         run: cosign sign-blob --yes --bundle sbom-api.cyclonedx.json.bundle sbom-api.cyclonedx.json
       - name: Upload SBOM + signature bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-api
           path: |
