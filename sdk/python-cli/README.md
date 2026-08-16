@@ -61,9 +61,10 @@ trustchain runs get <run-id>
 # doesn't trust the API's own word for it beyond leaf/proof/root values
 trustchain verify <run-id>
 
-# Agents — real on-chain reads/writes against AgentIdentityRegistryV2
-trustchain agents register <agent-id> --model M --version V --system-prompt "..."
-trustchain agents verify <agent-id> --model M --version V --system-prompt "..."
+# Agents
+trustchain agents list [--include-revoked]   # read model (Postgres, kept in sync by the indexer), not a live chain call
+trustchain agents register <agent-id> --model M --version V --system-prompt "..."   # real on-chain write, AgentIdentityRegistryV2
+trustchain agents verify <agent-id> --model M --version V --system-prompt "..."     # real on-chain read, AgentIdentityRegistryV2
 
 # Local dev stack (wraps docker compose; finds docker-compose.yml by
 # searching upward from cwd, same as how git finds .git)

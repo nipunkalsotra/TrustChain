@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Union
 
-from web3 import HTTPProvider, Web3
+from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from blockchain.resilient_provider import FallbackHTTPProvider
@@ -42,15 +42,34 @@ def load_addresses() -> dict:
         return json.load(f)
 
 
-def build_w3(rpc_url: Union[str, list[str]]) -> Web3:
-    """A single URL builds a plain HTTPProvider — unchanged behavior for
-    every existing caller. A list builds a FallbackHTTPProvider (see
-    blockchain/resilient_provider.py): endpoints after the first are only
-    ever used if an earlier one's circuit breaker trips, so a
-    single-element list is likewise indistinguishable from today's
-    single-URL behavior."""
+def build_w3(
+    rpc_url: Union[str, list[str]],
+    call_timeout_seconds: float = 10.0,
+    retry_max_attempts: int = 3,
+    retry_base_delay_seconds: float = 0.25,
+    retry_max_delay_seconds: float = 2.0,
+) -> Web3:
+    """Always builds a FallbackHTTPProvider (see blockchain/
+    resilient_provider.py), even for a single URL: endpoints after the
+    first are only ever used if an earlier one's circuit breaker trips, so
+    a single-element list behaves the same as a bare HTTPProvider always
+    did EXCEPT for the retry-with-jitter + explicit per-call timeout (F13)
+    FallbackHTTPProvider now also provides — which single-endpoint configs
+    (no *_RPC_FALLBACK_URLS set, still this codebase's default) need too,
+    not just multi-endpoint ones. The four keyword args default to the
+    same values config.py's Settings fields do; callers that already
+    resolve their own settings (this module deliberately doesn't call
+    get_settings() itself — see the module docstring) should pass those
+    through explicitly rather than relying on the defaults staying in
+    sync."""
     urls = [rpc_url] if isinstance(rpc_url, str) else list(rpc_url)
-    provider = HTTPProvider(urls[0]) if len(urls) == 1 else FallbackHTTPProvider(urls)
+    provider = FallbackHTTPProvider(
+        urls,
+        request_kwargs={"timeout": call_timeout_seconds},
+        retry_max_attempts=retry_max_attempts,
+        retry_base_delay_seconds=retry_base_delay_seconds,
+        retry_max_delay_seconds=retry_max_delay_seconds,
+    )
     w3 = Web3(provider)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     if not w3.is_connected():

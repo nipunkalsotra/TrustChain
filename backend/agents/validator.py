@@ -13,7 +13,8 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.base import AgentState, get_llm, log_step
+import observability
+from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
     research   = state["research"]
     run_id     = state["run_id"]
     llm        = get_llm()
+    tracer     = observability.get_tracer(__name__)
 
     # Resolve fact_check from injected MCP tools
     fact_check_tool = None
@@ -61,14 +63,18 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
 
     # ── Step 1: extract claims ────────────────────────────────────────────
     logger.info("[Validator] Extracting claims...")
-    claims_response = await llm.ainvoke([
-        SystemMessage(content=(
-            "Extract exactly 2 key factual claims from the research that can be independently "
-            "verified via web search. Return only the 2 claims as a numbered list, nothing else."
-        )),
-        HumanMessage(content=research),
-    ])
+    with tracer.start_as_current_span("llm_call.extract_claims") as span:
+        span.set_attribute("agent_id", "validator")
+        span.set_attribute("run_id", run_id)
+        claims_response = await llm.ainvoke([
+            SystemMessage(content=(
+                "Extract exactly 2 key factual claims from the research that can be independently "
+                "verified via web search. Return only the 2 claims as a numbered list, nothing else."
+            )),
+            HumanMessage(content=research),
+        ])
     claims_text = claims_response.content
+    tokens_used = track_token_usage(state.get("tokens_used", 0), claims_response, run_id)
 
     # ── Step 2: fact-check via MCP ────────────────────────────────────────
     logger.info("[Validator] Fact-checking via MCP fact_check tool...")
@@ -76,10 +82,12 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
     try:
         # Use the first extracted claim as the primary claim to check
         primary_claim = claims_text.split("\n")[0].lstrip("1. ").strip()
-        result = await fact_check_tool.ainvoke({
-            "claim":   primary_claim,
-            "context": task,
-        })
+        with tracer.start_as_current_span("mcp_tool_call.fact_check") as span:
+            span.set_attribute("run_id", run_id)
+            result = await fact_check_tool.ainvoke({
+                "claim":   primary_claim,
+                "context": task,
+            })
         # MCP tool returns: { claim, verdict, confidence, evidence, summary }
         verdict    = result.get("verdict", "unverified")
         confidence = result.get("confidence", 0.5)
@@ -120,21 +128,25 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
         else "Fact-check search unavailable — validation based on research quality only."
     )
 
-    val_response = await llm.ainvoke([
-        SystemMessage(content=(
-            "You are the Validator agent in TrustChain. "
-            "Compare the original research against fact-check results. "
-            "Identify: (1) CONFIRMED claims, (2) UNCERTAIN claims, (3) ERRORS or hallucinations.\n\n"
-            "End with a single line:\n"
-            "VERDICT: PASS | PARTIAL | FAIL — <one sentence reason>"
-        )),
-        HumanMessage(content=(
-            f"Original research:\n{research}\n\n"
-            f"Fact-check results:\n{fact_context}\n\n"
-            "Validation report:"
-        )),
-    ])
+    with tracer.start_as_current_span("llm_call.validation_report") as span:
+        span.set_attribute("agent_id", "validator")
+        span.set_attribute("run_id", run_id)
+        val_response = await llm.ainvoke([
+            SystemMessage(content=(
+                "You are the Validator agent in TrustChain. "
+                "Compare the original research against fact-check results. "
+                "Identify: (1) CONFIRMED claims, (2) UNCERTAIN claims, (3) ERRORS or hallucinations.\n\n"
+                "End with a single line:\n"
+                "VERDICT: PASS | PARTIAL | FAIL — <one sentence reason>"
+            )),
+            HumanMessage(content=(
+                f"Original research:\n{research}\n\n"
+                f"Fact-check results:\n{fact_context}\n\n"
+                "Validation report:"
+            )),
+        ])
     validation_output = val_response.content
+    tokens_used = track_token_usage(tokens_used, val_response, run_id)
 
     tx, evt = await log_step(
         bridge=bridge,
@@ -156,5 +168,6 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
         "validation": validation_output,
         "tx_hashes":  tx_hashes,
         "sse_events": sse_events,
+        "tokens_used": tokens_used,
         "messages":   [HumanMessage(content=validation_output, name="validator")],
     }

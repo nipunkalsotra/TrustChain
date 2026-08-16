@@ -162,6 +162,25 @@ def test_runs_get_unknown_run_exits_nonzero(capsys):
     assert "error" in capsys.readouterr().err
 
 
+# ── agents ──────────────────────────────────────────────────────────────
+
+def test_agents_list(capsys):
+    # Read-model only (db/read_model.py::list_agents) — no Anvil needed,
+    # unlike register/verify below which do a real on-chain call. This
+    # stack's own DB persists real accumulated state across manual/CLI/k6
+    # testing sessions (unlike backend/tests/, which gets a clean or
+    # self-provisioned DB every run — see backend/tests/conftest.py), so
+    # this only checks response SHAPE, not emptiness/count — see
+    # test_agents_list_is_isolated_between_tenants below for the real
+    # isolation check, done via two freshly-registered, uniquely-named
+    # agents instead of assuming a clean starting state.
+    key = _fresh_api_key(["agents:read"])
+    _run(["--api-key", key, "agents", "list"])
+    body = capsys.readouterr().out
+    assert '"agents"' in body
+    assert '"total"' in body
+
+
 # ── agents — real on-chain ────────────────────────────────────────────────
 
 @requires_anvil
@@ -182,6 +201,63 @@ def test_agents_register_then_verify(capsys):
     ])
     verify_out = capsys.readouterr().out
     assert '"verified": true' in verify_out
+
+
+@requires_anvil
+def test_agents_list_is_isolated_between_tenants(capsys):
+    # Real registrations under two DIFFERENT projects (not an assumption
+    # about starting from an empty DB — this stack's own Postgres
+    # accumulates real state across manual/CLI/k6 sessions, see
+    # test_agents_list's comment) — proves invariant I7 (no tenant sees
+    # another tenant's agents, docs/architecture.md) against THIS SDK
+    # surface specifically, using agent_ids unique enough that a false
+    # match against pre-existing data is not a realistic concern.
+    key_a = _fresh_api_key(["agents:register", "agents:read"])
+    key_b = _fresh_api_key(["agents:register", "agents:read"])
+    agent_a = f"cli_isolation_test_a_{uuid.uuid4().hex[:8]}"
+    agent_b = f"cli_isolation_test_b_{uuid.uuid4().hex[:8]}"
+
+    _run([
+        "--api-key", key_a, "agents", "register", agent_a,
+        "--model", "gpt-4o", "--version", "1", "--system-prompt", "a",
+    ])
+    capsys.readouterr()
+    _run([
+        "--api-key", key_b, "agents", "register", agent_b,
+        "--model", "gpt-4o", "--version", "1", "--system-prompt", "b",
+    ])
+    capsys.readouterr()
+
+    import json
+
+    def _agent_ids(key: str) -> set:
+        _run(["--api-key", key, "agents", "list"])
+        return {a["agentId"] for a in json.loads(capsys.readouterr().out)["agents"]}
+
+    # The `agents` read model is populated by the indexer polling
+    # on-chain events asynchronously (db/read_model.py::list_agents'
+    # own docstring: "up to one indexer poll cycle behind") — a
+    # freshly-registered agent isn't guaranteed to show up the instant
+    # the register call returns, so poll with a real timeout rather than
+    # asserting immediately.
+    deadline = time.monotonic() + 15
+    ids_a: set = set()
+    while time.monotonic() < deadline:
+        ids_a = _agent_ids(key_a)
+        if agent_a in ids_a:
+            break
+        time.sleep(0.5)
+    ids_b: set = set()
+    while time.monotonic() < deadline:
+        ids_b = _agent_ids(key_b)
+        if agent_b in ids_b:
+            break
+        time.sleep(0.5)
+
+    assert agent_a in ids_a
+    assert agent_b not in ids_a
+    assert agent_b in ids_b
+    assert agent_a not in ids_b
 
 
 @requires_anvil

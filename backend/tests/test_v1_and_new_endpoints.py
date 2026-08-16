@@ -172,6 +172,103 @@ def test_register_agent_then_verify_matches(client, chain_settings):
 
 
 @requires_anvil
+def test_list_agents_reflects_indexed_registrations_and_revocations(client, chain_settings):
+    """GET /agents (db/read_model.py::list_agents over db/models.py's
+    Agent table) is read-model-backed, not a live chain call — needs the
+    indexer to actually run before a fresh registration shows up, unlike
+    GET /agents/{id}/verify. Also checks that revoked agents are excluded
+    by default.
+
+    Asserts CONTAINS, not exact totals/emptiness: Anvil's chain state is
+    real and persists for this whole pytest session, while Postgres
+    (and its project_id autoincrement sequence) resets per test — a
+    fresh indexer run_once() here re-scans the ENTIRE event history
+    since genesis (indexer_cursor was just truncated too), which can
+    re-associate an EARLIER test's already-registered agent_id with
+    THIS test's freshly-reused project_id number. That's a real property
+    of running these tests against a non-resettable chain + a
+    resettable database, not a production bug (real project_id values
+    are never reused there) — so this test checks its own agent_ids
+    show up correctly rather than asserting the list is exactly them."""
+    from indexer.main import run_once as indexer_run_once
+
+    user = seed_user_and_token(f"list_agents_{uuid.uuid4().hex[:8]}@example.com", "ListAgentsTest")
+    headers = _auth_headers(user["token"])
+
+    agent_a = _unique_agent_id()
+    agent_b = _unique_agent_id()
+    for agent_id in (agent_a, agent_b):
+        config = {"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"}
+        r = client.post(
+            "/agents",
+            json={"agent_id": agent_id, "code_hash": _code_hash_for(config), "model": "gpt-4o", "version": "2026-01"},
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+
+    run(indexer_run_once())
+
+    listed = client.get("/agents", headers=headers)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    agent_ids = {a["agentId"] for a in body["agents"]}
+    assert {agent_a, agent_b} <= agent_ids
+    entry = next(a for a in body["agents"] if a["agentId"] == agent_a)
+    assert entry["model"] == "gpt-4o"
+    assert entry["version"] == "2026-01"
+    assert entry["isActive"] is True
+
+    revoke = client.delete(f"/agents/{agent_a}", headers=headers)
+    if revoke.status_code == 404:
+        # DELETE /agents/{id} isn't wired to a route yet (see
+        # identity_writer.py's docstring) — revoke via the writer
+        # function directly so this test still covers the read side.
+        from blockchain import identity_writer
+        run(identity_writer.revoke_agent(user["projectId"], agent_a))
+    else:
+        assert revoke.status_code == 200, revoke.text
+
+    run(indexer_run_once())
+
+    after_revoke = client.get("/agents", headers=headers).json()
+    active_ids = {a["agentId"] for a in after_revoke["agents"]}
+    assert agent_a not in active_ids
+    assert agent_b in active_ids
+
+    with_revoked = client.get("/agents", params={"include_revoked": "true"}, headers=headers).json()
+    revoked_entry = next(a for a in with_revoked["agents"] if a["agentId"] == agent_a)
+    assert revoked_entry["isActive"] is False
+
+
+@requires_anvil
+def test_list_agents_is_isolated_between_tenants(client, chain_settings):
+    """Bob must never see Alice's specific agent_id — checked as
+    non-membership, not list emptiness/exact-count, for the same
+    cross-test chain-history-reindexing reason explained in
+    test_list_agents_reflects_indexed_registrations_and_revocations."""
+    alice = seed_user_and_token(f"alice_list_agents_{uuid.uuid4().hex[:8]}@example.com", "Alice")
+    bob = seed_user_and_token(f"bob_list_agents_{uuid.uuid4().hex[:8]}@example.com", "Bob")
+
+    agent_id = _unique_agent_id()
+    config = {"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"}
+    r = client.post(
+        "/agents",
+        json={"agent_id": agent_id, "code_hash": _code_hash_for(config), "model": "gpt-4o", "version": "2026-01"},
+        headers=_auth_headers(alice["token"]),
+    )
+    assert r.status_code == 200, r.text
+
+    from indexer.main import run_once as indexer_run_once
+    run(indexer_run_once())
+
+    alice_list = client.get("/agents", headers=_auth_headers(alice["token"])).json()
+    assert agent_id in {a["agentId"] for a in alice_list["agents"]}
+
+    bob_list = client.get("/agents", headers=_auth_headers(bob["token"])).json()
+    assert agent_id not in {a["agentId"] for a in bob_list["agents"]}
+
+
+@requires_anvil
 def test_two_tenants_registering_the_same_agent_id_do_not_collide(client, chain_settings):
     """Real, end-to-end proof of AgentIdentityRegistryV2's project
     namespacing (contracts/src/v2/AgentIdentityRegistryV2.sol's docstring)
@@ -311,6 +408,14 @@ def test_log_external_step_then_fetch_verified_proof(client, chain_settings):
         assert proof["runId"] == run_id
         assert proof["anchorStatus"] == "confirmed"
         assert proof["txHash"].startswith("0x")
+        # block_hash column (F-item polish): real reorg-detection data,
+        # not just a placeholder — confirm it matches what the real chain
+        # actually has recorded at that block number.
+        assert proof["blockHash"].startswith("0x")
+        assert len(proof["blockHash"]) == 66  # 0x + 32 bytes
+        real_block = chain_module.get_w3().eth.get_block(proof["blockNumber"])
+        real_block_hash = "0x" + real_block["hash"].hex().removeprefix("0x")
+        assert proof["blockHash"] == real_block_hash
 
         # The actual point of a Merkle proof: it must verify against the
         # REAL on-chain contract, not just against our own re-derivation
@@ -358,7 +463,11 @@ def test_gas_spend_reflects_real_confirmed_batch_cost(client, chain_settings):
 
     zero = client.get("/gas-spend", headers=headers)
     assert zero.status_code == 200, zero.text
-    assert zero.json() == {"confirmedBatchCount": 0, "totalGasSpentWei": "0"}
+    assert zero.json() == {
+        "confirmedBatchCount": 0, "totalGasSpentWei": "0",
+        "orgGasBudget": {"gasBudgetWei": None, "gasSpentWei": 0, "breached": False},
+        "orgTokenBudget": {"tokenBudget": None, "tokensSpent": 0, "breached": False},
+    }
 
     r = client.post(
         "/steps",
@@ -394,7 +503,11 @@ def test_gas_spend_reflects_real_confirmed_batch_cost(client, chain_settings):
     other_user = seed_user_and_token(f"gas_spend_other_{uuid.uuid4().hex[:8]}@example.com", "Other")
     other = client.get("/gas-spend", headers=_auth_headers(other_user["token"]))
     assert other.status_code == 200, other.text
-    assert other.json() == {"confirmedBatchCount": 0, "totalGasSpentWei": "0"}
+    assert other.json() == {
+        "confirmedBatchCount": 0, "totalGasSpentWei": "0",
+        "orgGasBudget": {"gasBudgetWei": None, "gasSpentWei": 0, "breached": False},
+        "orgTokenBudget": {"tokenBudget": None, "tokensSpent": 0, "breached": False},
+    }
 
 
 def test_log_external_step_is_idempotent(client):

@@ -318,3 +318,26 @@ async def ping() -> None:
     async with session_factory() as session:
         from sqlalchemy import text
         await session.execute(text("SELECT 1"))
+
+
+async def get_applied_migration_version() -> Optional[str]:
+    """The `alembic_version` table's current value (F15, GET /ready) —
+    None if that table doesn't exist at all, which is a real, expected
+    state distinct from a genuine version mismatch: tests/conftest.py's
+    `_schema` fixture and any dev DB stood up before its first
+    `alembic upgrade head` build the schema straight from the ORM models
+    (create_all_tables()), which never creates `alembic_version` — a real
+    deployment always runs migrations before starting the app (see
+    docs/release-process.md), so this table missing there would itself be
+    the anomaly, not the normal case main.py's /ready needs to tolerate."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        from sqlalchemy import text
+        from sqlalchemy.exc import ProgrammingError
+
+        try:
+            result = await session.execute(text("SELECT version_num FROM alembic_version"))
+            return result.scalar_one_or_none()
+        except ProgrammingError:
+            await session.rollback()
+            return None

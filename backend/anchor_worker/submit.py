@@ -22,6 +22,7 @@ from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
 import observability
+from blockchain.gas import estimate_gas_with_margin
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -85,13 +86,21 @@ async def submit_batch(
         # upward between attempts, and a bump that clears PriceBump but is
         # still below the current base fee would be accepted by the
         # mempool yet never actually get mined.
+        # F8: fresh network conditions come from real eth_feeHistory (same
+        # source blockchain/gas.py's build_fee_params uses for every other
+        # write path) rather than a single latest-block read — the LAST
+        # entry in fee_history's baseFeePerGas array is the chain's own
+        # projection for the NEXT block, and the reward column gives a
+        # real recent-priority-fee sample instead of a fixed 1 gwei guess.
         try:
-            latest = await asyncio.to_thread(w3.eth.get_block, "latest")
-            base_fee = latest.get("baseFeePerGas")
+            history = await asyncio.to_thread(w3.eth.fee_history, 10, "latest", [50])
+            base_fee = history["baseFeePerGas"][-1]
         except Exception:
             base_fee = None
+            history = None
         if base_fee is not None:
-            fresh_priority_fee = w3.to_wei(1, "gwei")
+            rewards = sorted(r[0] for r in history["reward"] if r[0] > 0)
+            fresh_priority_fee = max(rewards[len(rewards) // 2], w3.to_wei(1, "gwei")) if rewards else w3.to_wei(1, "gwei")
             if previous is not None:
                 bumped_priority_fee = int(previous["maxPriorityFeePerGas"] * (1.0 + rbf_fee_bump_fraction))
                 priority_fee = max(bumped_priority_fee, fresh_priority_fee)
@@ -111,12 +120,18 @@ async def submit_batch(
             gas_price = fresh_gas_price
         return {"gasPrice": gas_price}
 
+    # Estimated once, not per RBF attempt: the call data (and so its gas
+    # cost) is identical across replace-by-fee retries of the SAME
+    # batch — only the fee params change — so re-estimating on every
+    # attempt would just be extra RPC round trips for the same answer.
+    gas = await estimate_gas_with_margin(fn, signer.address, fallback=300_000)
+
     receipt = None
     tx_hash_hex = None
     previous_fee_params = None
     for attempt in range(1, rbf_max_attempts + 1):
         try:
-            tx_params = {"from": signer.address, "nonce": nonce, "gas": 300_000}
+            tx_params = {"from": signer.address, "nonce": nonce, "gas": gas}
             fee_params = await _fee_params(previous_fee_params)
             tx_params.update(fee_params)
             previous_fee_params = fee_params
@@ -190,15 +205,17 @@ async def submit_batch(
         sent_tx = await asyncio.to_thread(w3.eth.get_transaction, tx_hash)
         gas_price_wei = sent_tx.get("gasPrice")
 
+    block_hash_hex = "0x" + receipt.blockHash.hex() if receipt.blockHash else None
+
     await session.execute(
         text("""
             UPDATE anchor_batches
-            SET status = 'confirmed', block_number = :block_number, confirmed_at = :now,
+            SET status = 'confirmed', block_number = :block_number, block_hash = :block_hash, confirmed_at = :now,
                 onchain_anchor_id = :onchain_anchor_id, gas_used = :gas_used, gas_price_wei = :gas_price_wei
             WHERE id = :batch_id
         """),
         {
-            "block_number": receipt.blockNumber, "now": _now(), "batch_id": batch["batch_id"],
+            "block_number": receipt.blockNumber, "block_hash": block_hash_hex, "now": _now(), "batch_id": batch["batch_id"],
             "onchain_anchor_id": onchain_anchor_id,
             "gas_used": receipt.gasUsed, "gas_price_wei": gas_price_wei,
         },
@@ -212,10 +229,17 @@ async def submit_batch(
     observability.ANCHOR_BATCHES_SUBMITTED_TOTAL.inc()
     observability.ANCHOR_BATCH_SIZE_STEPS.observe(batch["step_count"])
     observability.ANCHOR_SUBMIT_DURATION_SECONDS.observe(time.monotonic() - submit_start)
+    if gas_price_wei is not None:
+        observability.ANCHOR_GAS_PRICE_WEI.observe(gas_price_wei)
 
     return {
-        "tx_hash": tx_hash_hex, "block_number": receipt.blockNumber, "status": "confirmed",
+        "tx_hash": tx_hash_hex, "block_number": receipt.blockNumber, "block_hash": block_hash_hex, "status": "confirmed",
         "onchain_anchor_id": onchain_anchor_id,
+        # Real cost of THIS confirmation, for the caller to attribute to
+        # the owning org's gas-spend ceiling (db/tenancy.py's
+        # record_gas_spend) — same values just written to
+        # anchor_batches.gas_used/gas_price_wei above, not recomputed.
+        "gas_used": receipt.gasUsed, "gas_price_wei": gas_price_wei,
     }
 
 

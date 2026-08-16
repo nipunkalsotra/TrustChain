@@ -31,13 +31,14 @@ async def reconcile_batch_anchored(session: AsyncSession, event) -> bool:
     merkle_root = "0x" + event["args"]["merkleRoot"].hex()
     tx_hash = "0x" + event["transactionHash"].hex()
     block_number = event["blockNumber"]
+    block_hash = "0x" + event["blockHash"].hex()
     onchain_anchor_id = event["args"]["anchorId"]
     now = int(datetime.now(timezone.utc).timestamp())
 
     result = await session.execute(
         text("""
             UPDATE anchor_batches
-            SET status = 'confirmed', tx_hash = :tx_hash, block_number = :block_number,
+            SET status = 'confirmed', tx_hash = :tx_hash, block_number = :block_number, block_hash = :block_hash,
                 onchain_anchor_id = :onchain_anchor_id, confirmed_at = :now
             WHERE merkle_root = :merkle_root AND status != 'confirmed'
             RETURNING id
@@ -45,6 +46,7 @@ async def reconcile_batch_anchored(session: AsyncSession, event) -> bool:
         {
             "tx_hash": tx_hash,
             "block_number": block_number,
+            "block_hash": block_hash,
             "onchain_anchor_id": onchain_anchor_id,
             "now": now,
             "merkle_root": merkle_root,

@@ -21,10 +21,12 @@ import observability
 from anchor_worker.batch import build_batches
 from anchor_worker.chain import get_audit_log_contract, get_signer, get_w3
 from anchor_worker.claim import claim_batch
+from anchor_worker.nonce_lock import NonceAuthorityLock
 from anchor_worker.reaper import reap_stale_claims
 from anchor_worker.submit import SubmitError, submit_batch
 from blockchain.resilient_provider import sample_breaker_states
 from config import get_settings
+from db import idempotency, tenancy
 from db.engine import get_sessionmaker
 from logging_config import get_logger
 
@@ -92,10 +94,50 @@ async def handle_submit_failure(
     await session.commit()
 
 
+async def handle_gas_ceiling_skip(session, batch: dict, org_id: int) -> None:
+    """A batch's owning org has hit its gas-spend ceiling (plan §11.4's
+    circuit breaker) — deliberately NOT treated as a submission failure:
+    the steps are returned to 'pending' for the next poll cycle to pick
+    up once the ceiling clears (a budget raise, a plan change), same as
+    handle_submit_failure's requeue path, but the claim-time attempts
+    increment is undone rather than counted toward anchor_max_attempts —
+    a step must never get dead-lettered purely because its org hasn't
+    topped up its gas budget yet; that's an outbox promise (I1: anchored
+    or explicitly dead-lettered, never silently dropped — an org policy
+    isn't a step-level failure)."""
+    logger.warning(
+        "batch_skipped_gas_ceiling", batch_id=batch["batch_id"], org_id=org_id, run_id=batch["run_id"],
+    )
+    observability.ANCHOR_GAS_CEILING_BREACHED_TOTAL.labels(org_id=str(org_id)).inc()
+
+    await session.execute(
+        text("""
+            UPDATE anchor_batches SET status = 'failed', last_error = :err WHERE id = :batch_id
+        """),
+        {"err": f"org {org_id} gas-spend ceiling reached", "batch_id": batch["batch_id"]},
+    )
+    await session.execute(
+        text("""
+            UPDATE anchor_outbox
+            SET status = 'pending', batch_id = NULL, claimed_by = NULL, claimed_at = NULL,
+                attempts = GREATEST(attempts - 1, 0),
+                last_error = :err
+            WHERE batch_id = :batch_id
+        """),
+        {"err": f"org {org_id} gas-spend ceiling reached", "batch_id": batch["batch_id"]},
+    )
+    await session.execute(
+        text("UPDATE steps SET anchor_batch_id = NULL WHERE anchor_batch_id = :batch_id"),
+        {"batch_id": batch["batch_id"]},
+    )
+    await session.commit()
+
+
 async def run_once(worker_id: str, settings) -> int:
-    """One iteration: reap, claim, batch, submit. Returns the number of
-    outbox rows successfully anchored this round (0 if nothing was
-    pending, or everything pending failed to submit)."""
+    """One iteration: reap, purge expired idempotency keys, claim, batch,
+    submit. Returns the number of outbox rows successfully anchored this
+    round (0 if nothing was pending, or everything pending failed to
+    submit)."""
     session_factory = get_sessionmaker()
     w3 = get_w3()
     signer = get_signer()
@@ -105,6 +147,12 @@ async def run_once(worker_id: str, settings) -> int:
         reaped = await reap_stale_claims(session, settings.anchor_claim_timeout_seconds, settings.anchor_max_attempts)
     if reaped["reset"] or reaped["dead_lettered"]:
         logger.info("reaper_ran", reset=len(reaped["reset"]), dead_lettered=len(reaped["dead_lettered"]))
+
+    async with session_factory() as session:
+        purged = await idempotency.purge_expired(session, settings.idempotency_key_retention_seconds)
+    if purged:
+        observability.IDEMPOTENCY_KEYS_PURGED_TOTAL.inc(len(purged))
+        logger.info("idempotency_keys_purged", count=len(purged))
 
     async with session_factory() as session:
         pending_stats = (
@@ -171,6 +219,22 @@ async def run_once(worker_id: str, settings) -> int:
     tracer = observability.get_tracer(__name__)
     anchored = 0
     for batch in batches:
+        # F11.4: hard gas-spend ceiling circuit breaker — checked per
+        # batch (an org's spend can cross its ceiling mid-round, between
+        # two batches in the same claimed set), before ever building a
+        # transaction for it. Resolved fresh each time, not cached across
+        # the loop: cheap (one indexed lookup), and a stale cached value
+        # would either let one batch too many through right at the
+        # boundary or (worse) incorrectly block a batch for an org that
+        # had its budget raised moments ago.
+        org_id = await tenancy.get_org_id_for_run(batch["run_id"])
+        if org_id is not None:
+            budget_status = await tenancy.get_org_gas_budget_status(org_id)
+            if budget_status["breached"]:
+                async with session_factory() as session:
+                    await handle_gas_ceiling_skip(session, batch, org_id)
+                continue
+
         async with session_factory() as session:
             with tracer.start_as_current_span("anchor_batch_submit") as span:
                 span.set_attribute("batch_id", batch["batch_id"])
@@ -191,6 +255,10 @@ async def run_once(worker_id: str, settings) -> int:
                         block=result["block_number"],
                     )
                     anchored += batch["step_count"]
+                    if org_id is not None and result["gas_used"] is not None and result["gas_price_wei"] is not None:
+                        gas_cost_wei = result["gas_used"] * result["gas_price_wei"]
+                        await tenancy.record_gas_spend(org_id, gas_cost_wei)
+                        observability.ANCHOR_BATCH_GAS_COST_WEI.labels(org_id=str(org_id)).observe(gas_cost_wei)
                 except SubmitError as e:
                     span.set_attribute("error", str(e))
                     await handle_submit_failure(
@@ -230,19 +298,55 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown_event.set)
 
-    while not shutdown_event.is_set():
+    # F6: sole nonce authority, enforced for real — see
+    # anchor_worker/nonce_lock.py's module docstring for why SKIP LOCKED
+    # on the outbox claim alone doesn't cover this. Blocks HERE, before
+    # ever touching the outbox/chain, if another instance already holds
+    # it — polling rather than a single indefinite blocking call so
+    # SIGTERM during the wait (a replacement instance started before the
+    # old one finished draining) exits cleanly instead of hanging.
+    nonce_lock = NonceAuthorityLock()
+    acquired = False
+    logged_waiting = False
+    while not shutdown_event.is_set() and not acquired:
+        acquired = await nonce_lock.try_acquire()
+        if acquired:
+            logger.info("anchor_worker_nonce_authority_acquired", worker_id=worker_id)
+            break
+        if not logged_waiting:
+            logger.warning(
+                "anchor_worker_waiting_for_nonce_authority", worker_id=worker_id,
+                detail="another anchor-worker instance currently holds the nonce-authority lock",
+            )
+            logged_waiting = True
         try:
-            anchored = await run_once(worker_id, settings)
-        except Exception:
-            logger.exception("anchor_worker_iteration_failed")
-            anchored = 0
-        if anchored == 0 and not shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=settings.anchor_poll_interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.wait_for(shutdown_event.wait(), timeout=settings.anchor_nonce_lock_poll_seconds)
+        except asyncio.TimeoutError:
+            pass
 
-    logger.info("anchor_worker_shutting_down", worker_id=worker_id)
+    if not acquired:
+        # shutdown_event fired before the lock was ever acquired —
+        # nothing to release and no work to drain; exit immediately
+        # rather than falling through to the main loop without nonce
+        # authority.
+        logger.info("anchor_worker_shutting_down", worker_id=worker_id)
+        return
+
+    try:
+        while not shutdown_event.is_set():
+            try:
+                anchored = await run_once(worker_id, settings)
+            except Exception:
+                logger.exception("anchor_worker_iteration_failed")
+                anchored = 0
+            if anchored == 0 and not shutdown_event.is_set():
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=settings.anchor_poll_interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+    finally:
+        await nonce_lock.release()
+        logger.info("anchor_worker_shutting_down", worker_id=worker_id)
 
 
 if __name__ == "__main__":

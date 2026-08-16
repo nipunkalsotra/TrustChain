@@ -175,10 +175,11 @@ async def revoke_api_key(key_id: int, project_id: int, now: int) -> bool:
 
 async def count_org_runs_in_window(org_id: int, since: int) -> int:
     """Rolling-window run count across every project in an org, for the
-    monthly quota check (plan §14.1's gas_budget_wei/gas_spent_wei are
-    for real gas-cost tracking, not yet wired to per-batch spend
-    attribution — this is the honestly-scoped interim version: a simple
-    request count, not literal gas metering)."""
+    monthly quota check — a simple request count, not gas metering (see
+    get_org_gas_budget_status/record_gas_spend below for the real,
+    now-wired gas-cost ceiling, plan §14.1's gas_budget_wei/gas_spent_wei
+    and §11.4's "hard gas-spend ceiling ... circuit breaker that
+    suspends anchoring on breach")."""
     from db.models import Run
 
     session_factory = get_sessionmaker()
@@ -189,3 +190,86 @@ async def count_org_runs_in_window(org_id: int, since: int) -> int:
             .where(Project.org_id == org_id, Run.created_at >= since)
         )
         return (await session.execute(stmt)).scalar_one()
+
+
+async def get_org_id_for_run(run_id: str) -> Optional[int]:
+    """Resolves a run's owning org — anchor_worker/main.py uses this to
+    know which org's gas budget a batch's spend should count against and
+    be checked before submitting, without needing project_id/org_id
+    threaded through claim_batch/build_batches (whose whole shape is
+    steps/leaves, not tenancy)."""
+    from db.models import Run
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        stmt = (
+            select(Project.org_id)
+            .join(Run, Run.project_id == Project.id)
+            .where(Run.run_id == run_id)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_org_gas_budget_status(org_id: int) -> dict:
+    """Returns {"gasBudgetWei": int | None, "gasSpentWei": int,
+    "breached": bool}. `breached` is always False when gasBudgetWei is
+    None — a org with no configured ceiling has nothing to breach, which
+    is the deliberate default (existing orgs, and any new one until an
+    operator sets a real budget, must not suddenly stop anchoring)."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        org = await session.get(Organization, org_id)
+        if org is None:
+            return {"gasBudgetWei": None, "gasSpentWei": 0, "breached": False}
+        breached = org.gas_budget_wei is not None and org.gas_spent_wei >= org.gas_budget_wei
+        return {"gasBudgetWei": org.gas_budget_wei, "gasSpentWei": org.gas_spent_wei, "breached": breached}
+
+
+async def record_gas_spend(org_id: int, wei_spent: int) -> None:
+    """Called once per CONFIRMED anchor batch (anchor_worker/submit.py),
+    with that batch's real receipt.gasUsed * effectiveGasPrice — the
+    actual cost paid, not an estimate. A single UPDATE ... SET x = x +
+    :delta rather than read-then-write: correct under concurrent batch
+    confirmations (this worker is the sole nonce authority for
+    SUBMITTING — see nonce_lock.py — but multiple batches can still be
+    IN FLIGHT/confirming across overlapping polls) without needing a
+    row lock here."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        await session.execute(
+            update(Organization)
+            .where(Organization.id == org_id)
+            .values(gas_spent_wei=Organization.gas_spent_wei + wei_spent)
+        )
+        await session.commit()
+
+
+async def get_org_token_budget_status(org_id: int) -> dict:
+    """Returns {"tokenBudget": int | None, "tokensSpent": int, "breached":
+    bool} — same shape/defaults as get_org_gas_budget_status above:
+    `breached` is always False when tokenBudget is None (no configured
+    ceiling means nothing to breach)."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        org = await session.get(Organization, org_id)
+        if org is None:
+            return {"tokenBudget": None, "tokensSpent": 0, "breached": False}
+        breached = org.token_budget is not None and org.tokens_spent >= org.token_budget
+        return {"tokenBudget": org.token_budget, "tokensSpent": org.tokens_spent, "breached": breached}
+
+
+async def record_token_spend(org_id: int, tokens: int) -> None:
+    """Called once per completed pipeline run (main.py's
+    _run_pipeline_background, on the run_complete event), with that run's
+    real cumulative usage_metadata total across all 5 LLM calls — not an
+    estimate. Atomic UPDATE ... SET x = x + :delta, same reasoning as
+    record_gas_spend above (correct under concurrent runs completing for
+    the same org without a row lock)."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        await session.execute(
+            update(Organization)
+            .where(Organization.id == org_id)
+            .values(tokens_spent=Organization.tokens_spent + tokens)
+        )
+        await session.commit()

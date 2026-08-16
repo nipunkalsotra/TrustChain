@@ -5,6 +5,16 @@ emitted while handling an authenticated request must carry the caller's
 tenant identity (project_id/org_id — this codebase's actual tenant unit,
 see logging_config.py's bind_tenant_context docstring for why those are
 the field names rather than a literal "tenant_id").
+
+Also covers logging_config.py's separate trace_id/span_id correlation
+(_add_trace_context) — see that function's docstring for why it's a
+genuinely distinct mechanism from the contextvar-based IDs above (OTel's
+current-span machinery, not an explicitly-bound contextvar). Automated
+coverage here is limited to the no-op-safe and well-formed-output paths
+for the same reason test_observability.py's tracing tests are — real
+delivery to a distributed tracing backend needs a real Jaeger/OTLP
+collector this repo's CI doesn't have; see that file's module docstring
+for how the real end-to-end path was hand-verified instead.
 """
 
 import logging
@@ -46,6 +56,56 @@ def test_correlation_ids_processor_omits_unset_tenant_fields():
 
     assert "project_id" not in event_dict
     assert "org_id" not in event_dict
+
+
+def test_trace_context_processor_omits_trace_id_with_no_active_span():
+    """No span active (the common case — most log lines aren't emitted
+    inside tracer.start_as_current_span()) — trace.get_current_span()
+    returns a real object either way (never raises), but its
+    SpanContext.is_valid is False, so no trace_id/span_id should be
+    fabricated onto a log line that isn't actually part of any trace."""
+    import logging_config
+
+    event_dict = logging_config._add_trace_context(None, "info", {"event": "no_span_here"})
+
+    assert "trace_id" not in event_dict
+    assert "span_id" not in event_dict
+
+
+def test_trace_context_processor_injects_real_ids_from_an_active_span():
+    """Inside a real OpenTelemetry span, the processor must inject the
+    SAME trace_id/span_id Jaeger (or any OTLP backend) would show for
+    that span — 32/16 lowercase hex chars, matching OpenTelemetry's own
+    canonical trace_id/span_id string format, not an arbitrary encoding
+    of this codebase's own choosing.
+
+    init_tracing(..., "") first is load-bearing, not just belt-and-
+    braces: WITHOUT a real TracerProvider registered (trace.
+    set_tracer_provider(), which init_tracing always does regardless of
+    whether an OTLP endpoint is configured — only the exporter attachment
+    is conditional), OpenTelemetry's default global provider is a no-op
+    one whose spans carry an INVALID, all-zero SpanContext even while
+    "active" — exactly the case test_observability.py's own
+    test_tracing_without_endpoint_is_a_noop_but_still_creates_spans
+    covers (it only asserts no exception, deliberately not trace_id
+    validity, for exactly this reason). set_tracer_provider() is a
+    process-global, effectively-once operation — calling it again here
+    if an earlier test already did is a safe no-op, not a failure."""
+    import logging_config
+    import observability
+
+    observability.init_tracing("test_trace_context", "")
+    tracer = observability.get_tracer("test_trace_context")
+    with tracer.start_as_current_span("test_span") as span:
+        expected_trace_id = format(span.get_span_context().trace_id, "032x")
+        expected_span_id = format(span.get_span_context().span_id, "016x")
+
+        event_dict = logging_config._add_trace_context(None, "info", {"event": "inside_a_real_span"})
+
+    assert event_dict["trace_id"] == expected_trace_id
+    assert event_dict["span_id"] == expected_span_id
+    assert len(event_dict["trace_id"]) == 32
+    assert len(event_dict["span_id"]) == 16
 
 
 def test_real_authenticated_request_logs_carry_org_id(client, caplog, monkeypatch):

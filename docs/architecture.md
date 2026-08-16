@@ -186,10 +186,14 @@ matching runbooks.md section.
 
 `.github/workflows/test.yml` runs, per push/PR: Foundry build/test/
 gas-snapshot-check/coverage-gate/Slither (contracts), pytest/ruff/
-mypy/Bandit/pip-audit (backend), tsc/lint/build/npm-audit (frontend),
-gitleaks (secret scanning, blocking), and a full docker-compose
-integration pass exercising both SDKs against a live stack plus
-Schemathesis API fuzzing, Trivy image scanning, and SBOM generation.
+mypy/Bandit/pip-audit/anchor-payload-PII-check (backend), tsc/lint/build/npm-audit (frontend),
+gitleaks (secret scanning, blocking), an API compatibility check
+diffing the current OpenAPI schema against the previous release's for
+breaking changes (`api-compat-check`, see
+[`docs/api-deprecation-policy.md`](api-deprecation-policy.md)), and a
+full docker-compose integration pass exercising both SDKs against a
+live stack plus Schemathesis API fuzzing, Trivy image scanning, and
+SBOM generation.
 `.github/dependabot.yml` covers every pip/npm/docker/github-actions
 ecosystem in the repo. See the workflow file itself for what's blocking
 vs. informational, and why (several gates were introduced against a
@@ -201,4 +205,8 @@ dedicated cleanup pass — see individual step comments in that file).
 - [`docs/adr/`](adr/) — why these decisions, and what else was considered
 - [`docs/release-process.md`](release-process.md) — how a release/deploy actually happens
 - [`docs/runbooks.md`](runbooks.md) — what to do when an alert fires
+- [`docs/slo.md`](slo.md) — what's actually measured, the objectives behind each alert threshold, and the error-budget policy tying them together
+- [`docs/api-deprecation-policy.md`](api-deprecation-policy.md) — how a route gets deprecated, the `Deprecation`/`Sunset` headers that announce it, and notice-period commitment
+- [`docs/threat-model.md`](threat-model.md) — assets, actors, threats and their mitigations (or honestly-flagged gaps)
+- [`docs/deployment-modes.md`](deployment-modes.md) — self-hosted (what exists) vs. hosted (a design sketch, not built)
 - [`docs/multisig-admin-handoff.md`](multisig-admin-handoff.md) — the V2 admin-role migration to a Safe

@@ -2,6 +2,11 @@
 -r requirements.txt
 pytest==9.1.1
 
+# Self-provisions real ephemeral Postgres/Redis containers for the test
+# session when DATABASE_URL/REDIS_URL aren't already set in the
+# environment — see tests/conftest.py. Pinned, not left floating.
+testcontainers[postgres,redis]==4.15.0
+
 # Security scanning (P2.5) — run in CI, see .github/workflows/test.yml
 bandit==1.9.4
 pip-audit==2.10.1

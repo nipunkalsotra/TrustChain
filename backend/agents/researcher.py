@@ -11,7 +11,8 @@ Responsibilities:
 import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.base import AgentState, get_llm, log_step
+import observability
+from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
     task   = state["task"]
     run_id = state["run_id"]
     llm    = get_llm()
+    tracer = observability.get_tracer(__name__)
 
     # Resolve search_web from injected MCP tools
     search_tool = None
@@ -59,7 +61,9 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
     # ── Step 1: web search via MCP ─────────────────────────────────────────
     logger.info("[Researcher] Running web_search via MCP...")
     try:
-        result = await search_tool.ainvoke({"query": task, "max_results": 5})
+        with tracer.start_as_current_span("mcp_tool_call.search_web") as span:
+            span.set_attribute("run_id", run_id)
+            result = await search_tool.ainvoke({"query": task, "max_results": 5})
         # MCP tool returns dict: { query, results: [{title, url, content, score}], answer }
         if isinstance(result, dict):
             items = result.get("results", [])
@@ -104,8 +108,12 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
         )),
     ]
 
-    response = await llm.ainvoke(synthesis_prompt)
+    with tracer.start_as_current_span("llm_call.synthesise_findings") as span:
+        span.set_attribute("agent_id", "researcher")
+        span.set_attribute("run_id", run_id)
+        response = await llm.ainvoke(synthesis_prompt)
     research_output = response.content
+    tokens_used = track_token_usage(state.get("tokens_used", 0), response, run_id)
 
     tx, evt = await log_step(
         bridge=bridge,
@@ -127,5 +135,6 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
         "research":   research_output,
         "tx_hashes":  tx_hashes,
         "sse_events": sse_events,
+        "tokens_used": tokens_used,
         "messages":   [HumanMessage(content=research_output, name="researcher")],
     }

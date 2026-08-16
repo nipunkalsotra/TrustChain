@@ -16,6 +16,11 @@ JSON via `structlog` (`backend/logging_config.py`) — every line carries
 `request_id`, and pipeline-related lines also carry `run_id`; grep/filter
 on those to follow one request or run through everything it caused.
 
+For *why* each alert's threshold is what it is (not just what to do when
+it fires) — the SLO/error-budget policy tying them together as a set,
+rather than a pile of independently-tuned numbers — see
+[`docs/slo.md`](slo.md).
+
 ---
 
 # Alert runbooks
@@ -229,6 +234,114 @@ last-processed block) exceeds 1000 for 10+ minutes.
    batch was mid-confirmation during this lag window, that batch stays
    at `status='submitted'` in Postgres, even though it may have already
    succeeded on-chain, until the indexer catches back up).
+
+## Token budget ceiling breached
+
+**Fires when:** `token_budget_rejections_total{org_id=...}` increases at
+all in a 15-minute window. Severity `warning` — this is expected,
+correct behavior (`POST /run-agent` returning 429 once an org's
+`organizations.token_budget` is reached — see `db/tenancy.py`'s
+`get_org_token_budget_status`/`record_token_spend`), not a bug. The
+alert exists so an operator notices and acts, not because anything is
+broken.
+
+1. Identify the org from the `org_id` label, or query that org's own
+   `GET /gas-spend` response (`orgTokenBudget`/`orgTokensSpent` fields)
+   for the exact numbers.
+2. Decide whether to raise the ceiling: `UPDATE organizations SET
+   token_budget = <new value> WHERE id = '<org_id>';` — `NULL` means
+   unlimited (see the column's own comment in `db/models.py`).
+3. No restart or replay needed — the next `POST /run-agent` from that
+   org re-checks the (now higher) budget immediately; nothing was lost,
+   requests were rejected pre-flight before any LLM spend happened.
+
+## Anchor reaper resets crash loop
+
+**Fires when:** `anchor_reaper_reset_total` increases by more than 20 in
+a 15-minute window. Severity `warning`. A reaper reset on its own is
+normal — `anchor_worker/reaper.py` reclaims a claim that outlived
+`anchor_claim_timeout_seconds` back to `pending`, no data lost, and one
+or two of these after an ordinary restart is expected. A high rate
+means the worker is dying mid-claim repeatedly, not recovering cleanly.
+
+1. Check for repeated `anchor_worker_starting` log lines close together
+   — that's the crash loop itself, not just this alert's symptom.
+2. Look at what's between each restart: an unhandled exception in
+   `anchor_worker/main.py::run_once`, an OOM kill (`docker compose ps`/
+   `docker stats anchor-worker`), or a supervisor (systemd/docker
+   restart policy) retrying a container that's failing at startup
+   (bad `SIGNER_BACKEND` config, unreachable RPC, unreachable Postgres).
+3. This alert firing without `AnchorOutboxStepsDeadLettered` also firing
+   means no permanent damage yet — rows keep getting reclaimed and
+   retried — but the underlying instability should still be fixed before
+   attempts on those rows eventually exhaust `anchor_max_attempts` and
+   they dead-letter for real.
+
+## Anchor gas ceiling breached
+
+**Fires when:** `anchor_gas_ceiling_breached_total{org_id=...}`
+increases at all in a 15-minute window. Severity `warning` — like the
+token budget alert above, this is expected behavior
+(`anchor_worker/main.py` skipping a batch back into the outbox, not
+losing it, once `organizations.gas_spent_wei` would exceed
+`organizations.gas_budget_wei` — see `db/tenancy.py`'s
+`get_org_gas_budget_status`/`record_gas_spend`), an operator-attention
+signal rather than an incident.
+
+1. Identify the org from the `org_id` label, or that org's `GET
+   /gas-spend` response (`gasBudgetWei`/`gasSpentWei`).
+2. Decide whether to raise the ceiling: `UPDATE organizations SET
+   gas_budget_wei = <new value> WHERE id = '<org_id>';` (`NULL` =
+   unlimited).
+3. Once raised, that org's steps (still sitting in `anchor_outbox` as
+   `status='pending'`, never touched) anchor normally on the anchor
+   worker's next work loop — no manual requeue needed, nothing was lost.
+4. If the ceiling was hit unexpectedly (not a deliberate cap), check
+   `anchor_batch_gas_cost_wei`/`anchor_gas_price_wei` for that org's
+   recent batches — a spike could mean gas prices rose on-chain, or a
+   batch size/frequency change is spending faster than expected.
+
+## Agent integrity violations detected
+
+**Fires when:** `agent_integrity_violations_total` increases by more
+than 3 in a 15-minute window. Severity `warning`. A single violation
+(e.g. a caller probing `verifyAgent` with mismatched data) isn't itself
+an incident; this alert's threshold is deliberately the same "fires
+unexpectedly at scale" condition "Pausing contracts in an emergency"
+above names as one of its own trigger conditions.
+
+1. Check the indexer's logs / `audit_events` around the firing window
+   for which agent(s) and project(s) are involved
+   (`indexer/agent_events.py::index_integrity_violation`).
+2. Distinguish a legitimate one-off (a caller's own bug, or a genuine
+   tamper attempt against one agent) from a pattern suggesting a
+   compromised or misbehaving actor at scale across many agents/projects.
+3. If it looks like an active, ongoing attempt to submit forged agent
+   data rather than an isolated incident, follow "Pausing contracts in
+   an emergency" above — pause `AgentAuditLogV2`/`TrustScoreRegistryV2`
+   while investigating.
+
+## RPC call failures elevated
+
+**Fires when:** `rpc_call_failures_total` (summed across all configured
+endpoints) increases by more than 10 in a 15-minute window. Severity
+`warning`.
+
+1. Check whether `RpcCircuitBreakerOpen` is also firing (same
+   underlying `blockchain/resilient_provider.py` code path, per
+   `endpoint`). If yes, follow that runbook entry above — failures are
+   already concentrated enough on one endpoint to have tripped its
+   breaker and failover is (or should be) absorbing them.
+2. If this fires WITHOUT `RpcCircuitBreakerOpen`: failures are either
+   spread thinly enough across endpoints that none individually crossed
+   its breaker's failure threshold, or `MONAD_RPC_FALLBACK_URLS`/
+   `V2_RPC_FALLBACK_URLS` only configures a single endpoint (no breaker
+   metric is emitted at all in that case — see the alert's own
+   description in `alerts.yml`). Either way, check anchor-worker/indexer
+   logs for elevated `anchor_worker_iteration_failed`/
+   `indexer_iteration_failed` rates to gauge real user-facing impact.
+3. This is usually the RPC provider's own degradation, not a TrustChain
+   bug — check the provider's status page first.
 
 ---
 
@@ -500,3 +613,48 @@ docker compose exec -T postgres pg_dump -U trustchain -d trustchain --format=cus
    restore — it's the only way to know `rm_scores`/`rm_agent_events`
    actually match what the restored write-model + real chain state say,
    rather than assuming the restore alone was sufficient.
+
+**Drill log** (steps 1-3 actually run, against the real live dev stack —
+not a hypothetical):
+
+- **2026-08-16, against `docker-compose.yml`'s dev stack** (`postgres:16`,
+  volume `trustchain_trustchain_postgres_data`), all 17 tables present
+  (schema at migration `f1e2d3c4b5a6`).
+- Ran the exact `pg_dump` command above against the live database while
+  `api`/`anchor-worker`/`indexer` stayed up (no stop needed for the dump
+  itself, confirming the "safe to run concurrently" claim) — produced a
+  60528-byte custom-format dump in under a second.
+- Restored into a fresh, isolated database (`trustchain_restore_drill_verify`,
+  not `trustchain_restore` — named to make unmistakably clear it was a
+  disposable verification target, never intended for the cutover steps
+  below) via the exact `createdb`/`pg_restore` commands above — restore
+  itself took under 1 second for this dev-sized dataset.
+- **Verified, not assumed:** row counts for all 10 non-empty/tracked
+  tables (`users`, `organizations`, `projects`, `runs`, `steps`,
+  `anchor_outbox`, `anchor_batches`, `agents`, `rm_scores`,
+  `rm_agent_events`) matched exactly between source and restored copy;
+  spot-checked the `agents` table's actual row content (agent_id, model,
+  version, code_hash) byte-for-byte identical; confirmed
+  `alembic_version` matched (`f1e2d3c4b5a6`) between both databases,
+  proving the dump captures schema state consistently with data.
+- Cleaned up the verification database (`dropdb`) immediately after —
+  it never served traffic and was never pointed at by any running
+  service's `DATABASE_URL`.
+- **Deliberately NOT run in this drill:** step 4's actual cutover
+  (`ALTER DATABASE ... RENAME`) against the live serving database. That
+  step is a genuinely destructive, hard-to-reverse action against
+  whatever database is actively serving `api`/`anchor-worker`/`indexer`
+  — rehearsing dump→restore→verify (steps 1-3, done for real above) is
+  what proves the backup is valid and the restore procedure works;
+  actually swapping it into production is an operational decision a
+  real incident response makes deliberately, with the stack already
+  stopped per step 1, not something to exercise casually against a live
+  environment just to check a box. If this runbook is drilled again
+  with a disposable throwaway Postgres instance (not the shared dev
+  stack), running the cutover steps too would be worth doing.
+- **What this confirms:** the documented commands are real and correct
+  (no typos, no missing flags, no assumed-but-wrong tool availability —
+  `pg_dump`/`pg_restore`/`createdb`/`dropdb` all work exactly as
+  written via `docker compose exec`), and a dump taken from this stack
+  genuinely round-trips through `pg_restore` with zero data loss or
+  corruption for every table that matters.

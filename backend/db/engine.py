@@ -99,6 +99,23 @@ async def create_all_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+def get_code_migration_head() -> Optional[str]:
+    """The latest revision ID this CHECKED-OUT CODE's alembic/versions/
+    directory defines (a pure local file read, no DB involved) — paired
+    with db.get_applied_migration_version() (what's actually applied) by
+    GET /ready's migrations check (F15) to catch a running process whose
+    code expects a newer schema than what's live. Returns None only if
+    alembic/versions/ has no revisions at all, which would itself mean a
+    broken checkout, not a real operating state."""
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(Path(__file__).parent.parent / "alembic.ini"))
+    return ScriptDirectory.from_config(cfg).get_current_head()
+
+
 async def truncate_all_tables() -> None:
     """Test isolation helper — empties every table without dropping schema."""
     from sqlalchemy import text
@@ -109,6 +126,6 @@ async def truncate_all_tables() -> None:
             text(
                 "TRUNCATE TABLE users, organizations, projects, memberships, api_keys, "
                 "idempotency_keys, audit_events, refresh_tokens, runs, steps, anchor_outbox, "
-                "anchor_batches, rm_scores, rm_agent_events, indexer_cursor RESTART IDENTITY CASCADE"
+                "anchor_batches, rm_scores, rm_agent_events, agents, indexer_cursor RESTART IDENTITY CASCADE"
             )
         )

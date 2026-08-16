@@ -55,6 +55,7 @@ class ErrorCode(str, Enum):
     TASK_EMPTY = "task_empty"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     QUOTA_EXCEEDED = "quota_exceeded"
+    TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
     RUN_NOT_FOUND = "run_not_found"
     RUN_NOT_COMPLETE = "run_not_complete"
     STEP_NOT_FOUND = "step_not_found"

@@ -164,6 +164,15 @@ class TrustChainClient(_BaseClient):
             json={"agent_id": agent_id, "code_hash": code_hash, "model": model, "version": version},
         )
 
+    def list_agents(self, include_revoked: bool = False) -> dict:
+        """Current registered-agent state for the caller's project (the
+        `agents` read-model table, kept in sync by the indexer from
+        AgentRegistered/AgentUpdated/AgentRevoked events — see
+        backend/indexer/agent_events.py), not the raw on-chain event log.
+        Revoked agents are excluded by default; include_revoked=True to
+        see them too."""
+        return self._request("GET", "/agents", params={"include_revoked": include_revoked})
+
     def verify_agent(self, agent_id: str, code_hash: str) -> dict:
         return self._request("GET", f"/agents/{agent_id}/verify", params={"code_hash": code_hash})
 
@@ -291,6 +300,10 @@ class AsyncTrustChainClient(_BaseClient):
     async def audit_log(self, run_id: Optional[str] = None) -> dict:
         params = {"run_id": run_id} if run_id else {}
         return await self._request("GET", "/audit-log", params=params)
+
+    async def list_agents(self, include_revoked: bool = False) -> dict:
+        """See TrustChainClient.list_agents's docstring."""
+        return await self._request("GET", "/agents", params={"include_revoked": include_revoked})
 
     async def stream(self, run_id: str, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS) -> AsyncIterator[dict]:
         """See TrustChainClient.stream's docstring — same "consume to the

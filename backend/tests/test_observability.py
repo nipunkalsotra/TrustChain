@@ -32,6 +32,26 @@ tests in one process makes a clean per-test in-memory exporter
 unreliable without a way to inject a non-global provider, which
 `observability.get_tracer()` deliberately doesn't expose).
 
+The finer-grained spans inside those coarse ones — one per real LLM call
+(agents/researcher.py, validator.py x2, scorer.py, reporter.py), MCP
+tool call (researcher.py's search_web, validator.py's fact_check), and
+RPC write/read (blockchain/score_writer.py's write_score,
+blockchain/identity_writer.py's register_agent/revoke_agent/
+verify_agent, blockchain/client.py's verify_run/tamper_demo, main.py's
+verify-audit) — were hand-verified the same way, via one real POST
+/agents + GET /agents/{id}/verify + POST /run-agent sequence against
+this repo's docker-compose stack pointed at a real local Jaeger.
+Confirmed via Jaeger's `/api/traces`: every llm_call.*/mcp_tool_call.*/
+rpc_call.write_score span from one real pipeline run nests correctly as
+a CHILD of that run's own `pipeline_run` span (same parent spanID,
+proving OpenTelemetry's contextvar-based propagation survives the
+`await`s inside `agents/pipeline.py`'s `astream()` loop, not just
+across a single direct `await`), each carrying the expected agent_id/
+run_id attributes; `rpc_call.register_agent` and `rpc_call.verify_agent`
+each independently confirmed with correct `otel.scope.name` (the
+calling module, e.g. `blockchain.identity_writer`) and outcome
+attributes (`tx_hash`, `is_valid`).
+
 Sentry: same story — real event delivery needs a real Sentry account
 this repo doesn't have. What's checked here: init with a syntactically
 valid but fake DSN doesn't raise, and capture_exception() against that

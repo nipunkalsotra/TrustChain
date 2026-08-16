@@ -33,18 +33,37 @@ point (a custom Provider) rather than wrapping every call site:
      next request gets one HALF_OPEN trial; success closes the breaker
      again, failure reopens it for another full cooldown.
 
+  3. PER-CALL TIMEOUT + RETRY-WITH-JITTER (F13) — a layer UNDER #2, not a
+     replacement for it: a single transient blip against the CURRENT
+     endpoint (one dropped packet, one slow response just past a tight
+     timeout) gets retried in place, with full-jitter exponential backoff
+     between attempts, BEFORE the breaker's failure count is touched at
+     all — only once every retry against that endpoint is exhausted does
+     it count as the ONE failure #2's threshold logic sees. Without this,
+     every transient blip counts as a full breaker failure, which could
+     trip the breaker (and fail over) on a run of bad luck that individual
+     retries would have absorbed. The timeout itself (`request_kwargs`,
+     passed straight to web3.py's underlying HTTPProvider/requests.Session)
+     replaces web3.py's own undocumented 10s default with an explicit,
+     configured one — a hung connection should fail fast enough for a
+     retry or failover to still be useful.
+
 A single-endpoint config (today's default — no *_RPC_FALLBACK_URLS set)
-makes FallbackHTTPProvider behave identically to a plain HTTPProvider:
-one endpoint, no breaker state ever reached (a single failure just raises,
-same as before), zero behavior change for anyone who hasn't opted in.
+still gets #1/#2's structure (a one-element endpoint list, one breaker
+that in practice never opens against itself) — the difference from a bare
+HTTPProvider is exactly #3, applied uniformly rather than only to
+multi-endpoint configs.
 """
 
+import random
 import threading
 import time
 from typing import Any, Optional
 
 from web3 import HTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
+
+import observability
 
 
 class CircuitBreaker:
@@ -116,6 +135,9 @@ class FallbackHTTPProvider(HTTPProvider):
         failure_threshold: int = 3,
         reset_timeout_seconds: float = 30.0,
         request_kwargs: Optional[dict] = None,
+        retry_max_attempts: int = 3,
+        retry_base_delay_seconds: float = 0.25,
+        retry_max_delay_seconds: float = 2.0,
     ):
         if not endpoint_urls:
             raise ValueError("FallbackHTTPProvider needs at least one endpoint URL")
@@ -123,19 +145,51 @@ class FallbackHTTPProvider(HTTPProvider):
         self.endpoint_urls = list(endpoint_urls)
         self._providers = [HTTPProvider(url, request_kwargs=request_kwargs) for url in endpoint_urls]
         self.breakers = [CircuitBreaker(failure_threshold, reset_timeout_seconds) for _ in endpoint_urls]
+        self.retry_max_attempts = retry_max_attempts
+        self.retry_base_delay_seconds = retry_base_delay_seconds
+        self.retry_max_delay_seconds = retry_max_delay_seconds
+
+    def _call_with_retry(self, provider: HTTPProvider, method: RPCEndpoint, params: Any) -> RPCResponse:
+        """Retries the SAME endpoint in place, full-jitter exponential
+        backoff between attempts, before the caller ever touches that
+        endpoint's breaker. Re-raises the last attempt's exception once
+        retries are exhausted — the caller (make_request) treats that as
+        ONE failure against this endpoint, not `retry_max_attempts` of them."""
+        last_error: Optional[Exception] = None
+        for attempt in range(self.retry_max_attempts):
+            try:
+                return provider.make_request(method, params)
+            except Exception as e:  # noqa: BLE001 — retried regardless of failure shape; make_request's breaker/failover layer is what needs to distinguish further
+                last_error = e
+                if attempt < self.retry_max_attempts - 1:
+                    delay = random.uniform(0, min(self.retry_max_delay_seconds, self.retry_base_delay_seconds * (2 ** attempt)))
+                    time.sleep(delay)
+        raise last_error  # noqa: B904 — re-raising the original, not wrapping it; make_request's `from last_error` below is where chaining happens
 
     def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:
         last_error: Optional[Exception] = None
         attempted_any = False
 
-        for provider, breaker in zip(self._providers, self.breakers):
+        for i, (provider, breaker) in enumerate(zip(self._providers, self.breakers)):
             if not breaker.allow_request():
                 continue
             attempted_any = True
             try:
-                response = provider.make_request(method, params)
+                response = self._call_with_retry(provider, method, params)
             except Exception as e:  # noqa: BLE001 — any RPC-layer failure triggers failover
                 breaker.record_failure()
+                # The one exception to this module's "no metrics dependency"
+                # design (see sample_breaker_states' docstring for the
+                # general rule) — this is the single choke point EVERY
+                # failed RPC call against a configured endpoint passes
+                # through, and it's the only place that knows the failure
+                # happened at all (a caller wrapping make_request() can't
+                # tell "endpoint 2 of 3 failed, endpoint 3 succeeded" apart
+                # from "endpoint 1 succeeded on the first try" — both look
+                # identical from outside). Incrementing here, not via a
+                # returned/polled value like breaker state, is what makes
+                # per-endpoint failure RATE observable at all.
+                observability.RPC_CALL_FAILURES_TOTAL.labels(endpoint=self.endpoint_urls[i]).inc()
                 last_error = e
                 continue
             breaker.record_success()
@@ -158,10 +212,15 @@ def sample_breaker_states(w3) -> dict[str, str]:
     """{endpoint_url: "closed"|"open"|"half_open"} for a Web3 instance
     built with FallbackHTTPProvider — {} for a plain single-endpoint
     provider (nothing to sample). Deliberately returns plain data rather
-    than touching Prometheus directly — this module has no metrics
-    dependency; callers (anchor_worker/main.py, indexer/main.py) own
-    turning this into their own Gauge updates, same as how they already
-    sample ANCHOR_OUTBOX_PENDING/INDEXER_POLL_LAG_BLOCKS themselves."""
+    than touching Prometheus directly — STATE is a poll-anytime property
+    (a caller samples it once per work loop, same as ANCHOR_OUTBOX_PENDING/
+    INDEXER_POLL_LAG_BLOCKS), so there's no reason this module needs to own
+    a Gauge update for it. RPC_CALL_FAILURES_TOTAL (make_request's own
+    except block, above) is the one deliberate exception — a failure EVENT
+    isn't a poll-anytime property the way state is; the only place that
+    ever knows a specific call failed is make_request itself, so that
+    counter increment has to live here, not in a caller that never sees
+    individual call outcomes."""
     provider = w3.provider
     if not isinstance(provider, FallbackHTTPProvider):
         return {}

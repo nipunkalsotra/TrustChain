@@ -16,7 +16,8 @@ from typing import Optional
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
-from blockchain.gas import build_fee_params
+import observability
+from blockchain.gas import build_fee_params, estimate_gas_with_margin
 from blockchain.hashing_utils import AGENTS, compute_hash
 from blockchain.resilient_provider import FallbackHTTPProvider
 from config import get_settings
@@ -41,6 +42,10 @@ _AGENT_CONFIGS = {a["agentId"]: a for a in AGENTS}
 RPC_URL       = get_settings().monad_rpc_url
 RPC_URLS      = get_settings().resolved_monad_rpc_urls  # RPC_URL + any *_RPC_FALLBACK_URLS
 PRIVATE_KEY   = get_settings().private_key
+RPC_CALL_TIMEOUT_SECONDS   = get_settings().rpc_call_timeout_seconds
+RPC_RETRY_MAX_ATTEMPTS     = get_settings().rpc_retry_max_attempts
+RPC_RETRY_BASE_DELAY       = get_settings().rpc_retry_base_delay_seconds
+RPC_RETRY_MAX_DELAY        = get_settings().rpc_retry_max_delay_seconds
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -355,10 +360,18 @@ async def _fetch_tx_map(audit_log_contract, from_block: int = 0) -> dict[int, st
 class BlockchainBridge:
 
     def __init__(self):
-        # A single-URL RPC_URLS list (no *_RPC_FALLBACK_URLS set) makes
-        # this identical to the old bare Web3.HTTPProvider(RPC_URL) — see
-        # blockchain/contracts_v2.py's build_w3 for the same pattern.
-        provider = Web3.HTTPProvider(RPC_URLS[0]) if len(RPC_URLS) == 1 else FallbackHTTPProvider(RPC_URLS)
+        # Always FallbackHTTPProvider, even for RPC_URLS' common single-URL
+        # case (no *_RPC_FALLBACK_URLS set) — see blockchain/contracts_v2.py's
+        # build_w3 for the same pattern/reasoning. Single-endpoint configs
+        # still need F13's retry-with-jitter + explicit per-call timeout,
+        # not just multi-endpoint ones.
+        provider = FallbackHTTPProvider(
+            RPC_URLS,
+            request_kwargs={"timeout": RPC_CALL_TIMEOUT_SECONDS},
+            retry_max_attempts=RPC_RETRY_MAX_ATTEMPTS,
+            retry_base_delay_seconds=RPC_RETRY_BASE_DELAY,
+            retry_max_delay_seconds=RPC_RETRY_MAX_DELAY,
+        )
         self.w3 = Web3(provider)
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
@@ -402,11 +415,11 @@ class BlockchainBridge:
     def _keccak(self, text: str) -> bytes:
         return Web3.solidity_keccak(["string"], [text])
 
-    def _build_and_send(self, fn, nonce: int, fee_params: dict) -> str:
+    def _build_and_send(self, fn, nonce: int, fee_params: dict, gas: int) -> str:
         tx = fn.build_transaction({
             "from":  self.account.address,
             "nonce": nonce,
-            "gas":   500_000,
+            "gas":   gas,
             **fee_params,
         })
         signed  = self.w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
@@ -428,9 +441,12 @@ class BlockchainBridge:
         # F8: try EIP-1559 dynamic fees first, same as every V2 write path
         # (blockchain/gas.py) — this fetch has to happen outside the nonce
         # lock (it's an RPC round trip that doesn't touch _pending_nonce),
-        # but still before handing off to the sync _build_and_send.
+        # but still before handing off to the sync _build_and_send. Real
+        # per-call gas estimation the same way, replacing the old flat
+        # 500_000 limit (F8).
         fee_params = await build_fee_params(self.w3)
-        return await asyncio.to_thread(self._build_and_send, fn, nonce, fee_params)
+        gas = await estimate_gas_with_margin(fn, self.account.address, fallback=500_000)
+        return await asyncio.to_thread(self._build_and_send, fn, nonce, fee_params, gas)
 
     def _wait(self, tx_hash_hex: str, timeout: int = 30) -> dict:
         receipt = self.w3.eth.wait_for_transaction_receipt(
@@ -667,17 +683,21 @@ class BlockchainBridge:
         both against the on-chain record. No on-chain writes — both checks
         are read-only verifyAgent calls, so this costs no gas.
         """
-        config = _AGENT_CONFIGS.get(agent_id)
-        if config is None:
-            raise ValueError(f"unknown agentId '{agent_id}'")
+        tracer = observability.get_tracer(__name__)
+        with tracer.start_as_current_span("rpc_call.tamper_demo") as span:
+            span.set_attribute("agent_id", agent_id)
 
-        tampered_config = {**config, "model": "gpt-3.5-turbo"}  # simulate a silent model swap
+            config = _AGENT_CONFIGS.get(agent_id)
+            if config is None:
+                raise ValueError(f"unknown agentId '{agent_id}'")
 
-        real_hash     = compute_hash(config)
-        tampered_hash = compute_hash(tampered_config)
+            tampered_config = {**config, "model": "gpt-3.5-turbo"}  # simulate a silent model swap
 
-        real_result     = await self.verify_integrity(agent_id, real_hash)
-        tampered_result = await self.verify_integrity(agent_id, tampered_hash)
+            real_hash     = compute_hash(config)
+            tampered_hash = compute_hash(tampered_config)
+
+            real_result     = await self.verify_integrity(agent_id, real_hash)
+            tampered_result = await self.verify_integrity(agent_id, tampered_hash)
 
         return {
             "agentId":  agent_id,
@@ -686,56 +706,59 @@ class BlockchainBridge:
         }
 
     async def verify_run(self, run_id: str) -> dict:
+        tracer = observability.get_tracer(__name__)
         agents = ["researcher", "validator", "scorer", "reporter"]
         agent_results = []
 
-        for agent_id in agents:
-            # Check if registered first
-            registered = await asyncio.to_thread(
-                self.identity_reg.functions.isRegistered(agent_id).call
-            )
-            if not registered:
+        with tracer.start_as_current_span("rpc_call.verify_run") as span:
+            span.set_attribute("run_id", run_id)
+            for agent_id in agents:
+                # Check if registered first
+                registered = await asyncio.to_thread(
+                    self.identity_reg.functions.isRegistered(agent_id).call
+                )
+                if not registered:
+                    agent_results.append({
+                        "agentId":        agent_id,
+                        "exists":         False,
+                        "matches":        False,
+                        "verified":       False,
+                        "registeredHash": "0x" + "0" * 64,
+                    })
+                    continue
+
+                # Get stored record
+                raw = await asyncio.to_thread(
+                    self.identity_reg.functions.getAgent(agent_id).call
+                )
+                # tuple: (agentId, codeHash, registeredBy, registeredAt, isActive, modelName, modelVersion)
+                code_hash_bytes = raw[1]
+                is_active       = raw[4]
+
+                # Recompute the CURRENT hash from the live agent config (model +
+                # version + system prompt, see hashing_utils.AGENTS) and compare
+                # that against the stored hash. This is what actually catches a
+                # silently swapped model/prompt — comparing the stored hash to
+                # itself (the previous behaviour) always returns true regardless
+                # of drift, so it never detected anything.
+                config = _AGENT_CONFIGS.get(agent_id)
+                if config is None:
+                    matches = False
+                    logger.warning("[Identity] no live config for agent %s — cannot verify", agent_id)
+                else:
+                    current_hash = bytes.fromhex(compute_hash(config).removeprefix("0x"))
+                    matches = await asyncio.to_thread(
+                        self.identity_reg.functions.verifyAgent(agent_id, current_hash).call
+                    )
+
                 agent_results.append({
                     "agentId":        agent_id,
-                    "exists":         False,
-                    "matches":        False,
-                    "verified":       False,
-                    "registeredHash": "0x" + "0" * 64,
+                    "exists":         True,
+                    "matches":        matches and is_active,
+                    "verified":       matches and is_active,
+                    "registeredHash": "0x" + code_hash_bytes.hex(),
                 })
-                continue
-
-            # Get stored record
-            raw = await asyncio.to_thread(
-                self.identity_reg.functions.getAgent(agent_id).call
-            )
-            # tuple: (agentId, codeHash, registeredBy, registeredAt, isActive, modelName, modelVersion)
-            code_hash_bytes = raw[1]
-            is_active       = raw[4]
-
-            # Recompute the CURRENT hash from the live agent config (model +
-            # version + system prompt, see hashing_utils.AGENTS) and compare
-            # that against the stored hash. This is what actually catches a
-            # silently swapped model/prompt — comparing the stored hash to
-            # itself (the previous behaviour) always returns true regardless
-            # of drift, so it never detected anything.
-            config = _AGENT_CONFIGS.get(agent_id)
-            if config is None:
-                matches = False
-                logger.warning("[Identity] no live config for agent %s — cannot verify", agent_id)
-            else:
-                current_hash = bytes.fromhex(compute_hash(config).removeprefix("0x"))
-                matches = await asyncio.to_thread(
-                    self.identity_reg.functions.verifyAgent(agent_id, current_hash).call
-                )
-
-            agent_results.append({
-                "agentId":        agent_id,
-                "exists":         True,
-                "matches":        matches and is_active,
-                "verified":       matches and is_active,
-                "registeredHash": "0x" + code_hash_bytes.hex(),
-            })
-            logger.info("[Identity] verify %s → matches=%s active=%s", agent_id, matches, is_active)
+                logger.info("[Identity] verify %s → matches=%s active=%s", agent_id, matches, is_active)
 
         all_verified = all(a["verified"] for a in agent_results)
         return {"runId": run_id, "allMatch": all_verified, "agents": agent_results}

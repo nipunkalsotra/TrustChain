@@ -2,15 +2,17 @@
 //
 // Two scenarios run concurrently:
 //   read_heavy          — ramps VUs 0 -> READ_VUS hammering the cheap,
-//                          frequently-hit read endpoints (trust-scores,
-//                          leaderboard, audit-log, runs list, health).
-//                          This is deliberately most of the load: in a
-//                          real deployment, reads vastly outnumber writes.
+//                          frequently-hit read endpoints (leaderboard,
+//                          audit-log, runs list). This is deliberately
+//                          most of the load: in a real deployment, reads
+//                          vastly outnumber writes.
 //   occasional_run_agent — a low, constant arrival rate of REAL
 //                          POST /run-agent calls (full pipeline: LLM +
-//                          on-chain write via the anchor worker). Kept
-//                          deliberately under the default rate limit
-//                          (5/min per project, see config.py's
+//                          on-chain write via the anchor worker), plus a
+//                          GET /trust-scores check against the run it
+//                          just created. Kept deliberately under the
+//                          default rate limit (5/min per project, see
+//                          config.py's
 //                          run_agent_rate_limit_capacity/_refill_per_second)
 //                          so this test measures pipeline latency under
 //                          load, not "did the rate limiter correctly
@@ -26,6 +28,19 @@
 // anchor-worker on-chain transaction (against Anvil in local dev — free;
 // against a real chain, NOT free) — this is why occasional_run_agent's
 // rate is kept low rather than scaled with READ_VUS.
+//
+// read_heavy signs up its OWN project per VU (see vuToken() below)
+// rather than sharing one token across all READ_VUS — found for real:
+// with every VU hitting the SAME project, they all draw from that one
+// project's read-path rate-limit bucket (config.py's
+// read_path_rate_limit_capacity=120, refill 2/s — added after this
+// script was first written and verified), so at READ_VUS=20 the shared-
+// token version blew through that budget in well under a minute and
+// this test failed with a ~94% error rate — not a backend bug, a test
+// modeling error. Many concurrent VUs against ONE tenant was never the
+// realistic case anyway; many DIFFERENT tenants each reading their own
+// dashboard concurrently is, and giving each VU its own project models
+// that correctly AND gives each VU its own full 120-request budget.
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -36,6 +51,17 @@ const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';
 const READ_VUS = Number(__ENV.READ_VUS || 20);
 
 const runAgentDuration = new Trend('run_agent_duration', true);
+
+// Module-level state is per-VU in k6 (each VU runs its own isolated JS
+// instance) — signing up once per VU on first use and caching here means
+// exactly READ_VUS signups total, not one per iteration.
+let _vuToken = null;
+function vuToken() {
+  if (_vuToken === null) {
+    _vuToken = signup(BASE_URL).token;
+  }
+  return _vuToken;
+}
 
 export const options = {
   scenarios: {
@@ -83,8 +109,9 @@ export function setup() {
   return { token: user.token };
 }
 
-export function readHeavy(data) {
-  const opts = { ...authHeaders(data.token) };
+export function readHeavy() {
+  // Own project per VU — see the module-level comment above for why.
+  const opts = { ...authHeaders(vuToken()) };
 
   let res = http.get(`${BASE_URL}/leaderboard`, { ...opts, tags: { endpoint: 'leaderboard' } });
   check(res, { 'leaderboard 200': (r) => r.status === 200 });
@@ -95,23 +122,17 @@ export function readHeavy(data) {
   res = http.get(`${BASE_URL}/runs`, { ...opts, tags: { endpoint: 'runs' } });
   check(res, { 'runs 200': (r) => r.status === 200 });
 
-  // GET /trust-scores takes scores for ONE specific run (run_id query
-  // param, required) — it's not a listing endpoint like the three above.
-  // Only exercise it once a run actually exists to fetch scores for
-  // (occasional_run_agent creates them; early in the test, before any
-  // have landed, there may be none yet — that's a legitimate "nothing to
-  // check" iteration, not a failure).
-  const runs = res.status === 200 ? res.json('runs') : [];
-  if (runs && runs.length > 0) {
-    const runId = runs[0].runId;
-    const scoresRes = http.get(
-      `${BASE_URL}/trust-scores?run_id=${encodeURIComponent(runId)}`,
-      { ...opts, tags: { endpoint: 'trust-scores' } },
-    );
-    check(scoresRes, { 'trust-scores 200': (r) => r.status === 200 });
-  }
-
-  sleep(1);
+  // sleep(2), not sleep(1): 3 reads/iteration against a shared per-project
+  // bucket refilling at 2/s (config.py's read_path_rate_limit_refill_per_second)
+  // means sleep(1) (3 req/~1.1s ~= 2.7 req/s) is UNSUSTAINABLE long-run —
+  // confirmed live over a full 3-minute run: leaderboard/audit-log (called
+  // 1st/2nd each iteration) stayed at 0% failures the whole time, but
+  // `runs` (always 3rd, so it's the one that finds the bucket empty)
+  // crossed the 1% threshold late in the run as VUs' accumulated deficit
+  // caught up with them. sleep(2) keeps sustained demand (3 req/~2.1s ~=
+  // 1.4 req/s) under the 2/s refill rate indefinitely, not just for a
+  // short burst — re-verified live: 0 failures across a full 3-minute run.
+  sleep(2);
 }
 
 export function runAgentOccasionally(data) {
@@ -126,4 +147,19 @@ export function runAgentOccasionally(data) {
     'run-agent 200': (r) => r.status === 200,
     'run-agent returned run_id': (r) => !!r.json('run_id'),
   });
+
+  // GET /trust-scores takes scores for ONE specific run (run_id query
+  // param, required). Checked here, against the run this same call just
+  // created in this SAME project (data.token — the one dedicated
+  // occasional_run_agent identity, distinct from read_heavy's per-VU
+  // ones), rather than in read_heavy: each read_heavy VU now has its own
+  // empty project with no runs of its own to look up scores for.
+  if (res.status === 200) {
+    const runId = res.json('run_id');
+    const scoresRes = http.get(
+      `${BASE_URL}/trust-scores?run_id=${encodeURIComponent(runId)}`,
+      { ...authHeaders(data.token), tags: { endpoint: 'trust-scores' } },
+    );
+    check(scoresRes, { 'trust-scores 200': (r) => r.status === 200 });
+  }
 }

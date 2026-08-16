@@ -117,6 +117,21 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="groq")
     groq_api_key: str = Field(default="")
     tavily_api_key: str = Field(default="")
+    # Per-run safety valve (plan O10: "LLM token budgets ... are what
+    # actually bound worst-case spend") — NOT the billing decision (that's
+    # the org-level aggregate ceiling, Organization.token_budget, checked
+    # once before a run starts by main.py's run_agent handler against
+    # db.tenancy.get_org_token_budget_status). This is a much looser
+    # per-run ceiling that exists purely to catch a single run
+    # pathologically looping (a malformed prompt causing repeated
+    # near-identical completions, say) with no other agent-level stopping
+    # condition — a well-behaved run (5 LLM calls, max_tokens=2048 output
+    # cap each, see agents/llm_provider.py) never comes close to this, so
+    # tripping it means something is actually wrong, not that a normal
+    # run happened to be long. Enforced in agents/base.py's
+    # track_token_usage, checked after every one of the pipeline's 5
+    # ainvoke() calls using each response's real usage_metadata.
+    llm_token_budget_per_run: int = Field(default=20_000, gt=0)
 
     # ── MCP servers ──────────────────────────────────────────────────────
     # Defaults match start.sh's local (non-Docker) dev setup, where both
@@ -136,6 +151,28 @@ class Settings(BaseSettings):
     # single-endpoint, no failover, exactly today's behavior.
     monad_rpc_fallback_urls: str = Field(default="")
     v2_rpc_fallback_urls: str = Field(default="")
+
+    # ── RPC call resilience (F13) ───────────────────────────────────────
+    # Layered UNDER resilient_provider.py's fallback/circuit-breaker
+    # (which decides WHEN to give up on an endpoint and move to the next
+    # one) — these decide whether a single transient blip against the
+    # CURRENT endpoint gets absorbed before that decision is even made.
+    # rpc_call_timeout_seconds replaces web3.py's own HTTPProvider default
+    # (10s, undocumented in this codebase until now) with an explicit,
+    # configured value — a hung connection to a half-dead endpoint should
+    # fail fast enough for a retry or failover to still be useful, not
+    # silently eat whatever web3.py happens to default to.
+    rpc_call_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Full-jitter exponential backoff (AWS's "Exponential Backoff and
+    # Jitter" architecture blog's recommended formula): each retry waits
+    # `random.uniform(0, min(max_delay, base_delay * 2**attempt))` — the
+    # randomization specifically avoids every concurrent caller retrying
+    # in lockstep against a recovering endpoint (a real failure mode a
+    # fixed/non-jittered backoff doesn't protect against when the anchor
+    # worker, indexer, and api all hit the same RPC endpoint).
+    rpc_retry_max_attempts: int = Field(default=3, ge=1)
+    rpc_retry_base_delay_seconds: float = Field(default=0.25, gt=0)
+    rpc_retry_max_delay_seconds: float = Field(default=2.0, gt=0)
 
     # V1 (blockchain/client.py's BlockchainBridge) and V2 (anchor_worker/,
     # indexer/, scorer.py's score writes) can legitimately point at
@@ -188,6 +225,12 @@ class Settings(BaseSettings):
     anchor_max_batch_size: int = Field(default=256, ge=1)
     anchor_claim_timeout_seconds: int = Field(default=120, ge=1)
     anchor_poll_interval_seconds: float = Field(default=2.0, gt=0)
+    # F6 (sole nonce authority, anchor_worker/nonce_lock.py): how often a
+    # worker instance retries pg_try_advisory_lock while another instance
+    # already holds it. Only matters during an accidental/transitional
+    # overlap (a rolling deploy, a scaling mistake) — a healthy singleton
+    # deployment acquires the lock once at startup and never polls again.
+    anchor_nonce_lock_poll_seconds: float = Field(default=5.0, gt=0)
     anchor_max_attempts: int = Field(default=8, ge=1)
     # A failed submit's requeued outbox rows get next_attempt_at = now +
     # min(backoff_base * 2^(attempts-1), backoff_max) — not an immediate
@@ -221,6 +264,17 @@ class Settings(BaseSettings):
     # before finally giving up.
     anchor_rbf_max_attempts: int = Field(default=3, ge=1)
     anchor_rbf_fee_bump_fraction: float = Field(default=0.15, gt=0)
+
+    # ── Idempotency (plan §8.4/§14.3, db/idempotency.py) ───────────────────
+    # Rows past this age are pure disk usage — nobody replays a request
+    # against a day-old Idempotency-Key, and a client retrying that long
+    # after the original call needs a fresh request either way. Purged by
+    # anchor_worker/main.py's run_once() (same "one maintenance sweep per
+    # poll iteration" shape as reap_stale_claims, see that function) —
+    # not a client-facing knob, but centralized here rather than
+    # hardcoded per this file's own stated purpose (a single source of
+    # truth for every timeout/retention value in this codebase).
+    idempotency_key_retention_seconds: int = Field(default=24 * 3600, gt=0)
 
     # ── Indexer (Phase 2.2) ──────────────────────────────────────────────
     indexer_poll_interval_seconds: float = Field(default=2.0, gt=0)
@@ -265,6 +319,29 @@ class Settings(BaseSettings):
     # legitimately logs many steps.
     log_step_rate_limit_capacity: float = Field(default=120.0, gt=0)
     log_step_rate_limit_refill_per_second: float = Field(default=120.0 / 60, gt=0)
+    # Per-IP buckets (plan §11.4: "applied per API key and per IP") for
+    # endpoints with no authenticated principal to key a per-project
+    # bucket on — POST /auth/signup and the unauthenticated on-chain
+    # verify/status surface (/verify, /verify/tamper-demo, /verify-audit,
+    # /chain-status, /stats, and GET /stream/{run_id}'s connection open).
+    # Each of those gets its OWN bucket per IP (see rate_limit.py's
+    # enforce_ip_rate_limit — the bucket key includes an action segment)
+    # so one endpoint's usage can't starve another's, but they all share
+    # this one capacity/refill pair rather than each needing its own
+    # field: unlike the write-path buckets above, none of these spends
+    # real money per call, so a single generous-but-real ceiling is
+    # enough defense-in-depth rather than per-endpoint tuning.
+    ip_rate_limit_capacity: float = Field(default=30.0, gt=0)
+    ip_rate_limit_refill_per_second: float = Field(default=30.0 / 60, gt=0)
+    # Read-path bucket (plan §11.4: "distinct budgets for read and write
+    # paths") — one shared per-project bucket across every authenticated
+    # GET endpoint (/audit-log, /trust-scores, /leaderboard, /gas-spend,
+    # /runs, /steps/{id}/proof, /agents/{id}/verify, /api-keys), separate
+    # from the write-path buckets above so a burst of reads can never
+    # starve out write-path budget or vice versa. Generous relative to
+    # the write buckets since reads don't spend gas or LLM credits.
+    read_path_rate_limit_capacity: float = Field(default=120.0, gt=0)
+    read_path_rate_limit_refill_per_second: float = Field(default=120.0 / 60, gt=0)
 
     # ── Observability (P2.6) ─────────────────────────────────────────────
     log_level: str = Field(default="INFO")

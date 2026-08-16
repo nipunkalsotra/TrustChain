@@ -21,10 +21,22 @@
 #      comparison against KMS/Vault-backed signers — never funded on any
 #      real network, not derived from anything sensitive.
 #
+#   3. sk_live_abcdef123456 — an obviously-fake Stripe-shaped string used
+#      in backend/tests/test_main.py to assert a canary value never leaks
+#      into a response body. It matched the stripe-access-token rule by
+#      pattern shape alone (never a real credential — it was replaced by
+#      a non-matching canary string on sight, commit 5ac8959), but
+#      gitleaks scans full git history (fetch-depth: 0 in test.yml), so
+#      the string is still reachable forever at the commit that
+#      introduced it (a5236c2) regardless of the later fix. Allowlisting
+#      it here is the non-destructive fix — rewriting already-pushed
+#      history to scrub it would be worse.
+#
 # Without these, gitleaks flags a "detected private key" on every commit
 # touching any of those files — which would either break CI outright or
 # train reviewers to reflexively dismiss gitleaks findings, both worse
-# than excluding two specific, known-public, zero-value keys by name.
+# than excluding a small number of specific, known-public/known-fake,
+# zero-value strings by name.
 title = "TrustChain gitleaks config"
 
 [extend]
@@ -35,4 +47,5 @@ description = "Known-public, zero-value test credentials"
 regexes = [
   '''(0x)?ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
   '''4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318''',
+  '''sk_live_abcdef123456''',
 ]
