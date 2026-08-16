@@ -78,7 +78,14 @@ def test_reassigning_module_level_deprecated_routes_takes_effect(monkeypatch):
 def test_live_response_has_no_deprecation_headers_today(client):
     # Nothing is deprecated in production code — confirms the middleware
     # is genuinely a no-op right now, not just that the function is.
-    resp = client.get("/health")
+    #
+    # /ready, not /health: /health depends on the V1 bridge (real
+    # PRIVATE_KEY/MONAD_RPC_URL), which get_bridge_or_503's docstring
+    # documents as deliberately unconfigured in CI — asserting 200 there
+    # only passed locally because dev's own backend/.env happens to carry
+    # a real PRIVATE_KEY. /ready only depends on Postgres (always present
+    # here) and always returns 200 regardless of chain/bridge state.
+    resp = client.get("/ready")
     assert resp.status_code == 200
     assert "Deprecation" not in resp.headers
     assert "Sunset" not in resp.headers
@@ -90,11 +97,11 @@ def test_live_response_gets_deprecation_headers_when_route_is_listed(client, mon
         "DEPRECATED_ROUTES",
         [
             deprecation.DeprecatedRoute(
-                path="/health", sunset=SUNSET, successor="https://example.com/docs/v2/health"
+                path="/ready", sunset=SUNSET, successor="https://example.com/docs/v2/health"
             )
         ],
     )
-    resp = client.get("/health")
+    resp = client.get("/ready")
     assert resp.status_code == 200
     assert resp.headers["Deprecation"] == "true"
     assert resp.headers["Sunset"] == "Fri, 01 Jan 2027 00:00:00 GMT"
