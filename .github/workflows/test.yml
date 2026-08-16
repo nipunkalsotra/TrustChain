@@ -468,7 +468,7 @@ jobs:
         # zricethezav/gitleaks:latest detect --source=. -v`, not just
         # `gitleaks-action`'s own claim): 0 leaks with this config — so
         # this is a real, blocking gate, not an unverified guess.
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
