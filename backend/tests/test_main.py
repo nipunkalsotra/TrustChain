@@ -27,8 +27,15 @@ def test_ready_does_not_leak_raw_exception_details(client, monkeypatch):
     # not to the caller.
     import main
 
+    # Not a real credential shape (deliberately — gitleaks' own
+    # stripe-access-token rule flagged an earlier `sk_live_...`-prefixed
+    # version of this fixture as a real leaked secret and failed CI; the
+    # test only needs *some* string that must not reach the response, not
+    # one that happens to pattern-match a specific provider's key format).
+    canary = "this-must-never-reach-the-response-body-9f8e7d6c5b4a3210"
+
     def _broken_bridge():
-        raise ConnectionError("simulated outage with a secret-looking token=sk_live_abcdef123456")
+        raise ConnectionError(f"simulated outage carrying a sensitive value: {canary}")
 
     monkeypatch.setattr(main, "get_bridge", _broken_bridge)
 
@@ -36,7 +43,7 @@ def test_ready_does_not_leak_raw_exception_details(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["checks"]["chain"] == {"ok": False}
-    assert "sk_live_abcdef123456" not in r.text
+    assert canary not in r.text
     assert "error" not in body["checks"]["chain"]
 
 

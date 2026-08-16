@@ -94,7 +94,9 @@ _owned_containers = []
 # scenario needs the STABLE, externally-managed Postgres to mean
 # anything; it skips itself when this env var is set rather than failing
 # on a false alarm.
-if "DATABASE_URL" not in os.environ:
+_postgres_self_provisioned = "DATABASE_URL" not in os.environ
+
+if _postgres_self_provisioned:
     os.environ["_TC_POSTGRES_SELF_PROVISIONED"] = "true"
     from testcontainers.community.postgres import PostgresContainer
 
@@ -110,6 +112,30 @@ if "DATABASE_URL" not in os.environ:
     _owned_containers.append(_pg)
     os.environ["DATABASE_URL"] = _pg.get_connection_url()
 
+if "REDIS_URL" not in os.environ:
+    from testcontainers.community.redis import RedisContainer
+
+    _redis = RedisContainer("redis:7-alpine")
+    _redis.start()
+    _owned_containers.append(_redis)
+    os.environ["REDIS_URL"] = f"redis://{_redis.get_container_host_ip()}:{_redis.get_exposed_port(6379)}/0"
+
+# Both DATABASE_URL and REDIS_URL are now correctly set in os.environ (real
+# or self-provisioned) — ONLY NOW is it safe to run anything that could
+# construct the Settings singleton (get_settings() is @lru_cache'd, module-
+# level, process-wide: whichever env state exists at its FIRST call sticks
+# for the rest of the session, same reasoning as this file's
+# CHECK_PWNED_PASSWORDS ordering comment above). alembic/env.py calls
+# get_settings() to read sqlalchemy.url — running it any earlier (previously
+# interleaved between the Postgres and Redis blocks above) meant Settings
+# got constructed and cached BEFORE REDIS_URL was set, permanently locking
+# in redis_url's field default (redis://localhost:6379/0) for the entire
+# session regardless of what REDIS_URL was set to afterward. Undetected
+# locally purely by coincidence — a docker-compose Redis happened to
+# already be listening at that exact stale address — but broke every
+# single test in CI, where nothing does. Real, found regression, not
+# hypothetical: confirmed via a real GitHub Actions run.
+if _postgres_self_provisioned:
     # `_schema` fixture below only runs create_all_tables() (a plain ORM
     # schema build, no roles/RLS) — real deployments and CI's `services:`
     # path both apply the actual Alembic migrations instead, which is what
@@ -122,14 +148,6 @@ if "DATABASE_URL" not in os.environ:
 
     _alembic_cfg = Config(str(Path(__file__).parent.parent / "alembic.ini"))
     command.upgrade(_alembic_cfg, "head")
-
-if "REDIS_URL" not in os.environ:
-    from testcontainers.community.redis import RedisContainer
-
-    _redis = RedisContainer("redis:7-alpine")
-    _redis.start()
-    _owned_containers.append(_redis)
-    os.environ["REDIS_URL"] = f"redis://{_redis.get_container_host_ip()}:{_redis.get_exposed_port(6379)}/0"
 
 
 def pytest_sessionfinish(session, exitstatus):
