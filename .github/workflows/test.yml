@@ -17,6 +17,21 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Cache Foundry build artifacts
+        # forge's own cache/ (compiler input/output hashes) + out/ (compiled
+        # artifacts) — keyed on the actual contract sources so an unrelated
+        # change (a backend/frontend-only PR) restores a full hit and skips
+        # recompilation entirely. forge still verifies per-file content
+        # hashes on top of this before treating anything as up to date, so
+        # a coarse key match can't silently serve a stale build.
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: forge-${{ runner.os }}-${{ hashFiles('contracts/src/**/*.sol', 'contracts/lib/**/*.sol', 'contracts/foundry.toml', 'contracts/remappings.txt') }}
+          restore-keys: |
+            forge-${{ runner.os }}-
       - name: Show Forge version
         run: forge --version
       - name: Run Forge fmt
@@ -228,6 +243,21 @@ jobs:
         working-directory: backend
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Cache Foundry build artifacts
+        # forge's own cache/ (compiler input/output hashes) + out/ (compiled
+        # artifacts) — keyed on the actual contract sources so an unrelated
+        # change (a backend/frontend-only PR) restores a full hit and skips
+        # recompilation entirely. forge still verifies per-file content
+        # hashes on top of this before treating anything as up to date, so
+        # a coarse key match can't silently serve a stale build.
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: forge-${{ runner.os }}-${{ hashFiles('contracts/src/**/*.sol', 'contracts/lib/**/*.sol', 'contracts/foundry.toml', 'contracts/remappings.txt') }}
+          restore-keys: |
+            forge-${{ runner.os }}-
       # The anchor worker, indexer, and score_writer integration tests
       # (tests/test_anchor_worker.py, test_indexer.py, test_score_writer.py)
       # exercise real durability/Merkle-compatibility/event-decoding
@@ -494,6 +524,21 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Cache Foundry build artifacts
+        # forge's own cache/ (compiler input/output hashes) + out/ (compiled
+        # artifacts) — keyed on the actual contract sources so an unrelated
+        # change (a backend/frontend-only PR) restores a full hit and skips
+        # recompilation entirely. forge still verifies per-file content
+        # hashes on top of this before treating anything as up to date, so
+        # a coarse key match can't silently serve a stale build.
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: forge-${{ runner.os }}-${{ hashFiles('contracts/src/**/*.sol', 'contracts/lib/**/*.sol', 'contracts/foundry.toml', 'contracts/remappings.txt') }}
+          restore-keys: |
+            forge-${{ runner.os }}-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
