@@ -1,0 +1,30 @@
+# Local pre-commit secret scanning (plan §11.7: "Secret scanning
+# (gitleaks) runs in CI and on pre-commit" — this file is the pre-commit
+# half; .github/workflows/test.yml's `gitleaks` job is the CI half).
+#
+# Uses gitleaks-docker rather than the plain `gitleaks` hook (which needs
+# a local Go toolchain to `go install` the binary): this repo already
+# hard-depends on Docker for its local dev stack (see docker-compose.yml,
+# start.sh), so requiring Docker here adds no new dependency, whereas
+# requiring Go would. Pulls `zricethezav/gitleaks:latest` on first run —
+# the same image CI's own comment says was used to manually verify
+# .gitleaks.toml's allowlist (`docker run zricethezav/gitleaks:latest
+# detect --source=. -v`, 0 leaks).
+#
+# --config .gitleaks.toml is explicit rather than relying on gitleaks'
+# own "look for ./.gitleaks.toml if unset" default (see `gitleaks git
+# --help`'s config precedence list) — same file CI passes via the
+# GITLEAKS_CONFIG env var, kept in sync deliberately so a commit that
+# passes here won't turn around and fail in CI over an allowlist
+# mismatch, or vice versa.
+#
+# One-time setup for a contributor who wants this enforced locally
+# (CI enforces it regardless, so this is optional but recommended):
+#   pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-docker
+        name: gitleaks (secret scanning)
+        args: ["--config", ".gitleaks.toml"]

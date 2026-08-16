@@ -187,7 +187,9 @@ matching runbooks.md section.
 `.github/workflows/test.yml` runs, per push/PR: Foundry build/test/
 gas-snapshot-check/coverage-gate/Slither (contracts), pytest/ruff/
 mypy/Bandit/pip-audit/anchor-payload-PII-check (backend), tsc/lint/build/npm-audit (frontend),
-gitleaks (secret scanning, blocking), an API compatibility check
+gitleaks (secret scanning, blocking — the same check also runs locally
+as a pre-commit hook via `.pre-commit-config.yaml`, `pre-commit install`
+opts a clone into it), an API compatibility check
 diffing the current OpenAPI schema against the previous release's for
 breaking changes (`api-compat-check`, see
 [`docs/api-deprecation-policy.md`](api-deprecation-policy.md)), and a
