@@ -129,6 +129,7 @@ async def run_pipeline(
         "report":     "",
         "tx_hashes":  [],
         "sse_events": [],
+        "tokens_used": 0,
         "messages":   [],
     }
 
@@ -160,10 +161,11 @@ async def run_pipeline(
             "score":    final.get("score", 0),
             "txCount":  len(final.get("tx_hashes", [])),
             "txHashes": final.get("tx_hashes", []),
+            "tokensUsed": final.get("tokens_used", 0),
         }
         logger.info(
-            "[Pipeline] Run %s complete — %d txs, score=%d",
-            run_id, len(final.get("tx_hashes", [])), final.get("score", 0)
+            "[Pipeline] Run %s complete — %d txs, score=%d, %d tokens",
+            run_id, len(final.get("tx_hashes", [])), final.get("score", 0), final.get("tokens_used", 0)
         )
 
     except Exception as e:

@@ -1,4 +1,6 @@
+README.md
 pyproject.toml
+tests/test_cli.py
 trustchain_cli/__init__.py
 trustchain_cli/credentials.py
 trustchain_cli/main.py

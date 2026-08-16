@@ -71,3 +71,33 @@ traffic is still flowing through the fallback.
   deployment (no fallback URLs configured anywhere by default) — the
   mechanism is built and tested, but its real value is only realized
   once an operator actually configures a second RPC provider.
+
+### Addendum: per-call timeout + retry-with-jitter (F13)
+
+This ADR's original scope was fallback + circuit breaker only — it
+didn't mention per-call retry at all (the "bare retry loop with no
+breaker" alternative above was rejected as a *replacement* for the
+breaker, not as a layer under it). A separate gap turned out to exist
+underneath: a single transient blip against the CURRENT endpoint (one
+dropped packet, one slow response) counted as a full breaker failure,
+and every RPC call ran with web3.py's own undocumented 10s default
+timeout rather than anything this codebase configured.
+
+`FallbackHTTPProvider._call_with_retry()` now retries the SAME endpoint,
+full-jitter exponential backoff between attempts
+(`config.py`'s `rpc_retry_max_attempts`/`rpc_retry_base_delay_seconds`/
+`rpc_retry_max_delay_seconds`), before the breaker's failure count is
+touched at all — only an endpoint that fails ALL its retries counts as
+the one failure the breaker's threshold logic sees. `rpc_call_timeout_seconds`
+replaces the undocumented web3.py default with an explicit one, passed
+via `request_kwargs`.
+
+`build_w3()`/`BlockchainBridge.__init__` were also changed to always
+construct a `FallbackHTTPProvider` — even for a single URL (today's
+default, no `*_RPC_FALLBACK_URLS` configured) — since that's the only
+way single-endpoint deployments (the common case) actually get the new
+retry/timeout behavior; a bare `HTTPProvider` has neither. See
+`tests/test_resilient_provider.py`'s retry/timeout tests (a real dead
+port for retry-count/backoff-timing, a real hanging local TCP server for
+the timeout itself — connection-refused fails too fast to exercise a
+read timeout at all).

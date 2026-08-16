@@ -193,6 +193,11 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 # ── agents ────────────────────────────────────────────────────────────
 
+def cmd_agents_list(args: argparse.Namespace) -> None:
+    with TrustChainClient(_resolve_credential(args), base_url=_resolve_base_url(args)) as client:
+        _print_json(client.list_agents(include_revoked=args.include_revoked))
+
+
 def cmd_agents_verify(args: argparse.Namespace) -> None:
     tc = TrustChain(_resolve_credential(args), base_url=_resolve_base_url(args), on_error="raise")
     try:
@@ -306,6 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_agents = sub.add_parser("agents", help="Manage agent identities").add_subparsers(
         dest="agents_command", required=True
     )
+    p_agents_list = p_agents.add_parser("list", help="List registered agents in the current project")
+    p_agents_list.add_argument("--include-revoked", action="store_true", help="Also show revoked agents")
+    p_agents_list.set_defaults(func=cmd_agents_list)
     p_agents_verify = p_agents.add_parser("verify", help="Live-verify an agent's registered fingerprint")
     p_agents_verify.add_argument("agent_id")
     p_agents_verify.add_argument("--model", required=True)

@@ -16,6 +16,8 @@ implemented; see the plan's O10) are what actually bound worst-case spend.
 
 import time
 
+from fastapi import Request
+
 import observability
 from errors import ApiError, ErrorCode
 from redis_client import get_redis
@@ -96,6 +98,36 @@ async def enforce_rate_limit(
             429, "rate limit exceeded", ErrorCode.RATE_LIMIT_EXCEEDED,
             headers={"Retry-After": str(int(e.retry_after_seconds) + 1)},
         )
+
+
+def get_client_ip(request: Request) -> str:
+    """No reverse proxy sits in front of this deployment (docker-compose
+    exposes each service's port directly), so the socket's own peer
+    address is authoritative — trusting an X-Forwarded-For header without
+    a trusted-proxy allowlist in front would let any client spoof its own
+    rate-limit identity by just setting the header itself. Revisit this
+    the moment a real reverse proxy/load balancer is introduced."""
+    return request.client.host if request.client else "unknown"
+
+
+async def enforce_ip_rate_limit(request: Request, action: str, capacity: float, refill_per_second: float) -> None:
+    """Per-IP token bucket (plan §11.4's "per IP" dimension) for
+    endpoints with no authenticated principal to key a per-project bucket
+    on instead — POST /auth/signup and the unauthenticated on-chain
+    verify/status surface. `action` segments the bucket key so e.g.
+    /chain-status being polled on every page load can't burn through the
+    same budget that protects /auth/signup from mass account creation."""
+    client_ip = get_client_ip(request)
+    await enforce_rate_limit(f"ratelimit:ip:{action}:{client_ip}", capacity, refill_per_second, kind="ip")
+
+
+async def enforce_read_rate_limit(project_id: int, capacity: float, refill_per_second: float) -> None:
+    """Per-project token bucket (plan §11.4's "distinct budget for...
+    read... path") shared across every authenticated GET endpoint —
+    separate from the write-path buckets above (run-agent/register-agent/
+    log-step) so a burst of reads can never starve out write-path budget
+    or vice versa."""
+    await enforce_rate_limit(f"ratelimit:read:{project_id}", capacity, refill_per_second, kind="read")
 
 
 # ── Credential-stuffing defense (plan §11.3): exponential backoff per

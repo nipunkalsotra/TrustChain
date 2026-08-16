@@ -28,6 +28,7 @@ from pydantic import BaseModel, EmailStr, Field
 import auth
 import auth_pwned
 import db
+import deprecation
 import observability
 import rate_limit
 import refresh
@@ -69,8 +70,8 @@ observability.init_tracing(get_settings().otel_service_name, get_settings().otel
 _background_tasks: dict[asyncio.Task, str] = {}
 
 
-def _spawn_background_pipeline_run(task: str, run_id: str) -> asyncio.Task:
-    bg_task = asyncio.create_task(_run_pipeline_background(task, run_id))
+def _spawn_background_pipeline_run(task: str, run_id: str, org_id: int) -> asyncio.Task:
+    bg_task = asyncio.create_task(_run_pipeline_background(task, run_id, org_id))
     _background_tasks[bg_task] = run_id
     bg_task.add_done_callback(lambda t: _background_tasks.pop(t, None))
     return bg_task
@@ -163,6 +164,17 @@ async def _metrics_middleware(request: Request, call_next):
         method=request.method, path=path, status=response.status_code
     ).inc()
     observability.HTTP_REQUEST_DURATION_SECONDS.labels(method=request.method, path=path).observe(duration)
+    return response
+
+
+@app.middleware("http")
+async def _deprecation_headers_middleware(request: Request, call_next):
+    """Adds Deprecation/Sunset/Link headers per deprecation.DEPRECATED_ROUTES
+    — see that module and docs/api-deprecation-policy.md. A no-op today
+    (that list is empty), always run so a future entry takes effect with
+    no other code change."""
+    response = await call_next(request)
+    await deprecation.add_deprecation_headers(request, response)
     return response
 
 
@@ -392,8 +404,11 @@ class ApiKeyListItem(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/auth/signup", response_model=AuthResponse)
-async def signup(body: SignupRequest):
+async def signup(body: SignupRequest, request: Request):
     settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "signup", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
     if settings.check_pwned_passwords:
         if await auth_pwned.is_password_pwned(body.password, settings.pwned_passwords_timeout_seconds):
             observability.SIGNUP_PWNED_PASSWORD_REJECTIONS_TOTAL.inc()
@@ -423,7 +438,7 @@ async def login(body: LoginRequest, request: Request):
     """Credential-stuffing defense (plan §11.3): exponential backoff per
     account AND per IP on failed attempts, checked BEFORE the password
     verification runs — a locked-out attempt shouldn't pay for PBKDF2."""
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = rate_limit.get_client_ip(request)
     await rate_limit.check_login_backoff(body.email, client_ip)
 
     user = await db.authenticate_user(email=body.email, password=body.password)
@@ -509,6 +524,10 @@ async def create_api_key(body: CreateApiKeyRequest, current_user: auth.CurrentUs
 @router.get("/api-keys")
 async def list_api_keys(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
     await _require_admin(current_user)
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        current_user.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     keys = await tenancy.list_api_keys(current_user.project_id)
     return {"keys": keys}
 
@@ -528,7 +547,7 @@ async def revoke_api_key(key_id: int, current_user: auth.CurrentUser = Depends(a
 #  Background pipeline runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_pipeline_background(task: str, run_id: str):
+async def _run_pipeline_background(task: str, run_id: str, org_id: int):
     """
     Persists the run's terminal DB status (db.complete_run/fail_run) and
     the PIPELINE_RUNS_TOTAL metric based on which event run_pipeline()
@@ -578,6 +597,10 @@ async def _run_pipeline_background(task: str, run_id: str):
                 if event.get("type") == "run_complete":
                     await db.complete_run(run_id, event, int(time.time()))
                     succeeded = True
+                    tokens_used = event.get("tokensUsed", 0)
+                    if tokens_used:
+                        await tenancy.record_token_spend(org_id, tokens_used)
+                        observability.LLM_TOKENS_USED_TOTAL.labels(org_id=str(org_id)).inc(tokens_used)
                 elif event.get("type") == "error":
                     await db.fail_run(run_id, event.get("message", "pipeline error"), int(time.time()))
         observability.PIPELINE_RUNS_TOTAL.labels(status="completed" if succeeded else "failed").inc()
@@ -641,10 +664,23 @@ async def run_agent(
     if run_count >= settings.monthly_run_quota_per_org:
         raise ApiError(429, "monthly run quota exceeded for this organization", ErrorCode.QUOTA_EXCEEDED)
 
+    # Aggregate LLM token budget (plan O10) — same shape as the gas-spend
+    # ceiling (GET /gas-spend's orgGasBudget): a run never even starts
+    # once an org's real cumulative token spend (organizations.tokens_spent,
+    # updated after each run completes — see _run_pipeline_background)
+    # reaches its configured organizations.token_budget. Distinct from
+    # the per-run cap enforced mid-pipeline by agents/base.py's
+    # track_token_usage, which guards against one run looping
+    # pathologically rather than against total spend across many runs.
+    token_budget_status = await tenancy.get_org_token_budget_status(principal.org_id)
+    if token_budget_status["breached"]:
+        observability.TOKEN_BUDGET_REJECTIONS_TOTAL.labels(org_id=str(principal.org_id)).inc()
+        raise ApiError(429, "organization's LLM token budget exceeded", ErrorCode.TOKEN_BUDGET_EXCEEDED)
+
     run_id = body.run_id or make_run_id()
     user_email = principal.actor if not principal.is_api_key else None
     await db.create_run(run_id, principal.project_id, body.task, user_email, int(time.time()))
-    _spawn_background_pipeline_run(body.task, run_id)
+    _spawn_background_pipeline_run(body.task, run_id, principal.org_id)
     logger.info("run_started", run_id=run_id, actor=principal.actor, project_id=principal.project_id, task=body.task)
 
     response = RunAgentResponse(run_id=run_id, task=body.task, status="started", stream_url=f"/stream/{run_id}")
@@ -672,7 +708,12 @@ async def run_agent(
 
 @router.get("/stream/{run_id}")
 @v1_only_router.get("/runs/{run_id}/stream")  # Appendix A: GET /v1/runs/{id}/stream
-async def stream_events(run_id: str):
+async def stream_events(run_id: str, request: Request):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "stream", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+
     async def event_generator():
         try:
             async for event in run_events.read_events(run_id, timeout_seconds=120):
@@ -721,6 +762,10 @@ async def get_audit_log(
     another project returns an empty result, same as one that never
     existed at all."""
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
         entries = await read_model.get_audit_log_entries(principal.project_id, run_id=run_id)
         return {"entries": entries, "total": len(entries)}
@@ -739,6 +784,10 @@ async def get_trust_scores(
     principal: auth.Principal = Depends(auth.get_current_principal),
 ):
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
         scores = await read_model.get_trust_scores(principal.project_id, run_id)
         return {"runId": run_id, "scores": scores}
@@ -757,6 +806,10 @@ async def get_trust_score_history(
     principal: auth.Principal = Depends(auth.get_current_principal),
 ):
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
         history = await read_model.get_trust_score_history(principal.project_id, run_id)
         return {"runId": run_id, "history": history}
@@ -783,6 +836,10 @@ async def get_leaderboard(
     — would itself be an invariant-I7 violation, not a feature to preserve.
     """
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
         return await read_model.get_leaderboard(principal.project_id, max_runs=max_runs)
     except Exception as e:
@@ -801,10 +858,28 @@ async def get_gas_spend(principal: auth.Principal = Depends(auth.get_current_pri
     (anchor_worker/submit.py), not estimated. See db/read_model.py's
     get_gas_spend_summary for why one project can never see another's
     (invariant I7) or double-count a batch across the many steps it
-    anchors."""
+    anchors.
+
+    Also surfaces the caller's ORG-level gas budget/ceiling (plan
+    §11.4's hard gas-spend circuit breaker, tenancy.get_org_gas_budget_status)
+    and LLM token budget/ceiling (plan O10, tenancy.get_org_token_budget_status)
+    alongside the project-level actual-spend figure above — different
+    scopes (org vs. this one project) and different mechanisms (each an
+    accumulated running counter updated when its own real cost is known —
+    a confirmed anchor batch's receipt for gas, a completed run's
+    usage_metadata for tokens — vs. a live query here), but all real, all
+    answering "how close am I to being cut off" from the angles that
+    matter."""
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
-        return await read_model.get_gas_spend_summary(principal.project_id)
+        summary = await read_model.get_gas_spend_summary(principal.project_id)
+        summary["orgGasBudget"] = await tenancy.get_org_gas_budget_status(principal.org_id)
+        summary["orgTokenBudget"] = await tenancy.get_org_token_budget_status(principal.org_id)
+        return summary
     except Exception as e:
         logger.error("api_error", endpoint="gas-spend", error=str(e))
         raise ApiError(500, "internal error — see server logs for details", ErrorCode.INTERNAL_ERROR)
@@ -815,7 +890,11 @@ async def get_gas_spend(principal: auth.Principal = Depends(auth.get_current_pri
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/verify")
-async def verify_integrity(body: VerifyRequest):
+async def verify_integrity(body: VerifyRequest, request: Request):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "verify", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
     bridge = get_bridge_or_503()
     try:
         result = await bridge.verify_run(body.runId)  # already async
@@ -826,12 +905,16 @@ async def verify_integrity(body: VerifyRequest):
 
 
 @router.get("/verify/tamper-demo")
-async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. researcher")):
+async def verify_tamper_demo(request: Request, agent_id: str = Query(..., description="e.g. researcher")):
     """
     Read-only proof that AgentIdentityRegistry actually detects substitution:
     compares the real agent config hash (should PASS) against a deliberately
     mutated one (should FAIL). No on-chain writes, no gas spent.
     """
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "verify_tamper_demo", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
     bridge = get_bridge_or_503()
     try:
         return await bridge.tamper_demo(agent_id)
@@ -843,51 +926,62 @@ async def verify_tamper_demo(agent_id: str = Query(..., description="e.g. resear
 
 
 @router.get("/verify-audit")
-async def verify_audit(run_id: str = Query(...)):
+async def verify_audit(request: Request, run_id: str = Query(...)):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "verify_audit", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
     bridge = get_bridge_or_503()
+    tracer = observability.get_tracer(__name__)
     try:
-        # Step 1: get indices for this specific run
-        indices = await asyncio.to_thread(
-            bridge.audit_log.functions.getRunRecordIndices(run_id).call
-        )
-        logger.info("verify_audit_indices_fetched", run_id=run_id, count=len(indices))
+        with tracer.start_as_current_span("rpc_call.verify_audit") as span:
+            span.set_attribute("run_id", run_id)
 
-        if not indices:
-            return {"runId": run_id, "allMatch": True, "entries": []}
-
-        # Step 2: batch fetch all records in one RPC call
-        raw_records = await asyncio.to_thread(
-            bridge.audit_log.functions.getRecordsBatch(indices).call
-        )
-
-        # Step 3: for each record call verifyRecord(index, rawInput, rawOutput)
-        # BUT we don't have rawInput/rawOutput — only hashes are stored.
-        # So instead: re-read each record twice and confirm consistency.
-        results = []
-        for idx, raw in zip(indices, raw_records):
-            # Second independent read to confirm stability
-            recheck = await asyncio.to_thread(
-                bridge.audit_log.functions.getRecord(idx).call
+            # Step 1: get indices for this specific run
+            indices = await asyncio.to_thread(
+                bridge.audit_log.functions.getRunRecordIndices(run_id).call
             )
-            action_match = raw[2]      == recheck[2]       # action string
-            input_match  = raw[3].hex() == recheck[3].hex() # inputHash bytes32
-            output_match = raw[4].hex() == recheck[4].hex() # outputHash bytes32
+            logger.info("verify_audit_indices_fetched", run_id=run_id, count=len(indices))
 
-            results.append({
-                "entryId":     idx,
-                "agentId":     raw[1],
-                "action":      raw[2],
-                "actionMatch": action_match,
-                "inputMatch":  input_match,
-                "outputMatch": output_match,
-                "txHash":      None,  # not in struct, enriched separately
-            })
+            if not indices:
+                span.set_attribute("entry_count", 0)
+                return {"runId": run_id, "allMatch": True, "entries": []}
 
-        all_match = all(
-            r["actionMatch"] and r["inputMatch"] and r["outputMatch"]
-            for r in results
-        )
-        return {"runId": run_id, "allMatch": all_match, "entries": results}
+            # Step 2: batch fetch all records in one RPC call
+            raw_records = await asyncio.to_thread(
+                bridge.audit_log.functions.getRecordsBatch(indices).call
+            )
+
+            # Step 3: for each record call verifyRecord(index, rawInput, rawOutput)
+            # BUT we don't have rawInput/rawOutput — only hashes are stored.
+            # So instead: re-read each record twice and confirm consistency.
+            results = []
+            for idx, raw in zip(indices, raw_records):
+                # Second independent read to confirm stability
+                recheck = await asyncio.to_thread(
+                    bridge.audit_log.functions.getRecord(idx).call
+                )
+                action_match = raw[2]      == recheck[2]       # action string
+                input_match  = raw[3].hex() == recheck[3].hex() # inputHash bytes32
+                output_match = raw[4].hex() == recheck[4].hex() # outputHash bytes32
+
+                results.append({
+                    "entryId":     idx,
+                    "agentId":     raw[1],
+                    "action":      raw[2],
+                    "actionMatch": action_match,
+                    "inputMatch":  input_match,
+                    "outputMatch": output_match,
+                    "txHash":      None,  # not in struct, enriched separately
+                })
+
+            all_match = all(
+                r["actionMatch"] and r["inputMatch"] and r["outputMatch"]
+                for r in results
+            )
+            span.set_attribute("entry_count", len(results))
+            span.set_attribute("all_match", all_match)
+            return {"runId": run_id, "allMatch": all_match, "entries": results}
 
     except Exception as e:
         logger.error("api_error", endpoint="verify-audit", error=str(e))
@@ -899,13 +993,17 @@ async def verify_audit(run_id: str = Query(...)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/chain-status")
-async def chain_status():
+async def chain_status(request: Request):
     """
     Called by the frontend on mount to show the top status bar.
     DISCONNECTED in the UI means this endpoint is failing or unreachable.
     Most common causes: backend not running, CORS blocked, bridge error.
     """
-    rpc_url = get_settings().monad_rpc_url
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "chain_status", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    rpc_url = settings.monad_rpc_url
     try:
         bridge = get_bridge()
         # FIX 6: bridge.w3.eth.block_number and chain_id are SYNCHRONOUS.
@@ -960,14 +1058,25 @@ async def health():
 #  Distinct from /health, which is a liveness-flavored check that also
 #  happens to touch the chain. /ready is what an orchestrator should gate
 #  traffic on: it checks the database (the one dependency every request
-#  path actually needs) and reports chain reachability as informational,
-#  not blocking — a chain outage degrades specific endpoints, it shouldn't
+#  path actually needs), that the database's applied Alembic migration
+#  matches what this checked-out code's alembic/versions/ expects (F15 —
+#  a running process whose schema is behind isn't safe to route real
+#  traffic to; a fresh test/dev DB with no alembic_version table at all
+#  is a different, non-blocking case — see db.get_applied_migration_version's
+#  docstring), and reports chain reachability as informational, not
+#  blocking — a chain outage degrades specific endpoints, it shouldn't
 #  take the whole process out of rotation, matching how the rest of this
 #  file already treats bridge failures as non-fatal.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/ready")
 async def ready():
+    """No auth on this endpoint (an orchestrator's health-checker doesn't
+    carry a bearer token) — so a failing check's raw exception (a Postgres
+    DSN with credentials in a connection error, an RPC URL with an
+    embedded API key in a chain-connectivity error) must never reach the
+    response body. Logged server-side in full instead; the caller gets
+    only a boolean per check."""
     checks: dict[str, dict] = {}
     ok = True
 
@@ -975,7 +1084,32 @@ async def ready():
         await db.ping()
         checks["database"] = {"ok": True}
     except Exception as e:
-        checks["database"] = {"ok": False, "error": str(e)}
+        logger.error("readiness_check_failed", check="database", error=str(e))
+        checks["database"] = {"ok": False}
+        ok = False
+
+    try:
+        from db.engine import get_code_migration_head
+
+        applied = await db.get_applied_migration_version()
+        code_head = get_code_migration_head()
+        if applied is None:
+            # No alembic_version table at all — the schema was built
+            # straight from the ORM models (tests, or a dev DB before its
+            # first `alembic upgrade head`), not something a real
+            # deployment (which always migrates before starting the app)
+            # does. Informational: this check simply doesn't apply here,
+            # not a signal anything is actually wrong.
+            checks["migrations"] = {"ok": True}
+        elif applied == code_head:
+            checks["migrations"] = {"ok": True}
+        else:
+            logger.error("readiness_check_failed", check="migrations", applied=applied, expected=code_head)
+            checks["migrations"] = {"ok": False}
+            ok = False
+    except Exception as e:
+        logger.error("readiness_check_failed", check="migrations", error=str(e))
+        checks["migrations"] = {"ok": False}
         ok = False
 
     try:
@@ -983,7 +1117,8 @@ async def ready():
         await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
         checks["chain"] = {"ok": True}
     except Exception as e:
-        checks["chain"] = {"ok": False, "error": str(e)}
+        logger.error("readiness_check_failed", check="chain", error=str(e))
+        checks["chain"] = {"ok": False}
         # informational only — does not flip overall readiness
 
     return {"ready": ok, "checks": checks}
@@ -1001,6 +1136,10 @@ async def list_runs(
     """Run history, scoped to the caller's project (invariant I7) —
     survives backend restarts (persisted in Postgres)."""
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     runs = await db.list_runs(principal.project_id, limit=limit)
     return {"runs": runs, "total": len(runs)}
 
@@ -1008,6 +1147,10 @@ async def list_runs(
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
 
     # Always reads Postgres, scoped by project_id (invariant I7) — no
     # in-process cache. The old in-memory _run_results fast path had the
@@ -1055,6 +1198,30 @@ async def register_agent(
     return RegisterAgentResponse(agent_id=body.agent_id, tx_hash=tx_hash)
 
 
+@router.get("/agents")
+async def list_agents(
+    include_revoked: bool = Query(False),
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
+    """Every agent registered under the caller's project — read model
+    (db/read_model.py::list_agents over db/models.py's Agent table),
+    not a live on-chain call, since listing needs to enumerate rather
+    than check one known agent_id (the chain has no "list all agents
+    for project X" view — AgentIdentityRegistryV2's registeredKeys is
+    deliberately cross-tenant and untouched by the backend, see that
+    contract's own comment). Revoked agents are excluded by default
+    (?include_revoked=true to see them too) — a revoked agent_id can be
+    re-registered fresh, so most callers listing "my agents" want the
+    currently-usable set, not history."""
+    auth.require_scope(principal, "agents:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
+    agents = await read_model.list_agents(principal.project_id, include_revoked=include_revoked)
+    return {"agents": agents, "total": len(agents)}
+
+
 @router.get("/agents/{agent_id}/verify")
 async def verify_agent(
     agent_id: str,
@@ -1070,6 +1237,10 @@ async def verify_agent(
     built to catch for the pipeline's own 4 agents, now reachable for
     anyone's."""
     auth.require_scope(principal, "agents:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     try:
         return await identity_writer.verify_agent(principal.project_id, agent_id, code_hash)
     except Exception as e:
@@ -1145,6 +1316,10 @@ async def log_external_step(
 @router.get("/steps/{step_id}/proof")
 async def get_step_proof(step_id: int, principal: auth.Principal = Depends(auth.get_current_principal)):
     auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
     proof = await read_model.get_step_proof(step_id, principal.project_id)
     if proof is None:
         raise ApiError(
@@ -1161,7 +1336,11 @@ async def get_step_proof(step_id: int, principal: auth.Principal = Depends(auth.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
-async def platform_stats():
+async def platform_stats(request: Request):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "stats", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
     return await read_model.get_platform_stats()
 
 

@@ -46,6 +46,22 @@ groups:
           description: "{{ $value }} requests rejected by rate limiting in the last 5m — could be a legitimate traffic spike, a misbehaving client, or credential stuffing (kind=login)."
           runbook: "docs/runbooks.md#rate-limit-rejections-spike"
 
+      - alert: TokenBudgetCeilingBreached
+        # Not "something is broken" the way the other alerts in this file
+        # are — an org hitting its own configured token_budget and
+        # getting 429'd is expected, correct behavior (see
+        # observability.py's TOKEN_BUDGET_REJECTIONS_TOTAL docstring).
+        # This is an operator-attention signal (raise the budget, or
+        # reach out to the org), not an incident.
+        expr: sum by (org_id) (increase(token_budget_rejections_total[15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An org's LLM token budget ceiling was hit"
+          description: "org_id={{ $labels.org_id }} had {{ $value }} POST /run-agent request(s) rejected in the last 15m — see that org's GET /gas-spend orgTokenBudget, or raise organizations.token_budget directly."
+          runbook: "docs/runbooks.md#token-budget-ceiling-breached"
+
   - name: trustchain-anchor-worker
     rules:
       - alert: AnchorOutboxBacklogGrowing
@@ -95,9 +111,49 @@ groups:
           description: "{{ $value }} step(s) dead-lettered in the last 5m (source={{ $labels.source }} — reaper: exhausted a stale claim's retries; submit_failure: exhausted a failing batch's retries). Check anchor_outbox.last_error for the specific rows and docs/runbooks.md for recovery."
           runbook: "docs/runbooks.md#anchor-outbox-steps-dead-lettered"
 
+      - alert: AnchorReaperResetsCrashLoop
+        # observability.py's ANCHOR_REAPER_RESET_TOTAL docstring names
+        # this explicitly: "a high rate here across short windows is a
+        # crash-loop signal worth its own alert even though no data was
+        # actually lost." A single reset is normal recovery from an
+        # ordinary restart; a sustained high rate means the worker keeps
+        # dying mid-claim before it can recover on its own.
+        expr: sum(increase(anchor_reaper_reset_total[15m])) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Anchor worker claims are being reaped at a crash-loop rate"
+          description: "{{ $value }} outbox rows reset back to pending by the reaper in the last 15m — no data lost (distinct from AnchorOutboxStepsDeadLettered), but this many stale claims points at the worker crashing/restarting repeatedly rather than one-off recovery. Check anchor-worker container restarts/logs."
+          runbook: "docs/runbooks.md#anchor-reaper-resets-crash-loop"
+
+      - alert: AnchorGasCeilingBreached
+        # Same "not itself an incident" shape as TokenBudgetCeilingBreached
+        # above — a steadily climbing rate for one org, once breached, is
+        # expected and correct per ANCHOR_GAS_CEILING_BREACHED_TOTAL's own
+        # docstring. This is an operator-attention signal.
+        expr: sum by (org_id) (increase(anchor_gas_ceiling_breached_total[15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An org's gas-spend ceiling was hit, anchoring suspended"
+          description: "org_id={{ $labels.org_id }} had {{ $value }} batch(es) skipped (returned to the outbox, never lost) in the last 15m because organizations.gas_spent_wei reached organizations.gas_budget_wei. Raise the budget or contact the org — steps stay queued and anchor automatically once it's raised."
+          runbook: "docs/runbooks.md#anchor-gas-ceiling-breached"
+
   - name: trustchain-indexer
     rules:
       - alert: IndexerFallingBehind
+        # 1000 blocks is a round-number placeholder, not derived from a
+        # verified real block-time figure for whatever chain this is
+        # pointed at (Monad testnet in production, Anvil in dev — Anvil's
+        # own block time is artificial, mined per-transaction rather than
+        # on a fixed interval, so it can't be used to calibrate this
+        # either). What this threshold means in WALL-CLOCK time depends
+        # entirely on that chain's real block time, which isn't
+        # documented anywhere in this repo — tune this once real traffic
+        # against a real target chain exists to derive it from, same
+        # caveat as this whole file's header.
         expr: indexer_poll_lag_blocks > 1000
         for: 10m
         labels:
@@ -106,6 +162,22 @@ groups:
           summary: "Indexer is more than 1000 blocks behind chain head"
           description: "indexer_poll_lag_blocks={{ $value }} — check the indexer process is alive and the RPC endpoint is responsive."
           runbook: "docs/runbooks.md#indexer-falling-behind"
+
+      - alert: AgentIntegrityViolationsDetected
+        # Matches docs/runbooks.md's own framing for this metric: a
+        # single violation can be legitimate investigation traffic, but
+        # this "fires unexpectedly at scale" is the documented trigger
+        # condition for the emergency contract-pause runbook entry
+        # ("Pausing contracts in an emergency") — hence a >3 threshold,
+        # not fire-on-any-single-occurrence.
+        expr: sum(increase(agent_integrity_violations_total[15m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent integrity violations detected at an elevated rate"
+          description: "{{ $value }} integrity violation(s) indexed in the last 15m — see docs/runbooks.md's contract-pause runbook entry for when this warrants pausing the affected V2 contract."
+          runbook: "docs/runbooks.md#agent-integrity-violations-detected"
 
   - name: trustchain-rpc-resilience
     rules:
@@ -118,3 +190,13 @@ groups:
           summary: "An RPC endpoint's circuit breaker has been open for 5+ minutes"
           description: "endpoint={{ $labels.endpoint }} in {{ $labels.job }} is being skipped after repeated failures (see blockchain/resilient_provider.py). Traffic is riding on a fallback endpoint in the meantime — this alone isn't an outage, but every configured endpoint tripping at once would be."
           runbook: "docs/runbooks.md#rpc-circuit-breaker-open"
+
+      - alert: RpcCallFailuresElevated
+        expr: sum(increase(rpc_call_failures_total[15m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPC calls are failing at an elevated rate"
+          description: "{{ $value }} RPC call failures in the last 15m across all configured endpoints (blockchain/resilient_provider.py) — check whether RpcCircuitBreakerOpen is also firing; if not, failures aren't yet concentrated enough on one endpoint to trip its breaker but the overall chain connection is degraded."
+          runbook: "docs/runbooks.md#rpc-call-failures-elevated"

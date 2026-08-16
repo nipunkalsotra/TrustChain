@@ -33,7 +33,7 @@ from sqlalchemy import func, select
 
 from db import engine
 from db.engine import get_sessionmaker
-from db.models import AnchorBatch, AnchorOutbox, ReadModelScore, Run, Step
+from db.models import Agent, AnchorBatch, AnchorOutbox, ReadModelScore, Run, Step
 
 AGENTS = ["researcher", "validator", "scorer", "reporter"]
 
@@ -130,6 +130,13 @@ async def get_step_proof(step_id: int, project_id: int) -> Optional[dict]:
         "root": tree.root_hex,
         "anchorId": batch.onchain_anchor_id,
         "txHash": batch.tx_hash,
+        # blockNumber alone can be silently invalidated by a reorg — an
+        # independent verifier who wants to confirm this confirmation is
+        # still on the canonical chain (not just that a batch with this
+        # merkle_root was ONCE mined) needs the hash too, to compare
+        # against the chain's actual block at that height right now.
+        "blockNumber": batch.block_number,
+        "blockHash": batch.block_hash,
         "anchorStatus": batch.status,
         "rawInputHash": step.input_hash,
         "rawOutputHash": step.output_hash,
@@ -305,3 +312,35 @@ async def get_gas_spend_summary(project_id: int) -> dict:
         "confirmedBatchCount": confirmed_batch_count,
         "totalGasSpentWei": str(total_wei_spent),  # str: real wei totals exceed float64/JS-number precision
     }
+
+
+async def list_agents(project_id: int, include_revoked: bool = False) -> list[dict]:
+    """Every agent ever registered under this project — db/models.py's
+    Agent table, upserted by indexer/agent_events.py from
+    AgentIdentityRegistryV2's AgentRegistered/AgentUpdated/AgentRevoked
+    events (each via a live getAgent() read, see agent_events.py's
+    docstring for why). A single indexed SELECT, not a live on-chain
+    call (unlike GET /agents/{id}/verify) or an aggregation over the
+    raw event log — subject to the same eventual-consistency window
+    GET /trust-scores already has against rm_scores (up to one indexer
+    poll cycle behind the real on-chain state)."""
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        stmt = select(Agent).where(Agent.project_id == project_id)
+        if not include_revoked:
+            stmt = stmt.where(Agent.is_active.is_(True))
+        stmt = stmt.order_by(Agent.agent_id)
+        rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "agentId": r.agent_id,
+            "codeHash": r.code_hash,
+            "model": r.model,
+            "version": r.version,
+            "registeredBy": r.registered_by,
+            "registeredAt": r.registered_at,
+            "isActive": r.is_active,
+            "updatedAt": r.updated_at,
+        }
+        for r in rows
+    ]

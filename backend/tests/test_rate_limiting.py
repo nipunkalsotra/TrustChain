@@ -8,7 +8,11 @@ dependency order, status codes) is verified too.
 import asyncio
 
 import db
-from tests.conftest import seed_user_and_token
+from tests.conftest import requires_anvil, seed_user_and_token
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 def _auth_headers(token: str) -> dict:
@@ -268,3 +272,81 @@ def test_idempotency_key_is_scoped_per_project(client, monkeypatch):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.json()["run_id"] != r2.json()["run_id"]
+
+
+# ── db/idempotency.py::purge_expired (plan §14.3's 24h retention policy) ───
+
+def test_purge_expired_deletes_only_rows_past_retention(client, monkeypatch):
+    """Two real idempotency_keys rows, one backdated past the retention
+    window (same technique test_anchor_worker.py's reaper tests use for
+    claimed_at) and one fresh — purge_expired must delete only the
+    stale one, matching db/models.py's IdempotencyKey composite PK
+    (project_id, key), not just filter by key alone."""
+    import time as _time
+
+    from db import idempotency
+    from db.engine import get_sessionmaker
+    from tests.conftest import seed_project
+
+    project_id = seed_project("purge expired idempotency test")
+
+    async def _seed_and_purge():
+        async with get_sessionmaker()() as session:
+            await idempotency.store_response(
+                project_id, "stale-key", "POST", "/steps", b"{}", 200, {"ok": True},
+                now=int(_time.time()) - 25 * 3600,  # 25h old — past the 24h default
+            )
+            await idempotency.store_response(
+                project_id, "fresh-key", "POST", "/steps", b"{}", 200, {"ok": True},
+                now=int(_time.time()),
+            )
+        async with get_sessionmaker()() as session:
+            return await idempotency.purge_expired(session, retention_seconds=24 * 3600)
+
+    deleted = run(_seed_and_purge())
+    assert [(row.project_id, row.key) for row in deleted] == [(project_id, "stale-key")]
+
+    async def _remaining_keys():
+        async with get_sessionmaker()() as session:
+            from sqlalchemy import select
+
+            from db.models import IdempotencyKey
+            rows = (await session.execute(
+                select(IdempotencyKey.key).where(IdempotencyKey.project_id == project_id)
+            )).scalars().all()
+            return set(rows)
+
+    assert run(_remaining_keys()) == {"fresh-key"}
+
+
+@requires_anvil
+def test_anchor_worker_run_once_purges_expired_idempotency_keys_and_records_metric(chain_settings):
+    """Real end-to-end through anchor_worker.main.run_once (not calling
+    purge_expired directly) — proves the wiring, not just the function
+    in isolation: a stale row seeded before run_once() is gone after,
+    and IDEMPOTENCY_KEYS_PURGED_TOTAL reflects it."""
+    import time as _time
+
+    import observability
+    from anchor_worker.main import run_once as anchor_run_once
+    from db import idempotency
+    from tests.conftest import seed_project
+
+    project_id = seed_project("anchor worker purge test")
+    before = observability.IDEMPOTENCY_KEYS_PURGED_TOTAL._value.get()
+
+    run(idempotency.store_response(
+        project_id, "anchor-worker-stale-key", "POST", "/run-agent", b"{}", 200, {"ok": True},
+        now=int(_time.time()) - 25 * 3600,
+    ))
+    run(anchor_run_once("worker-idempotency-purge-test", chain_settings))
+
+    after = observability.IDEMPOTENCY_KEYS_PURGED_TOTAL._value.get()
+    assert after == before + 1
+
+    async def _get_cached():
+        return await idempotency.get_cached_response(
+            project_id, "anchor-worker-stale-key", "POST", "/run-agent", b"{}",
+        )
+
+    assert run(_get_cached()) is None

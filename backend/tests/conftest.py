@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from pathlib import Path
 
 # Must run before any other import in this file (or any test module) has a
 # chance to `import main` -> `import auth` -> `config.get_settings()`.
@@ -13,10 +14,6 @@ import re
 # before anything (including a fixture) touches the engine.
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-use-only")
 os.environ.setdefault("DATABASE_USE_NULL_POOL", "true")
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain",
-)
 # Off by default across the suite: dozens of existing tests reuse a small
 # handful of fixed passwords (seed_user_and_token's "testpassword123",
 # test_auth.py's "hunter22", ...) purely as functional test fixtures, and
@@ -28,7 +25,117 @@ os.environ.setdefault(
 # (auth_pwned.py, wired into POST /auth/signup) is still exercised for
 # real, with the check deliberately re-enabled per test, in
 # tests/test_auth_pwned.py.
+#
+# Must ALSO run before the Testcontainers block below, not just before any
+# test/fixture: that block's `alembic.command.upgrade()` call transitively
+# imports alembic/env.py, which calls config.get_settings() to read
+# sqlalchemy.url — the FIRST such call anywhere in the process constructs
+# and lru_cache's the Settings singleton for good. Found for real: with
+# this setdefault positioned AFTER that block (its original position,
+# before Testcontainers existed, when nothing this early ever touched
+# get_settings()), check_pwned_passwords was permanently stuck at its
+# field default (True) all session, breaking every signup-based test that
+# reuses one of this suite's well-known passwords — not a flaky ordering
+# issue, a deterministic one, since alembic upgrade always runs before
+# this line did in the old order.
 os.environ.setdefault("CHECK_PWNED_PASSWORDS", "false")
+
+
+# ── Self-provisioned Postgres/Redis (Testcontainers) ────────────────────
+#
+# Before this existed, DATABASE_URL/REDIS_URL fell back to
+# localhost:5432/6379 unconditionally — the suite assumed SOMETHING was
+# already listening there (the docker-compose stack, or CI's `services:`
+# containers), with no way to just run `pytest` from a clean checkout and
+# have it work. It also meant local pytest runs shared the SAME Postgres
+# the docker-compose anchor-worker/indexer were actively polling, which is
+# exactly why CLAUDE.md has to tell you to `docker compose stop
+# anchor-worker indexer` before running the suite locally — a live poller
+# holding locks against the tables `isolated_db` truncates every test.
+#
+# Now: DATABASE_URL/REDIS_URL, if ALREADY set (CI's `backend` job sets
+# both explicitly; a developer can still point at their own running
+# instance for debugging with real accumulated data), are respected
+# as-is — same fallback semantics the old `os.environ.setdefault` had,
+# just with a better default. If NOT set, real ephemeral Postgres/Redis
+# containers are started here (module scope — this runs once, at
+# collection time, before any fixture or test-module import can reach
+# get_settings()) and torn down in pytest_sessionfinish below. Verified
+# for real: a full local run with docker-compose entirely stopped and
+# these two env vars unset — including tests/test_row_level_security.py,
+# which needs a real `alembic upgrade head` to have run for its
+# `trustchain_api` role to exist, hence the explicit migration step below
+# rather than relying on `_schema` fixture's plain `create_all_tables()`.
+_owned_containers = []
+# Read by tests/test_chaos.py, as an env var rather than a plain module
+# attribute: pytest's own conftest auto-discovery can end up importing this
+# file under two different sys.modules keys (bare "conftest" vs.
+# "tests.conftest", if a test module explicitly does `from tests import
+# conftest`) — two independently-executed copies of everything below,
+# each with its own module-level state. Confirmed for real: a plain
+# `POSTGRES_SELF_PROVISIONED = "DATABASE_URL" not in os.environ` module
+# attribute came out wrong (False) when read from the "tests.conftest"
+# copy, because BY THE TIME that copy's module body ran, the "conftest"
+# copy had already set DATABASE_URL — so the same self-provisioning run
+# looked, from that vantage point, like DATABASE_URL had been externally
+# provided all along. os.environ itself has no such duplication problem
+# (it's one process-global namespace no matter how many module copies
+# exist), so that's what test_chaos.py checks instead.
+#
+# What it's for: Testcontainers-managed containers are designed for
+# exclusive lifecycle management BY the Python process that started them
+# (Ryuk reaps them on exit) — they're not meant to survive an out-of-band
+# `docker stop`/`docker start` from outside that. Confirmed for real:
+# doing exactly that made the postgres-outage chaos test correctly find
+# and stop the right container (see test_chaos.py's own updated
+# _postgres_container_name), but recovery then failed — the container
+# never became reachable again within 240s of `docker start`, unlike a
+# real docker-compose-managed instance restarting cleanly. That chaos
+# scenario needs the STABLE, externally-managed Postgres to mean
+# anything; it skips itself when this env var is set rather than failing
+# on a false alarm.
+if "DATABASE_URL" not in os.environ:
+    os.environ["_TC_POSTGRES_SELF_PROVISIONED"] = "true"
+    from testcontainers.community.postgres import PostgresContainer
+
+    # username/password/dbname match docker-compose.yml's postgres service
+    # (POSTGRES_USER/PASSWORD/DB=trustchain) because the RLS migration
+    # (alembic/versions/9f3a1c7d5e2b_*.py) hardcodes `GRANT CONNECT ON
+    # DATABASE trustchain TO trustchain_api` — a literal database name, not
+    # parameterized off whatever the connecting engine's own URL says —
+    # found by running this against Testcontainers' actual default
+    # ("test") first and hitting a real `InvalidCatalogNameError`.
+    _pg = PostgresContainer("postgres:16", username="trustchain", password="trustchain", dbname="trustchain", driver="asyncpg")
+    _pg.start()
+    _owned_containers.append(_pg)
+    os.environ["DATABASE_URL"] = _pg.get_connection_url()
+
+    # `_schema` fixture below only runs create_all_tables() (a plain ORM
+    # schema build, no roles/RLS) — real deployments and CI's `services:`
+    # path both apply the actual Alembic migrations instead, which is what
+    # creates the `trustchain_api` role + RLS policies
+    # test_row_level_security.py needs. Running that here too keeps the
+    # self-provisioned path equivalent to CI's real path, not a lesser one
+    # that silently skips RLS coverage.
+    from alembic import command
+    from alembic.config import Config
+
+    _alembic_cfg = Config(str(Path(__file__).parent.parent / "alembic.ini"))
+    command.upgrade(_alembic_cfg, "head")
+
+if "REDIS_URL" not in os.environ:
+    from testcontainers.community.redis import RedisContainer
+
+    _redis = RedisContainer("redis:7-alpine")
+    _redis.start()
+    _owned_containers.append(_redis)
+    os.environ["REDIS_URL"] = f"redis://{_redis.get_container_host_ip()}:{_redis.get_exposed_port(6379)}/0"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    for container in _owned_containers:
+        container.stop()
+
 
 import pytest
 from web3 import Web3
@@ -338,7 +445,7 @@ _INTEGRATION_SOURCE_MARKERS = (
     "create_async_engine", "session_factory", "get_audit_log_contract",
     "get_signer", "get_w3", "claim_batch", "build_batches", "submit_batch",
     "poll_once", "reconcile_batch_anchored", "index_score_updated",
-    "reap_stale_claims", "is_password_pwned",
+    "reap_stale_claims", "is_password_pwned", "NonceAuthorityLock",
 )
 # Checked separately (word-boundary-ish) rather than folded into the plain
 # substring list above: "client." alone is too generic (matches inside

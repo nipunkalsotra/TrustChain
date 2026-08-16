@@ -61,6 +61,12 @@ class Organization(Base):
     plan:           Mapped[str] = mapped_column(String(20), nullable=False, default="free")
     gas_budget_wei: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     gas_spent_wei:  Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # LLM token budget (plan O10: "LLM token budgets ... are what actually
+    # bound worst-case spend") — same nullable-ceiling/cumulative-spend
+    # shape as gas_budget_wei/gas_spent_wei above, checked and updated by
+    # db/tenancy.py's get_org_token_budget_status/record_token_spend.
+    token_budget:   Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    tokens_spent:   Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at:     Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
@@ -236,6 +242,15 @@ class AnchorBatch(Base):
     tx_hash:          Mapped[Optional[str]] = mapped_column(String(66), nullable=True, index=True)
     onchain_anchor_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     block_number:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Same reorg-detection reasoning as IndexerCursor.last_block_hash
+    # above: block_number ALONE can be silently invalidated by a reorg —
+    # a stored number that no longer matches the chain's actual block at
+    # that height means this batch's confirmation may have been on a
+    # since-abandoned fork. Storing the hash alongside the number is what
+    # lets a caller (or a future reconciliation check) actually detect
+    # that, rather than trusting a number that could point at nothing
+    # real anymore.
+    block_hash:       Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
     # Real gas-spend attribution (plan §11.4/O10) — the REAL cost this
     # specific batch's confirmation actually incurred, read straight off
     # the transaction receipt (gasUsed) and the receipt's own
@@ -372,6 +387,45 @@ class ReadModelAgentEvent(Base):
     tx_hash:       Mapped[str] = mapped_column(String(66), nullable=False)
     log_index:     Mapped[int] = mapped_column(Integer, nullable=False)
     indexed_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Agent(Base):
+    """
+    Current materialized state, one row per (project_id, agent_id) —
+    unlike ReadModelAgentEvent above (an append-only event log a "list
+    my agents" query would otherwise have to aggregate from scratch on
+    every request: latest AgentRegistered/AgentUpdated vs. a later
+    AgentRevoked), this table is upserted in place by the indexer
+    (indexer/agent_events.py) so GET /agents (db/read_model.py::
+    list_agents) is a single indexed SELECT.
+
+    Unlike rm_scores/ReadModelAgentEvent, this is NOT populated purely
+    from event args — neither AgentRegistered nor AgentUpdated actually
+    carries modelName/modelVersion (check AgentIdentityRegistryV2.sol's
+    event definitions), so indexer/agent_events.py does a live
+    getAgent() read whenever any identity-changing event fires and
+    upserts the chain's real current record. See that module's own
+    docstring for why a live read is correct here specifically — this
+    table represents "what's true right now," not history, so
+    rebuilding it from genesis by re-deriving current state at each
+    step converges to the same correct end state a pure-event replay
+    would, just without the (here, irrelevant) point-in-time fidelity
+    rm_agent_events itself still preserves.
+    """
+
+    __tablename__ = "agents"
+    __table_args__ = (UniqueConstraint("project_id", "agent_id", name="uq_agents_project_id_agent_id"),)
+
+    id:            Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    project_id:    Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    agent_id:      Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    code_hash:     Mapped[str] = mapped_column(String(66), nullable=False)
+    model:         Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    version:       Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    registered_by: Mapped[str] = mapped_column(String(42), nullable=False)
+    registered_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    is_active:     Mapped[bool] = mapped_column(nullable=False, default=True)
+    updated_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class IndexerCursor(Base):

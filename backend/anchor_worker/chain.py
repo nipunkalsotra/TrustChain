@@ -26,7 +26,14 @@ from config import get_settings
 
 @lru_cache
 def get_w3() -> Web3:
-    return build_w3(get_settings().resolved_v2_rpc_urls)
+    settings = get_settings()
+    return build_w3(
+        settings.resolved_v2_rpc_urls,
+        call_timeout_seconds=settings.rpc_call_timeout_seconds,
+        retry_max_attempts=settings.rpc_retry_max_attempts,
+        retry_base_delay_seconds=settings.rpc_retry_base_delay_seconds,
+        retry_max_delay_seconds=settings.rpc_retry_max_delay_seconds,
+    )
 
 
 @lru_cache

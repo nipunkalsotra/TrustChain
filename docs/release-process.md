@@ -61,6 +61,31 @@ of `docker-compose.yml`; it's deployed separately (Vercel, per
 `main.py`'s CORS-allowlist comments referencing a deployed frontend URL),
 with its own git-integration deploy flow.
 
+Every pushed image also gets an explicit SLSA provenance attestation
+(`provenance: true`) and is signed by digest with cosign, keyless — the
+same GitHub OIDC / Fulcio / Rekor mechanism `test.yml`'s `sdk-integration`
+job already uses for its SBOM, applied here to the actual images this
+job publishes. Verify a given release's image:
+
+```bash
+cosign verify --certificate-identity-regexp \
+  'https://github.com/<owner>/TrustChain/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/<owner>/trustchain-backend@<digest>
+```
+
+## OpenAPI schema snapshot
+
+`release.yml`'s `publish-openapi-snapshot` job attaches an `openapi.json`
+asset (`backend/scripts/generate_openapi_schema.py`'s output at that
+tag) to every GitHub Release. This is what
+[`docs/api-deprecation-policy.md`](api-deprecation-policy.md)'s
+automated `api-compat-check` CI job diffs the next release's API
+surface against to catch accidental breaking changes — see that doc for
+the mechanism and its current bootstrap-state caveats (no release has
+been cut yet, so this hasn't produced a real snapshot as of this
+writing).
+
 ## Canary rollout + automatic rollback
 
 `deploy/canary_rollout.sh` is the actual deploy mechanism `deploy.yml`'s

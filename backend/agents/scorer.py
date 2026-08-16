@@ -14,7 +14,8 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agents.base import AgentState, get_llm, log_step
+import observability
+from agents.base import AgentState, get_llm, log_step, track_token_usage
 from blockchain.score_writer import write_score
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ async def scorer_node(state: AgentState, bridge: Optional[Any] = None) -> AgentS
     validation = state["validation"]
     run_id     = state["run_id"]
     llm        = get_llm()
+    tracer     = observability.get_tracer(__name__)
 
     # Resolve bridge early — scorer needs it for update_score calls
     if bridge is None:
@@ -79,23 +81,28 @@ async def scorer_node(state: AgentState, bridge: Optional[Any] = None) -> AgentS
 
     # ── Step 1: LLM scoring, via structured output (F18) ──────────────────
     structured_llm = llm.with_structured_output(AgentScores, include_raw=True)
-    result = await structured_llm.ainvoke([
-        SystemMessage(content=(
-            "You are the Scorer agent in TrustChain. "
-            "Assign trust scores (0-100) for all 4 agents based on pipeline quality.\n\n"
-            "Scoring rules:\n"
-            "- researcher: depth, relevance, source quality of research\n"
-            "- validator:  thoroughness of fact-checking, verdict clarity\n"
-            "- scorer:     give yourself 80 (you are running correctly)\n"
-            "- reporter:   pre-score 75 (will produce final report)"
-        )),
-        HumanMessage(content=(
-            f"Task: {task}\n\n"
-            f"Research:\n{research[:800]}\n\n"
-            f"Validation:\n{validation[:800]}\n\n"
-            "Assign scores:"
-        )),
-    ])
+    with tracer.start_as_current_span("llm_call.compute_scores") as span:
+        span.set_attribute("agent_id", "scorer")
+        span.set_attribute("run_id", run_id)
+        result = await structured_llm.ainvoke([
+            SystemMessage(content=(
+                "You are the Scorer agent in TrustChain. "
+                "Assign trust scores (0-100) for all 4 agents based on pipeline quality.\n\n"
+                "Scoring rules:\n"
+                "- researcher: depth, relevance, source quality of research\n"
+                "- validator:  thoroughness of fact-checking, verdict clarity\n"
+                "- scorer:     give yourself 80 (you are running correctly)\n"
+                "- reporter:   pre-score 75 (will produce final report)"
+            )),
+            HumanMessage(content=(
+                f"Task: {task}\n\n"
+                f"Research:\n{research[:800]}\n\n"
+                f"Validation:\n{validation[:800]}\n\n"
+                "Assign scores:"
+            )),
+        ])
+
+    tokens_used = track_token_usage(state.get("tokens_used", 0), result["raw"], run_id)
 
     parsed: Optional[AgentScores] = result["parsed"]
     if parsed is None:
@@ -155,5 +162,6 @@ async def scorer_node(state: AgentState, bridge: Optional[Any] = None) -> AgentS
         "score":      final_score,
         "tx_hashes":  tx_hashes,
         "sse_events": sse_events,
+        "tokens_used": tokens_used,
         "messages":   [HumanMessage(content=scores_summary, name="scorer")],
     }

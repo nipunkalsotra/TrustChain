@@ -12,7 +12,8 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.base import AgentState, get_llm, log_step
+import observability
+from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
     score      = state.get("score", 0)
     run_id     = state["run_id"]
     llm        = get_llm()
+    tracer     = observability.get_tracer(__name__)
 
     tx_hashes:  list[str]  = list(state.get("tx_hashes",  []))
     sse_events: list[dict] = list(state.get("sse_events", []))
@@ -53,32 +55,36 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
     sse_events.append(evt)
 
     # ── Step 1: generate report ───────────────────────────────────────────
-    report_response = await llm.ainvoke([
-        SystemMessage(content=(
-            "You are the Reporter agent in TrustChain — a blockchain-verified multi-agent AI system.\n"
-            "Produce a clean, structured final report for the judge to read.\n\n"
-            "Use EXACTLY this format:\n\n"
-            "## Summary\n"
-            "<2-3 sentence executive summary>\n\n"
-            "## Key Findings\n"
-            "<numbered list of 3-5 findings from the research>\n\n"
-            "## Validation Status\n"
-            "<one paragraph — what was validated, what the verdict was>\n\n"
-            "## Trust Score\n"
-            f"Pipeline trust score: {score}/100\n"
-            "<one sentence on what this score means>\n\n"
-            "## Blockchain Audit\n"
-            "All agent steps are permanently recorded on Monad testnet. "
-            "Every action is immutably logged and verifiable via transaction hash."
-        )),
-        HumanMessage(content=(
-            f"Task: {task}\n\n"
-            f"Research findings:\n{research}\n\n"
-            f"Validation report:\n{validation}\n\n"
-            "Generate the final report:"
-        )),
-    ])
+    with tracer.start_as_current_span("llm_call.generate_report") as span:
+        span.set_attribute("agent_id", "reporter")
+        span.set_attribute("run_id", run_id)
+        report_response = await llm.ainvoke([
+            SystemMessage(content=(
+                "You are the Reporter agent in TrustChain — a blockchain-verified multi-agent AI system.\n"
+                "Produce a clean, structured final report for the judge to read.\n\n"
+                "Use EXACTLY this format:\n\n"
+                "## Summary\n"
+                "<2-3 sentence executive summary>\n\n"
+                "## Key Findings\n"
+                "<numbered list of 3-5 findings from the research>\n\n"
+                "## Validation Status\n"
+                "<one paragraph — what was validated, what the verdict was>\n\n"
+                "## Trust Score\n"
+                f"Pipeline trust score: {score}/100\n"
+                "<one sentence on what this score means>\n\n"
+                "## Blockchain Audit\n"
+                "All agent steps are permanently recorded on Monad testnet. "
+                "Every action is immutably logged and verifiable via transaction hash."
+            )),
+            HumanMessage(content=(
+                f"Task: {task}\n\n"
+                f"Research findings:\n{research}\n\n"
+                f"Validation report:\n{validation}\n\n"
+                "Generate the final report:"
+            )),
+        ])
     report_output = report_response.content
+    tokens_used = track_token_usage(state.get("tokens_used", 0), report_response, run_id)
 
     # ── Step 2: log completion ────────────────────────────────────────────
     tx, evt = await log_step(
@@ -101,5 +107,6 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
         "report":     report_output,
         "tx_hashes":  tx_hashes,
         "sse_events": sse_events,
+        "tokens_used": tokens_used,
         "messages":   [HumanMessage(content=report_output, name="reporter")],
     }

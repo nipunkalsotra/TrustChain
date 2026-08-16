@@ -34,11 +34,28 @@ from anchor_worker.main import handle_submit_failure, run_once
 from anchor_worker.reaper import reap_stale_claims
 from anchor_worker.submit import SubmitError, submit_batch
 from blockchain.merkle import build_tree
+from db import tenancy
 from tests.conftest import requires_anvil, seed_project
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def _histogram_count(histogram) -> float:
+    """Total observation count for an (unlabeled) Histogram — prometheus_
+    client exposes no public accessor for this; ._buckets stores raw
+    PER-bucket increments, not the cumulative-through-this-bucket counts
+    the exposition format shows, so reading ._buckets[-1] directly (the
+    "+Inf" bucket) does NOT give the running total the way it looks like
+    it should — only .collect()'s own cumulative-sum pass does. Real bug
+    caught writing this test: an earlier version of this helper read
+    ._buckets[-1] directly and always got 0."""
+    for metric in histogram.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_count"):
+                return sample.value
+    raise AssertionError("no _count sample found")
 
 
 def _unique_run_id(prefix: str) -> str:
@@ -52,8 +69,8 @@ def _unique_run_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def _seed_run_with_steps(run_id: str, n: int) -> list[dict]:
-    run(db.create_run(run_id, seed_project(), "anchor worker test task", None, int(time.time())))
+def _seed_run_with_steps(run_id: str, n: int, project_id: int | None = None) -> list[dict]:
+    run(db.create_run(run_id, project_id or seed_project(), "anchor worker test task", None, int(time.time())))
     events = []
     for i in range(n):
         _, evt = run(log_step(
@@ -749,3 +766,126 @@ def test_submit_batch_replaces_by_fee_when_first_attempt_never_confirms(chain_se
     assert result["status"] == "confirmed"
     after = observability.ANCHOR_BATCHES_REPLACED_TOTAL._value.get()
     assert after == before + 1, "expected exactly one replace-by-fee resubmission"
+
+
+# ── Gas-spend ceiling circuit breaker (plan §11.4, F6/F91) ──────────────
+
+async def _set_org_gas_budget(org_id: int, gas_budget_wei) -> None:
+    from sqlalchemy import text as _text
+
+    from db.engine import get_sessionmaker
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            _text("UPDATE organizations SET gas_budget_wei = :budget WHERE id = :org_id"),
+            {"budget": gas_budget_wei, "org_id": org_id},
+        )
+        await session.commit()
+
+
+@requires_anvil
+def test_run_once_skips_anchoring_when_org_gas_ceiling_already_breached(chain_settings):
+    """A real end-to-end run_once() call: the org's gas_spent_wei is
+    already >= its gas_budget_wei BEFORE this round even starts, so the
+    batch must never reach submit_batch at all — the outbox row stays
+    'pending' (not 'anchored', not dead-lettered), ready to retry once
+    the ceiling clears."""
+    project_id = seed_project("gas ceiling breached test")
+    run_id = _unique_run_id("run_gas_ceiling_test")
+    _seed_run_with_steps(run_id, 1, project_id=project_id)
+
+    org_id = run(tenancy.get_org_id_for_run(run_id))
+    assert org_id is not None
+    # Already over budget: spent (0, the seed default) >= budget (0) is
+    # true the moment ANY non-negative budget is set to 0.
+    run(_set_org_gas_budget(org_id, 0))
+
+    before = observability.ANCHOR_GAS_CEILING_BREACHED_TOTAL.labels(org_id=str(org_id))._value.get()
+    # anchor_max_batch_size=1 forces should_flush=True immediately on
+    # this round's single pending step, regardless of its age — without
+    # this, run_once() would just defer (batch_age_flush_deferred) and
+    # never reach the claim/batch/gas-ceiling logic this test exists to
+    # exercise at all (real behavior found by this test's own first run).
+    immediate_flush_settings = chain_settings.model_copy(update={"anchor_max_batch_size": 1})
+    anchored = run(run_once("worker-gas-ceiling-test", immediate_flush_settings))
+    after = observability.ANCHOR_GAS_CEILING_BREACHED_TOTAL.labels(org_id=str(org_id))._value.get()
+
+    assert anchored == 0
+    assert after == before + 1
+
+    async def _fetch_outbox_status():
+        from sqlalchemy import select
+        from db.engine import get_sessionmaker
+        from db.models import AnchorOutbox, Step
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(
+                select(AnchorOutbox).join(Step, Step.id == AnchorOutbox.step_id).where(Step.run_id == run_id)
+            )).scalars().all()
+            return rows
+
+    outbox_rows = run(_fetch_outbox_status())
+    assert len(outbox_rows) == 1
+    assert outbox_rows[0].status == "pending"
+    assert outbox_rows[0].batch_id is None
+    # The claim-time attempts increment must be fully undone — this is
+    # NOT a failed attempt counting toward anchor_max_attempts.
+    assert outbox_rows[0].attempts == 0
+
+
+@requires_anvil
+def test_run_once_anchors_normally_and_records_real_spend_when_under_budget(chain_settings):
+    """The companion case: a generous budget must anchor exactly as
+    before AND the org's gas_spent_wei must increase by the REAL
+    receipt-derived cost of this specific batch — cross-checked against
+    the same anchor_batches row's gas_used/gas_price_wei columns
+    test_submit_batch_anchors_on_chain_and_proof_verifies already proves
+    match the real on-chain receipt."""
+    project_id = seed_project("gas ceiling under budget test")
+    run_id = _unique_run_id("run_gas_under_budget_test")
+    _seed_run_with_steps(run_id, 1, project_id=project_id)
+
+    org_id = run(tenancy.get_org_id_for_run(run_id))
+    assert org_id is not None
+    run(_set_org_gas_budget(org_id, 10**18))  # effectively unlimited (real spend is gas_used * gas_price_wei, orders of magnitude smaller); gas_budget_wei is a Postgres BIGINT, so this must stay under 2**63-1
+
+    status_before = run(tenancy.get_org_gas_budget_status(org_id))
+    assert status_before["breached"] is False
+    assert status_before["gasSpentWei"] == 0
+
+    gas_cost_samples_before = observability.ANCHOR_BATCH_GAS_COST_WEI.labels(org_id=str(org_id))._sum.get()
+    gas_price_samples_before = _histogram_count(observability.ANCHOR_GAS_PRICE_WEI)
+
+    immediate_flush_settings = chain_settings.model_copy(update={"anchor_max_batch_size": 1})
+    anchored = run(run_once("worker-gas-under-budget-test", immediate_flush_settings))
+    assert anchored == 1
+
+    status_after = run(tenancy.get_org_gas_budget_status(org_id))
+    assert status_after["gasSpentWei"] > 0
+
+    # Real observability.py Histograms, not just the Postgres running
+    # total — the org-labeled cost sum must reflect this exact batch's
+    # real gas_spent_wei delta, and a new gas-price sample must have
+    # landed (checked as a count delta, not a value, since price varies
+    # run to run against Anvil's own fee-history projection).
+    real_spend_delta = status_after["gasSpentWei"] - status_before["gasSpentWei"]
+    gas_cost_samples_after = observability.ANCHOR_BATCH_GAS_COST_WEI.labels(org_id=str(org_id))._sum.get()
+    assert gas_cost_samples_after == gas_cost_samples_before + real_spend_delta
+    assert _histogram_count(observability.ANCHOR_GAS_PRICE_WEI) == gas_price_samples_before + 1
+
+    async def _fetch_confirmed_batch_gas():
+        from sqlalchemy import select
+        from db.engine import get_sessionmaker
+        from db.models import AnchorBatch, AnchorOutbox, Step
+        async with get_sessionmaker()() as session:
+            row = (await session.execute(
+                select(AnchorBatch)
+                .join(AnchorOutbox, AnchorOutbox.batch_id == AnchorBatch.id)
+                .join(Step, Step.id == AnchorOutbox.step_id)
+                .where(Step.run_id == run_id)
+            )).scalars().first()
+            return row
+
+    batch_row = run(_fetch_confirmed_batch_gas())
+    assert batch_row is not None
+    assert batch_row.status == "confirmed"
+    expected_spend = batch_row.gas_used * batch_row.gas_price_wei
+    assert status_after["gasSpentWei"] == expected_spend

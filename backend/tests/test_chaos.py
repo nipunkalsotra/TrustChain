@@ -24,6 +24,8 @@ Four scenarios:
 """
 
 import asyncio
+import os
+import re
 import subprocess
 import time
 import uuid
@@ -229,25 +231,55 @@ def test_chaos_gas_exhaustion_unfunded_signer_hits_pre_send_failure_path(chain_s
 # ── 4. Postgres failover — the real container, actually stopped ───────────
 
 def _postgres_container_name() -> str | None:
-    """Scoped to this project's own compose-managed container specifically
-    (docker-compose.yml's `postgres` service, named `<project>-postgres-1`
-    by Compose's default naming) — deliberately NOT a bare "postgres"
-    substring match, so this can never touch an unrelated Postgres
-    container that happens to also be running on the same host."""
+    """Resolves whichever container the app is ACTUALLY connected to right
+    now, by matching the live DATABASE_URL's port against `docker ps`'s
+    published port mappings — not a hardcoded name filter.
+
+    This used to just filter on `name=trustchain-postgres` (docker-
+    compose.yml's fixed service name) — correct as long as that was the
+    only way tests ever got a Postgres. It stopped being correct once
+    conftest.py started self-provisioning an ephemeral Postgres via
+    Testcontainers when DATABASE_URL isn't already set (see that file's
+    own module docstring): that container gets a random name AND a
+    random host port, so the name filter would silently find nothing (or
+    worse, find and stop the UNRELATED docker-compose Postgres sitting
+    right next to it, proving nothing about the container this test's
+    own connections actually depend on — confirmed for real: with
+    Testcontainers active, this test used to fail with 'expected a real
+    query to fail while Postgres was stopped' because the query kept
+    succeeding against the untouched Testcontainers instance while the
+    wrong container got stopped). Matching on DATABASE_URL's port instead
+    finds the right container under either path."""
+    from urllib.parse import urlparse
+
+    from config import get_settings
+
+    port = urlparse(get_settings().database_url.replace("+asyncpg", "")).port
+    if port is None:
+        return None
     try:
         result = subprocess.run(
-            ["docker", "ps", "--filter", "name=trustchain-postgres", "--format", "{{.Names}}"],
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
             capture_output=True, text=True, timeout=5,
         )
-        names = [n for n in result.stdout.strip().splitlines() if n]
-        return names[0] if names else None
+        for line in result.stdout.strip().splitlines():
+            name, _, ports = line.partition("\t")
+            if name and re.search(rf":{port}->", ports):
+                return name
+        return None
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
 
 
 requires_docker_postgres = pytest.mark.skipif(
-    _postgres_container_name() is None,
-    reason="no running trustchain-postgres-* container found via `docker ps`",
+    _postgres_container_name() is None or os.environ.get("_TC_POSTGRES_SELF_PROVISIONED") == "true",
+    reason=(
+        "no `docker ps` container found publishing DATABASE_URL's port — Postgres isn't running as a Docker container this test can stop/start"
+        if _postgres_container_name() is None else
+        "Postgres is self-provisioned via Testcontainers this session (see conftest.py's _TC_POSTGRES_SELF_PROVISIONED) — "
+        "those containers aren't designed to survive an out-of-band docker stop/start the way this test needs; "
+        "run against the docker-compose-managed instance (DATABASE_URL set) to exercise this scenario"
+    ),
 )
 
 

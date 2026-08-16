@@ -8,6 +8,15 @@ it caused — the outbox row it wrote, the batch the anchor worker put it in,
 the indexer event that confirmed it, and which tenant it all belongs to.
 That correlation is what makes "why is run_x stuck" AND "which tenant is
 hammering us" answerable from logs alone instead of by reading code.
+
+Also carries trace_id/span_id (_add_trace_context below) from whichever
+OpenTelemetry span is active when a log line is emitted — a genuinely
+separate mechanism from the contextvar-based IDs above (those are set
+explicitly per request/run; trace context comes from OTel's own current-
+span machinery, observability.py's tracer.start_as_current_span() call
+sites), but the same idea: without it, a log line and the distributed
+trace it happened inside of are two disconnected views of the same
+event with no way to jump between them.
 """
 
 import logging
@@ -67,6 +76,28 @@ def _add_correlation_ids(logger, method_name, event_dict):
     return event_dict
 
 
+def _add_trace_context(logger, method_name, event_dict):
+    """Injects the CURRENT OpenTelemetry span's trace_id/span_id (hex,
+    same format Jaeger/any OTLP backend displays) into every log line
+    emitted while that span is active — observability.py's three real
+    tracer.start_as_current_span() call sites (main.py's pipeline_run,
+    anchor_worker/main.py's anchor_batch_submit, indexer/main.py's
+    indexer_poll) each already wrap logger calls that had no way to be
+    found from the matching trace before this, and vice versa. A no-op
+    when nothing is tracing (no OTEL_EXPORTER_OTLP_ENDPOINT configured,
+    or simply no span active at this exact log call) — trace.get_current_span()
+    always returns a valid (if non-recording) Span object rather than
+    raising, and its SpanContext.is_valid is False in exactly that case,
+    same shape as the request_id/run_id `if` guards above."""
+    from opentelemetry import trace
+
+    span_context = trace.get_current_span().get_span_context()
+    if span_context.is_valid:
+        event_dict["trace_id"] = format(span_context.trace_id, "032x")
+        event_dict["span_id"] = format(span_context.span_id, "016x")
+    return event_dict
+
+
 def configure_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
     logging.basicConfig(
         format="%(message)s",
@@ -77,6 +108,7 @@ def configure_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
     shared_processors = [
         structlog.contextvars.merge_contextvars,
         _add_correlation_ids,
+        _add_trace_context,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),

@@ -10,6 +10,13 @@ name: k6 load test
 # thresholds are far more prone to flaking there than the deterministic
 # pass/fail checks in test.yml. Nightly + on-demand catches real
 # regressions without that cost.
+#
+# push/PR CI isn't performance-blind, though: test.yml's sdk-integration
+# job runs k6/smoke-perf-test.js (~35s, read-only, small VU count) against
+# the same live stack it already boots for the SDK tests — a fast,
+# read-path latency gate distinct from these three scripts. See that
+# script's own header comment for why it's a separate, much lighter thing
+# rather than just a shorter invocation of load-test.js.
 on:
   schedule:
     - cron: "0 3 * * *" # 03:00 UTC daily
@@ -42,6 +49,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
       # Same real-stack bootstrap as test.yml's sdk-integration job — a
       # load test against mocks would measure nothing real. See that job's
       # comments for why each step is needed (JWT_SECRET via .env,

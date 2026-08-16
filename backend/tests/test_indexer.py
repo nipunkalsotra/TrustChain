@@ -93,7 +93,7 @@ def test_indexer_reconciles_a_batch_stuck_at_submitted(chain_settings):
             await session.execute(
                 text("""
                     UPDATE anchor_batches
-                    SET status = 'submitted', block_number = NULL, confirmed_at = NULL
+                    SET status = 'submitted', block_number = NULL, block_hash = NULL, confirmed_at = NULL
                     WHERE id = :batch_id
                 """),
                 {"batch_id": batch["batch_id"]},
@@ -127,6 +127,13 @@ def test_indexer_reconciles_a_batch_stuck_at_submitted(chain_settings):
     assert reconciled_batch.block_number is not None
     assert reconciled_batch.confirmed_at is not None
     assert reconciled_batch.tx_hash == result["tx_hash"]
+    # block_hash gets set by reconcile.py's own path too, not just
+    # submit_batch's synchronous one — a batch reconciled purely from the
+    # BatchAnchored event (this test's whole point) still needs it for
+    # reorg-detection to mean anything regardless of which of the two
+    # code paths actually confirmed it.
+    assert reconciled_batch.block_hash is not None
+    assert reconciled_batch.block_hash.startswith("0x")
     assert all(o.status == "anchored" for o in outboxes)
 
 
@@ -288,6 +295,70 @@ def test_indexer_indexes_agent_registered_and_revoked(chain_settings):
 
 
 @requires_anvil
+def test_indexer_maintains_current_agent_state_through_register_update_revoke(chain_settings):
+    """db/models.py's Agent table (GET /agents' backing store) is
+    upserted in place, not appended to like rm_agent_events — this walks
+    a real agent through registerAgent (fresh id) -> registerAgent again
+    (same id, new codeHash/model/version, triggers AgentUpdated not a
+    second AgentRegistered) -> revokeAgent, and checks the ONE row for
+    this (project_id, agent_id) reflects each transition correctly,
+    including model/version actually updating on the AgentUpdated step
+    (indexer/agent_events.py's live getAgent() read, not that event's
+    own args, is what makes this correct — see that module's docstring)."""
+    contract = indexer_chain_module.get_identity_registry_contract()
+    signer = chain_module.get_signer()
+    w3 = indexer_chain_module.get_w3()
+
+    agent_id = _unique_agent_id("run_indexer_agent_state_test")
+    hash_v1 = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "v1"})
+    hash_v2 = _code_hash_for({"agentId": agent_id, "model": "gpt-4o", "version": "v2"})
+
+    def _send(fn, gas):
+        nonce = w3.eth.get_transaction_count(signer.address, "pending")
+        tx = fn.build_transaction({"from": signer.address, "nonce": nonce, "gas": gas, "gasPrice": w3.eth.gas_price})
+        signed = signer.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        return "0x" + tx_hash.hex()
+
+    async def _fetch_agent():
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                text("SELECT * FROM agents WHERE project_id = :pid AND agent_id = :aid"),
+                {"pid": _TEST_PROJECT_ID, "aid": agent_id},
+            )
+            row = result.mappings().first()
+            return dict(row) if row else None
+
+    _send(contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, hash_v1, "gpt-4o", "v1"), 400_000)
+    assert run(run_once()) >= 1
+
+    agent = run(_fetch_agent())
+    assert agent is not None
+    assert agent["code_hash"] == "0x" + hash_v1.hex()
+    assert agent["model"] == "gpt-4o"
+    assert agent["version"] == "v1"
+    assert agent["is_active"] is True
+    assert agent["registered_by"] == signer.address
+
+    _send(contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, hash_v2, "gpt-4o", "v2"), 400_000)
+    assert run(run_once()) >= 1
+
+    agent = run(_fetch_agent())
+    assert agent["code_hash"] == "0x" + hash_v2.hex()
+    assert agent["model"] == "gpt-4o"
+    assert agent["version"] == "v2"  # correctly updated, via the live getAgent() read
+    assert agent["is_active"] is True
+
+    _send(contract.functions.revokeAgent(_TEST_PROJECT_ID, agent_id), 200_000)
+    assert run(run_once()) >= 1
+
+    agent = run(_fetch_agent())
+    assert agent["is_active"] is False
+    assert agent["code_hash"] == "0x" + hash_v2.hex()  # revocation doesn't touch code_hash
+
+
+@requires_anvil
 def test_indexer_indexes_integrity_violation(chain_settings):
     """A real verifyAgentAndLog() call with a deliberately WRONG hash
     against a real registered agent — the contract's actual tamper-alarm
@@ -310,6 +381,9 @@ def test_indexer_indexes_integrity_violation(chain_settings):
         w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
         return "0x" + tx_hash.hex()
 
+    import observability
+    violations_before = observability.AGENT_INTEGRITY_VIOLATIONS_TOTAL._value.get()
+
     _send(contract.functions.registerAgent(_TEST_PROJECT_ID, agent_id, real_hash, "gpt-4o", "2026-01"), 400_000)
     violation_tx_hash = _send(
         contract.functions.verifyAgentAndLog(_TEST_PROJECT_ID, agent_id, tampered_hash), 200_000
@@ -317,6 +391,15 @@ def test_indexer_indexes_integrity_violation(chain_settings):
 
     handled = run(run_once())
     assert handled >= 1
+    # >=, not ==: Anvil's chain state persists across this whole pytest
+    # session while indexer_cursor (Postgres) resets per test, so a full
+    # genesis reindex here can re-discover EARLIER tests' own
+    # IntegrityViolation events too (same cross-test chain-history
+    # property test_v1_and_new_endpoints.py's agents-listing tests
+    # already document) — this only needs to prove THIS run's real
+    # violation was actually counted, not that it's the only one ever
+    # counted this session.
+    assert observability.AGENT_INTEGRITY_VIOLATIONS_TOTAL._value.get() >= violations_before + 1
 
     async def _fetch():
         from sqlalchemy import select

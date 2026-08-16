@@ -53,13 +53,45 @@ PIPELINE_RUN_DURATION_SECONDS = Histogram(
 )
 RATE_LIMIT_REJECTIONS_TOTAL = Counter(
     "rate_limit_rejections_total", "Requests rejected by rate limiting",
-    ["kind"],  # run_agent|login|register_agent|log_step
+    ["kind"],  # run_agent|login|register_agent|log_step|ip|read
 )
 SIGNUP_PWNED_PASSWORD_REJECTIONS_TOTAL = Counter(
     "signup_pwned_password_rejections_total",
     "Signups rejected because the chosen password appears in Have I Been Pwned's "
     "breach corpus (auth_pwned.py) — distinct from rate-limit rejections above, this "
     "is a content-based rejection, not a request-volume one.",
+)
+ANCHOR_PAYLOAD_PII_DETECTED_TOTAL = Counter(
+    "anchor_payload_pii_detected_total",
+    "Times agents/base.py::log_step found email-shaped content (pii_patterns.py) in "
+    "an input_text/output_text about to be hashed for anchoring — detection only, "
+    "never redaction or rejection (see pii_patterns.py's module docstring for why "
+    "mutating this content would break independent proof verification). A nonzero "
+    "rate here means real anchor payloads worth reviewing, not an automatic incident "
+    "— someone's task legitimately mentioning an email address isn't a privacy leak "
+    "on its own, only a call worth a human looking at what's actually being anchored.",
+    ["kind", "field"],  # kind: email (only pattern implemented so far) | field: input|output
+)
+TOKEN_BUDGET_REJECTIONS_TOTAL = Counter(
+    "token_budget_rejections_total",
+    "POST /run-agent requests rejected because their org's cumulative real LLM "
+    "token spend (organizations.tokens_spent) has reached its configured "
+    "organizations.token_budget ceiling (plan O10) — the run never starts, so "
+    "unlike anchor_gas_ceiling_breached_total there is no partial-spend recovery "
+    "case here.",
+    ["org_id"],
+)
+LLM_TOKENS_USED_TOTAL = Counter(
+    "llm_tokens_used_total",
+    "Real cumulative LLM token usage (agents/base.py::track_token_usage's real "
+    "usage_metadata total across a run's 5 LLM calls — researcher/validator x2/scorer/"
+    "reporter), recorded once per completed run, same number just written to "
+    "organizations.tokens_spent (db/tenancy.py::record_token_spend). Distinct from "
+    "token_budget_rejections_total (a rejection EVENT for a run that never started) — "
+    "this is the actual spend for runs that DID start, the number a cost dashboard or "
+    "rate/percentile query over real usage needs that a running Postgres total isn't "
+    "suited to answer directly.",
+    ["org_id"],
 )
 
 # ── Anchor worker (anchor_worker process) ───────────────────────────────
@@ -106,6 +138,26 @@ ANCHOR_REAPER_RESET_TOTAL = Counter(
 ANCHOR_SUBMIT_DURATION_SECONDS = Histogram(
     "anchor_submit_duration_seconds", "Time from tx submit to confirmed receipt"
 )
+IDEMPOTENCY_KEYS_PURGED_TOTAL = Counter(
+    "idempotency_keys_purged_total",
+    "idempotency_keys rows deleted after exceeding config.idempotency_key_retention_seconds "
+    "(plan §14.3's 24h policy) — db/idempotency.py::purge_expired, run once per anchor_worker "
+    "poll cycle (anchor_worker/main.py). A steadily climbing rate here is expected and "
+    "healthy (proof the sweep is running); it staying at zero for a live deployment "
+    "handling real Idempotency-Key traffic for more than a day is the actual signal "
+    "something's wrong with the sweep itself, not with the data.",
+)
+ANCHOR_GAS_CEILING_BREACHED_TOTAL = Counter(
+    "anchor_gas_ceiling_breached_total",
+    "Batches skipped (returned to the outbox as pending, not submitted) because their "
+    "owning org's real cumulative gas spend (organizations.gas_spent_wei) has reached its "
+    "configured organizations.gas_budget_wei ceiling — plan §11.4's 'hard gas-spend ceiling "
+    "... circuit breaker that suspends anchoring on breach', per-org, not global. The "
+    "skipped steps stay in the outbox (never lost) and are retried on every subsequent poll "
+    "until an operator raises the budget or the org's plan changes — a steadily climbing "
+    "rate here for one org, with no operator action, is expected and correct, not a bug.",
+    ["org_id"],
+)
 ANCHOR_WALLET_BALANCE_WEI = Gauge(
     "anchor_wallet_balance_wei",
     "Native-token balance of the anchor worker's signing wallet (sampled each work loop) — "
@@ -118,6 +170,31 @@ ANCHOR_WALLET_BALANCE_WEI = Gauge(
     "an alerting threshold (AnchorWalletBalanceLow), not a source of truth "
     "for exact accounting.",
 )
+ANCHOR_BATCH_GAS_COST_WEI = Histogram(
+    "anchor_batch_gas_cost_wei",
+    "Real cost (gas_used * effectiveGasPrice, read straight off each confirming batch's own "
+    "transaction receipt — see anchor_worker/submit.py, never estimated) of one confirmed "
+    "anchorBatch() call, attributed to the org whose steps it anchored. Distinct from "
+    "anchor_wallet_balance_wei (a point-in-time balance, not a per-tx cost) and from "
+    "anchor_gas_ceiling_breached_total (a skip EVENT, not the spend itself) — this is the "
+    "metric that answers 'how much is anchoring actually costing, and for which org' over "
+    "time. Same underlying numbers already written to organizations.gas_spent_wei "
+    "(db/tenancy.py::record_gas_spend) and returned by GET /gas-spend, just as a Histogram "
+    "here instead of a running total, for rate/percentile queries Postgres isn't suited to.",
+    ["org_id"],
+    buckets=(1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19),  # ~0.00001 to ~10 native-token units
+)
+ANCHOR_GAS_PRICE_WEI = Histogram(
+    "anchor_gas_price_wei",
+    "Real effectiveGasPrice (or the tx's own gasPrice, on a chain that doesn't surface "
+    "effectiveGasPrice — see submit.py's fallback) per confirmed anchorBatch() call — "
+    "network fee-market trend over time, independent of anchor_batch_gas_cost_wei (which "
+    "also varies with batch size/step count, not just price). A rising trend here across "
+    "many batches, even without any single alert threshold, is the signal that "
+    "config.py's anchor_rbf_fee_bump_fraction/priority-fee defaults may need retuning for "
+    "current network conditions.",
+    buckets=(1e8, 5e8, 1e9, 5e9, 1e10, 5e10, 1e11),  # ~0.1 to ~100 gwei
+)
 
 # ── RPC resilience (blockchain/resilient_provider.py) — anchor worker and
 #    indexer processes, whichever process's Web3 is built with
@@ -128,6 +205,19 @@ RPC_CIRCUIT_BREAKER_OPEN = Gauge(
     "down after repeated failures), 0 otherwise — see "
     "blockchain/resilient_provider.py. Only emitted when multiple RPC "
     "endpoints are configured; absent entirely for a single-endpoint setup.",
+    ["endpoint"],
+)
+RPC_CALL_FAILURES_TOTAL = Counter(
+    "rpc_call_failures_total",
+    "Individual RPC call failures against one endpoint (before failover to the next "
+    "configured endpoint, if any) — distinct from rpc_circuit_breaker_open, which is "
+    "sampled STATE (is this endpoint currently being skipped), not a failure-event count; "
+    "a breaker can stay closed while still accumulating occasional failures below its "
+    "failure_threshold, which this counter still captures and that gauge does not. Only "
+    "emitted when multiple RPC endpoints are configured (FallbackHTTPProvider) — a "
+    "single-endpoint deployment's RPC failures still surface via the higher-level counter "
+    "the failing call site already increments (e.g. anchor_batches_failed_total), just "
+    "without this endpoint-attributed breakdown.",
     ["endpoint"],
 )
 
@@ -144,6 +234,23 @@ INDEXER_RECONCILIATIONS_TOTAL = Counter(
     "'submitted' (the anchor-worker-crashed-before-confirming window) — "
     "see indexer/reconcile.py. A rising rate points at the anchor worker "
     "crashing/restarting often, not at the indexer itself.",
+)
+AGENT_INTEGRITY_VIOLATIONS_TOTAL = Counter(
+    "agent_integrity_violations_total",
+    "Real AgentIdentityRegistryV2.IntegrityViolation events indexed (indexer/"
+    "agent_events.py::index_integrity_violation) — the on-chain tamper alarm firing: a "
+    "verifyAgentAndLog() call found the provided config hash didn't match what's "
+    "registered for that agent, meaning its model/version/prompt changed without "
+    "re-registering (a silent substitution, or a caller passing a stale hash). Already "
+    "counted incidentally via indexer_events_processed_total{event_type=\"IntegrityViolation\"} "
+    "— this is a purpose-built name a dashboard/alert can target without depending on "
+    "that generic counter's label value staying exactly \"IntegrityViolation\". No "
+    "project_id/agent_id label (cardinality — see this module's own docstring); per-tenant "
+    "drill-down goes through structured logs the same way every other cardinality-sensitive "
+    "metric here does. docs/runbooks.md's 'Pausing contracts in an emergency' names "
+    "'IntegrityViolation fires unexpectedly at scale' as a trigger condition — this is "
+    "what that condition should actually watch (see docker/prometheus/alerts.yml's "
+    "AgentIntegrityViolationsDetected).",
 )
 
 

@@ -5,10 +5,11 @@ Run with `python -m indexer.main`. Each iteration polls every event stream
 this phase cares about — AgentAuditLogV2.BatchAnchored (closes the anchor
 worker's post-send-crash window; see reconcile.py), TrustScoreRegistryV2.
 ScoreUpdated (populates rm_scores), and AgentIdentityRegistryV2's
-AgentRegistered / AgentRevoked / IntegrityViolation (populates
-rm_agent_events, see agent_events.py) — and sleeps only if none of them
-produced anything new, so it drains a backlog quickly after being down
-rather than trickling through it at the poll interval.
+AgentRegistered / AgentUpdated / AgentRevoked / IntegrityViolation
+(populates rm_agent_events AND the current-state `agents` table, see
+agent_events.py) — and sleeps only if none of them produced anything
+new, so it drains a backlog quickly after being down rather than
+trickling through it at the poll interval.
 
 V1's contracts are deliberately NOT polled here — see docs/adr/0003's
 "Indexer scope" section for why (short version: V1 is read-only and
@@ -23,7 +24,12 @@ import observability
 from blockchain.resilient_provider import sample_breaker_states
 from config import get_settings
 from db.engine import get_sessionmaker
-from indexer.agent_events import index_agent_registered, index_agent_revoked, index_integrity_violation
+from indexer.agent_events import (
+    index_agent_registered,
+    index_agent_revoked,
+    index_agent_updated,
+    index_integrity_violation,
+)
 from indexer.chain import (
     get_audit_log_contract,
     get_identity_registry_contract,
@@ -72,11 +78,11 @@ async def run_once(settings=None) -> int:
         session_factory, w3, get_trust_score_contract(), "ScoreUpdated",
         index_score_updated, "TrustScoreRegistryV2", finality,
     )
-    # Three distinct cursor names ("AgentIdentityRegistryV2:<Event>"), even
-    # though all three events live on the same contract — poll_once's
+    # Four distinct cursor names ("AgentIdentityRegistryV2:<Event>"), even
+    # though all four events live on the same contract — poll_once's
     # cursor is keyed on the string passed here (indexer_cursor.contract_name
     # is the primary key), so reusing "AgentIdentityRegistryV2" across all
-    # three calls would have each call fast-forward the shared cursor past
+    # four calls would have each call fast-forward the shared cursor past
     # the block range the NEXT call still needs to scan for its own event
     # type, silently skipping events rather than genuinely tracking each
     # stream's own progress.
@@ -84,6 +90,10 @@ async def run_once(settings=None) -> int:
     handled += await _poll_traced(
         session_factory, w3, identity_contract, "AgentRegistered",
         index_agent_registered, "AgentIdentityRegistryV2:AgentRegistered", finality,
+    )
+    handled += await _poll_traced(
+        session_factory, w3, identity_contract, "AgentUpdated",
+        index_agent_updated, "AgentIdentityRegistryV2:AgentUpdated", finality,
     )
     handled += await _poll_traced(
         session_factory, w3, identity_contract, "AgentRevoked",

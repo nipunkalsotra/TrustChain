@@ -16,8 +16,9 @@ docstring.
 
 import asyncio
 
+import observability
 from anchor_worker.chain import get_signer, get_trust_score_contract, get_w3
-from blockchain.gas import build_fee_params
+from blockchain.gas import build_fee_params, estimate_gas_with_margin
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -29,22 +30,32 @@ async def write_score(agent_id: str, run_id: str, score: int, reason: str) -> st
     caller (scorer.py) already treats a failed on-chain score write as
     fatal to the pipeline run, matching V1's behavior, so this doesn't
     swallow errors or retry."""
-    w3 = get_w3()
-    signer = get_signer()
-    contract = get_trust_score_contract()
+    tracer = observability.get_tracer(__name__)
+    with tracer.start_as_current_span("rpc_call.write_score") as span:
+        span.set_attribute("agent_id", agent_id)
+        span.set_attribute("run_id", run_id)
 
-    fn = contract.functions.updateScore(agent_id, run_id, score, reason)
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    tx_params = {"from": signer.address, "nonce": nonce, "gas": 400_000}
-    tx_params.update(await build_fee_params(w3))
-    tx = fn.build_transaction(tx_params)
-    signed = signer.sign_transaction(tx)
-    tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
+        w3 = get_w3()
+        signer = get_signer()
+        contract = get_trust_score_contract()
 
-    receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-    if receipt.status != 1:
-        raise RuntimeError(f"TrustScoreRegistryV2.updateScore reverted for agent={agent_id} run={run_id}")
+        fn = contract.functions.updateScore(agent_id, run_id, score, reason)
+        nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
+        gas = await estimate_gas_with_margin(fn, signer.address, fallback=400_000)
+        tx_params = {"from": signer.address, "nonce": nonce, "gas": gas}
+        tx_params.update(await build_fee_params(w3))
+        tx = fn.build_transaction(tx_params)
+        signed = signer.sign_transaction(tx)
+        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
-    tx_hash_hex = "0x" + tx_hash.hex()
+        receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
+        if receipt.status != 1:
+            span.set_attribute("error", "reverted")
+            raise RuntimeError(f"TrustScoreRegistryV2.updateScore reverted for agent={agent_id} run={run_id}")
+
+        tx_hash_hex = "0x" + tx_hash.hex()
+        span.set_attribute("tx_hash", tx_hash_hex)
+        span.set_attribute("block_number", receipt.blockNumber)
+
     logger.info("score_written", agent_id=agent_id, run_id=run_id, score=score, tx_hash=tx_hash_hex)
     return tx_hash_hex

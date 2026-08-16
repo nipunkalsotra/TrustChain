@@ -16,6 +16,7 @@ from web3 import Web3
 from agents.llm_provider import build_chat_model
 from config import get_settings
 from logging_config import get_logger
+from pii_patterns import find_likely_pii
 
 logger = get_logger(__name__)
 
@@ -39,6 +40,13 @@ class AgentState(TypedDict):
     tx_hashes:  list[str]
     sse_events: list[dict]
 
+    # Real cumulative LLM token usage across all 5 ainvoke() calls in this
+    # run (researcher x1, validator x2, scorer x1, reporter x1) — see
+    # track_token_usage below. Threaded through the same way tx_hashes/
+    # sse_events are (each node reads the incoming total, adds its own
+    # calls' usage, returns the new total).
+    tokens_used: int
+
     # LangChain message history
     messages: Annotated[list[BaseMessage], add_messages]
 
@@ -55,6 +63,41 @@ def get_llm() -> BaseChatModel:
         _llm = build_chat_model()
         logger.info("llm_initialised", provider=get_settings().llm_provider)
     return _llm
+
+
+class TokenBudgetExceeded(RuntimeError):
+    """Raised by track_token_usage when a single run's cumulative LLM
+    token usage crosses config.llm_token_budget_per_run — a per-run
+    safety valve, not the org-level billing decision (that's checked
+    once before the run starts — see main.py's run_agent handler and
+    db.tenancy.get_org_token_budget_status). Propagates up through
+    whichever LangGraph node raised it; agents/pipeline.py's existing
+    top-level except Exception already turns any node failure into a
+    normal {"type": "error", ...} SSE event and a failed run, so no new
+    handling is needed at that layer."""
+
+
+def track_token_usage(tokens_so_far: int, response: Any, run_id: str) -> int:
+    """Extracts real token usage from an LLM response's usage_metadata
+    (populated by langchain_groq for every ainvoke() call — see
+    agents/llm_provider.py; for the Scorer's structured-output call this
+    is result["raw"], the underlying AIMessage) and returns the run's new
+    cumulative total. Takes the running total as a plain int, not
+    AgentState, because a single node can make more than one LLM call
+    (agents/validator.py makes two) — reading state["tokens_used"] again
+    for the second call would miss the first call's usage, since the
+    node's incoming `state` argument doesn't change mid-node.
+
+    Raises TokenBudgetExceeded if the new total crosses the configured
+    per-run ceiling — see its docstring for why this is deliberately
+    loose (a well-behaved run, 5 calls with a 2048-token output cap
+    each, never comes close)."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    total = tokens_so_far + usage.get("total_tokens", 0)
+    limit = get_settings().llm_token_budget_per_run
+    if total > limit:
+        raise TokenBudgetExceeded(f"run {run_id} exceeded its per-run LLM token budget ({total} > {limit} tokens)")
+    return total
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,6 +153,20 @@ async def log_step(
     from db.engine import get_sessionmaker
     from db.models import AnchorOutbox, Step
     from blockchain.merkle import leaf_hash as compute_leaf_hash
+    import observability
+
+    # Detection only, never redaction/rejection — see pii_patterns.py's
+    # module docstring for why mutating or blocking this content before
+    # hashing would break independent proof verification for every step,
+    # not just PII-shaped ones. This just gives operators visibility
+    # (metric + log line) into anchor payloads worth reviewing.
+    for field_name, text in (("input", input_text), ("output", output_text)):
+        for pii in find_likely_pii(text):
+            observability.ANCHOR_PAYLOAD_PII_DETECTED_TOTAL.labels(kind=pii.kind, field=field_name).inc()
+            logger.warning(
+                "anchor_payload_likely_pii", run_id=run_id, agent_id=agent_id, action=action,
+                field=field_name, kind=pii.kind,
+            )
 
     now = int(datetime.now(timezone.utc).timestamp())
     input_hash  = "0x" + Web3.solidity_keccak(["string"], [input_text]).hex()

@@ -17,15 +17,16 @@ the wrong one of the two things it could mean.
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.engine import get_sessionmaker
 from db.models import IdempotencyKey
-
-_RETENTION_SECONDS = 24 * 3600  # plan §14.3: idempotency keys retained 24h
 
 
 def _fingerprint(method: str, path: str, body: bytes) -> str:
@@ -79,3 +80,33 @@ async def store_response(
             await session.commit()
         except IntegrityError:
             await session.rollback()
+
+
+async def purge_expired(session: AsyncSession, retention_seconds: int) -> list:
+    """Deletes idempotency_keys rows older than retention_seconds (plan
+    §14.3's 24h policy — config.py's idempotency_key_retention_seconds).
+    Called once per anchor_worker run_once() iteration, same "one
+    maintenance sweep per poll cycle" shape as anchor_worker/reaper.py's
+    reap_stale_claims — see that function's call site in
+    anchor_worker/main.py for why this job lives there rather than in
+    the API process: anchor_worker already connects as the `trustchain`
+    superuser, bypassing Row-Level Security unconditionally
+    (idempotency_keys is RLS-covered, db/engine.py), so this cross-tenant
+    sweep needs no special bypass wiring the way running it from the API
+    process's RLS-bound `trustchain_api` role would.
+
+    Takes an already-open session and commits it itself, matching
+    reap_stale_claims' own signature/shape exactly (not
+    get_cached_response/store_response's self-contained-session style
+    above) — the caller runs this alongside other per-iteration
+    maintenance sweeps within one `async with session_factory() as
+    session:` block."""
+    now = int(datetime.now(timezone.utc).timestamp())
+    cutoff = now - retention_seconds
+    result = await session.execute(
+        text("DELETE FROM idempotency_keys WHERE created_at <= :cutoff RETURNING project_id, key"),
+        {"cutoff": cutoff},
+    )
+    deleted = result.all()
+    await session.commit()
+    return deleted

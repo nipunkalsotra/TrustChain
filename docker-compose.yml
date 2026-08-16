@@ -110,6 +110,16 @@ services:
       # localhost-default MCP URLs to the sibling services' Compose names.
       MCP_SEARCH_URL: http://mcp-search:8001/mcp
       MCP_BLOCKCHAIN_URL: http://mcp-blockchain:8002/mcp
+    # Bind-mounted, not baked in by the image's own COPY . . (backend/Dockerfile) —
+    # a fresh `forge script DeployV2.s.sol --broadcast` against local Anvil
+    # writes new addresses here (scripts/write_v2_addresses.py) far more
+    # often than the image itself changes, and picking that up should only
+    # need `docker compose restart`, not a full `--build` (which, since
+    # Anvil has no persistent volume, wipes all chain state right back to
+    # block 0 — the exact addresses this mount just updated would
+    # immediately go stale again).
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
       - "8000:8000"
     # F14 (Graceful shutdown): Docker's own default here is 10s SIGTERM ->
@@ -171,6 +181,10 @@ services:
       # avoid — found via a real SDK integration test's 30s polling
       # deadline actually timing out against this exact default.
       ANCHOR_MAX_BATCH_AGE_SECONDS: "5"
+    # See `api`'s identical mount above for why this is bind-mounted
+    # rather than baked into the image.
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
       - "9101:9101"   # Prometheus /metrics — see backend/observability.py
     depends_on:
@@ -189,6 +203,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
       MONAD_RPC_URL: http://anvil:8545
+    # See `api`'s identical mount above for why this is bind-mounted
+    # rather than baked into the image.
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
       - "9102:9102"   # Prometheus /metrics — see backend/observability.py
     depends_on:

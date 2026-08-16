@@ -90,6 +90,31 @@ def test_list_runs_includes_a_run_just_created(api_key):
         assert started["run_id"] in run_ids
 
 
+def test_list_agents_returns_empty_for_a_fresh_project():
+    # A dedicated key (not the module `api_key` fixture, which only has
+    # runs:write/runs:read) with agents:read specifically — read-model
+    # only (backend/db/read_model.py::list_agents), no Anvil/on-chain
+    # call needed, unlike register_agent/verify_agent.
+    email = f"sdk_test_{uuid.uuid4().hex}@example.com"
+    signup = httpx.post(
+        f"{BASE_URL}/auth/signup",
+        json={"name": "SDK integration test", "email": email, "password": "sdk-test-password-123"},
+        timeout=10.0,
+    )
+    assert signup.status_code == 200, signup.text
+    created = httpx.post(
+        f"{BASE_URL}/api-keys",
+        json={"scopes": ["agents:read"], "environment": "test"},
+        headers={"Authorization": f"Bearer {signup.json()['token']}"},
+        timeout=10.0,
+    )
+    assert created.status_code == 200, created.text
+
+    with TrustChainClient(created.json()["raw_key"], base_url=BASE_URL) as client:
+        result = client.list_agents()
+        assert result == {"agents": [], "total": 0}
+
+
 def test_stream_yields_events_ending_in_a_terminal_event(api_key):
     # The stream's actual last event is a synthetic "run_complete"
     # WRAPPER main.py's stream_events always appends after the pipeline's

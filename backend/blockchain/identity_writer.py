@@ -16,8 +16,9 @@ role distinct from both DEFAULT_ADMIN_ROLE and ANCHOR_ROLE.
 
 import asyncio
 
+import observability
 from anchor_worker.chain import get_identity_registry_contract, get_signer, get_w3
-from blockchain.gas import build_fee_params
+from blockchain.gas import build_fee_params, estimate_gas_with_margin
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -34,46 +35,64 @@ async def register_agent(project_id: int, agent_id: str, code_hash: str, model: 
     registering the same agent_id (e.g. both "researcher") would
     silently collide on-chain; main.py always passes the caller's own
     authenticated principal.project_id, never anything client-supplied."""
-    w3 = get_w3()
-    signer = get_signer()
-    contract = get_identity_registry_contract()
+    tracer = observability.get_tracer(__name__)
+    with tracer.start_as_current_span("rpc_call.register_agent") as span:
+        span.set_attribute("agent_id", agent_id)
+        span.set_attribute("project_id", project_id)
 
-    code_hash_bytes = bytes.fromhex(code_hash.removeprefix("0x"))
-    fn = contract.functions.registerAgent(project_id, agent_id, code_hash_bytes, model, version)
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    tx_params = {"from": signer.address, "nonce": nonce, "gas": 400_000}
-    tx_params.update(await build_fee_params(w3))
-    tx = fn.build_transaction(tx_params)
-    signed = signer.sign_transaction(tx)
-    tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
+        w3 = get_w3()
+        signer = get_signer()
+        contract = get_identity_registry_contract()
 
-    receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-    if receipt.status != 1:
-        raise RuntimeError(f"AgentIdentityRegistryV2.registerAgent reverted for agentId={agent_id}")
+        code_hash_bytes = bytes.fromhex(code_hash.removeprefix("0x"))
+        fn = contract.functions.registerAgent(project_id, agent_id, code_hash_bytes, model, version)
+        nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
+        gas = await estimate_gas_with_margin(fn, signer.address, fallback=400_000)
+        tx_params = {"from": signer.address, "nonce": nonce, "gas": gas}
+        tx_params.update(await build_fee_params(w3))
+        tx = fn.build_transaction(tx_params)
+        signed = signer.sign_transaction(tx)
+        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
-    tx_hash_hex = "0x" + tx_hash.hex()
+        receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
+        if receipt.status != 1:
+            span.set_attribute("error", "reverted")
+            raise RuntimeError(f"AgentIdentityRegistryV2.registerAgent reverted for agentId={agent_id}")
+
+        tx_hash_hex = "0x" + tx_hash.hex()
+        span.set_attribute("tx_hash", tx_hash_hex)
+
     logger.info("agent_registered_onchain", agent_id=agent_id, tx_hash=tx_hash_hex)
     return tx_hash_hex
 
 
 async def revoke_agent(project_id: int, agent_id: str) -> str:
-    w3 = get_w3()
-    signer = get_signer()
-    contract = get_identity_registry_contract()
+    tracer = observability.get_tracer(__name__)
+    with tracer.start_as_current_span("rpc_call.revoke_agent") as span:
+        span.set_attribute("agent_id", agent_id)
+        span.set_attribute("project_id", project_id)
 
-    fn = contract.functions.revokeAgent(project_id, agent_id)
-    nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
-    tx_params = {"from": signer.address, "nonce": nonce, "gas": 200_000}
-    tx_params.update(await build_fee_params(w3))
-    tx = fn.build_transaction(tx_params)
-    signed = signer.sign_transaction(tx)
-    tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
+        w3 = get_w3()
+        signer = get_signer()
+        contract = get_identity_registry_contract()
 
-    receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-    if receipt.status != 1:
-        raise RuntimeError(f"AgentIdentityRegistryV2.revokeAgent reverted for agentId={agent_id}")
+        fn = contract.functions.revokeAgent(project_id, agent_id)
+        nonce = await asyncio.to_thread(w3.eth.get_transaction_count, signer.address, "pending")
+        gas = await estimate_gas_with_margin(fn, signer.address, fallback=200_000)
+        tx_params = {"from": signer.address, "nonce": nonce, "gas": gas}
+        tx_params.update(await build_fee_params(w3))
+        tx = fn.build_transaction(tx_params)
+        signed = signer.sign_transaction(tx)
+        tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
-    tx_hash_hex = "0x" + tx_hash.hex()
+        receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
+        if receipt.status != 1:
+            span.set_attribute("error", "reverted")
+            raise RuntimeError(f"AgentIdentityRegistryV2.revokeAgent reverted for agentId={agent_id}")
+
+        tx_hash_hex = "0x" + tx_hash.hex()
+        span.set_attribute("tx_hash", tx_hash_hex)
+
     logger.info("agent_revoked_onchain", agent_id=agent_id, tx_hash=tx_hash_hex)
     return tx_hash_hex
 
@@ -88,11 +107,18 @@ async def verify_agent(project_id: int, agent_id: str, current_hash: str) -> dic
     registration for this agent_id, not whichever tenant happened to
     register that name first (see AgentIdentityRegistryV2.sol's
     project-namespacing docstring)."""
-    contract = get_identity_registry_contract()
-    current_hash_bytes = bytes.fromhex(current_hash.removeprefix("0x"))
-    result = await asyncio.to_thread(
-        lambda: contract.functions.verifyAgentFull(project_id, agent_id, current_hash_bytes).call()
-    )
+    tracer = observability.get_tracer(__name__)
+    with tracer.start_as_current_span("rpc_call.verify_agent") as span:
+        span.set_attribute("agent_id", agent_id)
+        span.set_attribute("project_id", project_id)
+
+        contract = get_identity_registry_contract()
+        current_hash_bytes = bytes.fromhex(current_hash.removeprefix("0x"))
+        result = await asyncio.to_thread(
+            lambda: contract.functions.verifyAgentFull(project_id, agent_id, current_hash_bytes).call()
+        )
+        span.set_attribute("is_valid", result[0])
+
     return {
         "agentId": agent_id,
         "isValid": result[0],

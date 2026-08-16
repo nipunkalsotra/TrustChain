@@ -2,7 +2,27 @@
 # computes the next version from Conventional Commits since the last
 # release (see .releaserc.json), writes CHANGELOG.md, tags the commit,
 # publishes a GitHub Release, and builds+pushes versioned Docker images
-# for every deployable component to GHCR.
+# for every deployable component to GHCR. Also publishes the SDK
+# packages (npm's trustchain-sdk, PyPI's trustchain-sdk/trustchain-cli)
+# with provenance attestations, each gated on needs.release.outputs.released
+# same as publish-images — see publish-sdk-typescript/publish-sdk-python
+# below for the mechanism (npm's native --provenance vs. PyPI Trusted
+# Publishing) and for why SDK versions aren't synced to this pipeline's
+# own semantic-release tag (each SDK's package.json/pyproject.toml
+# version is bumped independently, manually, when a real SDK release is
+# actually intended — most monorepo releases don't touch the SDKs at
+# all, and forcing every tag to also be a new SDK version would mean
+# most "releases" from the SDKs' point of view are no-op version bumps).
+#
+# First real publish needs one-time manual setup this workflow can't do
+# itself: an npm automation token stored as the NPM_TOKEN repo secret,
+# and a PyPI "trusted publisher" configured on pypi.org for both the
+# trustchain-sdk and trustchain-cli projects, naming this repo + this
+# workflow file + the "pypi" GitHub Environment (see publish-sdk-python's
+# `environment:` key) — PyPI requires the project to already exist to
+# add a trusted publisher UNLESS using its separate "pending publisher"
+# flow for a package's very first release; either way this is an action
+# only whoever controls the real pypi.org/npmjs.com accounts can take.
 #
 # Requires commits on main to follow Conventional Commits
 # (feat:/fix:/perf:/etc. — https://www.conventionalcommits.org) for
@@ -66,6 +86,14 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Same keyless-signing mechanism test.yml's sdk-integration job
+      # already uses for the SBOM (see that job's own comment on cosign +
+      # Fulcio + Rekor) — id-token: write lets cosign exchange this job's
+      # GitHub-issued OIDC token for a short-lived signing cert, applied
+      # here to the actual images this workflow pushes to GHCR, which
+      # that other job's signing never covered (it signs an SBOM for a
+      # LOCALLY-built test image, not these released ones).
+      id-token: write
     strategy:
       matrix:
         include:
@@ -103,11 +131,188 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
+          # Explicit, not relying on buildx's implicit default (which
+          # CLAUDE.md's own notes on this repo's dev workflow already
+          # document as real, observable behavior — provenance
+          # attestations changing an image's digest on every build even
+          # with 100% layer-cache hits, cascading unwanted container
+          # recreates through docker-compose's dependency graph). Making
+          # it explicit here means a future buildx default change can't
+          # silently turn this off for the one place it actually matters
+          # (a real published release image, not a local dev rebuild).
+          provenance: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}:${{ needs.release.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}:latest
+      - name: Install cosign
+        # Same pin/reasoning as test.yml's sdk-integration job — v4.1.2
+        # specifically, not the floating @v4 (see that job's own comment
+        # on why the major-version alias doesn't reliably resolve).
+        uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign the published image (keyless)
+        # Signs by DIGEST, not by the mutable `:latest`/version tags —
+        # cosign's own recommended practice, since a tag can be
+        # repointed later but a digest can't. Verify with:
+        #   cosign verify --certificate-identity-regexp
+        #     'https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*'
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        #     ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes \
+            "ghcr.io/${{ github.repository_owner }}/trustchain-${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+
+  publish-openapi-snapshot:
+    name: Snapshot OpenAPI schema onto the release
+    # Feeds test.yml's api-compat-check job on the NEXT release: that job
+    # downloads the previous tag's openapi.json (via `gh release download`)
+    # and diffs it against the new commit's live schema with `oasdiff
+    # breaking`. See docs/api-deprecation-policy.md. Independent of
+    # publish-images — doesn't need Docker/GHCR, just `from main import
+    # app` (see backend/scripts/generate_openapi_schema.py), so it's a
+    # separate, faster job rather than piggybacking on that one.
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release upload attaches an asset to the release this job's own workflow_run just created
+    env:
+      JWT_SECRET: ci-release-snapshot-secret-not-for-production-use-only
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+        working-directory: backend
+      - name: Generate OpenAPI schema
+        run: python3 scripts/generate_openapi_schema.py ../openapi.json
+        working-directory: backend
+      - name: Upload as a release asset
+        run: gh release upload "v${{ needs.release.outputs.version }}" openapi.json --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-sdk-typescript:
+    name: Publish TypeScript SDK (npm, with provenance)
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets npm exchange this job's GitHub-issued OIDC token for a
+      # signed SLSA provenance attestation tying the published tarball to
+      # this exact repo+workflow+commit — the same keyless-attestation
+      # idea as cosign's use in test.yml's sdk-integration job (id-token:
+      # write there, see that job's comment), just via npm's own native
+      # `--provenance` mechanism instead of cosign, since npm publishes
+      # attestations straight to the registry itself rather than a
+      # separate Sigstore bundle. Still needs NODE_AUTH_TOKEN (an npm
+      # automation token, repo secret NPM_TOKEN) for the publish
+      # AUTHENTICATION itself — id-token: write alone only covers
+      # provenance, not "who's allowed to publish this package."
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install and build
+        run: |
+          npm install
+          npm run build
+        working-directory: sdk/typescript
+      - name: Skip if this version is already published
+        # SDK packages version independently from the monorepo's own
+        # semantic-release tag (nothing syncs sdk/typescript/package.json's
+        # version to it — see this file's module docstring) — a release
+        # that didn't touch the SDK still runs this job, so re-publishing
+        # an already-published version needs to be a clean no-op, not a
+        # failed release (npm publish itself would hard-error on a
+        # duplicate version, which is correct for npm's own immutability
+        # guarantee, just not what CI should treat as a release failure).
+        id: check
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "trustchain-sdk@$version" version >/dev/null 2>&1; then
+            echo "trustchain-sdk@$version is already published — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        working-directory: sdk/typescript
+      - name: Publish to npm with provenance
+        if: steps.check.outputs.skip == 'false'
+        run: npm publish --provenance --access public
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-sdk-python:
+    name: Publish Python SDK + CLI (PyPI Trusted Publishing, with provenance)
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # PyPI Trusted Publishing (OIDC) — no PYPI_API_TOKEN secret to
+      # generate, store, or rotate at all, unlike npm's still-token-based
+      # flow above. Requires a one-time setup on pypi.org (Project ->
+      # Publishing -> add a GitHub trusted publisher naming this exact
+      # repo/workflow/environment) before the FIRST real publish; see
+      # this job's own comment below for what that means for a
+      # never-yet-published package.
+      id-token: write
+    environment: pypi   # matches whatever environment name the PyPI trusted-publisher config (above) is scoped to
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: v${{ needs.release.outputs.version }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: python -m pip install --upgrade build
+      # trustchain-cli declares trustchain-sdk as a dependency (see
+      # sdk/python-cli/pyproject.toml) — publishing the SDK first isn't
+      # load-bearing for THIS job (pip resolves that dependency against
+      # whatever's already live on PyPI at INSTALL time, not against
+      # this job's own build order), but it avoids a real window where
+      # someone `pip install`s the just-released CLI before its declared
+      # dependency exists on PyPI at all.
+      - name: Build trustchain-sdk
+        run: python -m build --wheel --sdist
+        working-directory: sdk/python
+      - name: Publish trustchain-sdk to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          # A release that didn't touch the SDK still runs this job (same
+          # independent-versioning reasoning as the npm job above) — skip
+          # rather than fail when this exact version is already live.
+          skip-existing: true
+      - name: Build trustchain-cli
+        run: python -m build --wheel --sdist
+        working-directory: sdk/python-cli
+      - name: Publish trustchain-cli to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python-cli/dist
+          skip-existing: true

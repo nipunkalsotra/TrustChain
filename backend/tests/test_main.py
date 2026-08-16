@@ -18,6 +18,92 @@ def test_ready_reports_database_ok(client):
     assert body["checks"]["database"]["ok"] is True
 
 
+def test_ready_does_not_leak_raw_exception_details(client, monkeypatch):
+    # F12: /ready has no auth (an orchestrator's health-checker doesn't
+    # carry a bearer token), so a failing check's raw exception message
+    # must never reach the response body — it could contain a Postgres
+    # DSN with credentials, or an RPC URL with an embedded API key. The
+    # real error still goes to the server-side log (logger.error), just
+    # not to the caller.
+    import main
+
+    def _broken_bridge():
+        raise ConnectionError("simulated outage with a secret-looking token=sk_live_abcdef123456")
+
+    monkeypatch.setattr(main, "get_bridge", _broken_bridge)
+
+    r = client.get("/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checks"]["chain"] == {"ok": False}
+    assert "sk_live_abcdef123456" not in r.text
+    assert "error" not in body["checks"]["chain"]
+
+
+def test_ready_reports_migrations_ok_when_current(client):
+    # F15. Exercised for real: the test suite's own DB (Testcontainers-
+    # provisioned, see tests/conftest.py — real `alembic upgrade head` run
+    # against it) genuinely has alembic_version == this checkout's head.
+    r = client.get("/ready")
+    assert r.status_code == 200
+    assert r.json()["checks"]["migrations"] == {"ok": True}
+
+
+def test_ready_flips_not_ready_on_a_real_migration_version_mismatch(client):
+    # F15: a running process whose applied schema is behind what its own
+    # code expects isn't safe to route traffic to — unlike the chain
+    # check, this one blocks readiness. Manipulates the REAL
+    # alembic_version row (not a mock) and restores it afterward —
+    # alembic_version isn't in truncate_all_tables()'s table list, so a
+    # leftover bogus value would otherwise leak into later tests.
+    from sqlalchemy import text
+
+    from db.engine import get_sessionmaker
+
+    async def _set_version(value: str):
+        async with get_sessionmaker()() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num = :v"), {"v": value})
+            await session.commit()
+
+    async def _get_version() -> str:
+        async with get_sessionmaker()() as session:
+            result = await session.execute(text("SELECT version_num FROM alembic_version"))
+            return result.scalar_one()
+
+    original = asyncio.run(_get_version())
+    try:
+        asyncio.run(_set_version("000000000000"))  # alembic_version.version_num is varchar(32) — a plausible-length but definitely-wrong hash
+        r = client.get("/ready")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["checks"]["migrations"] == {"ok": False}
+        assert body["ready"] is False
+    finally:
+        asyncio.run(_set_version(original))
+
+
+def test_ready_treats_missing_alembic_version_table_as_non_blocking(client, monkeypatch):
+    # No alembic_version table at all (a schema built straight from
+    # models, e.g. via create_all_tables() with no migration ever run) is
+    # a real, expected test/dev state, not a sign anything's wrong —
+    # informational only, doesn't flip readiness. Real code path
+    # exercised (db.get_applied_migration_version's own ProgrammingError
+    # handling), just via a monkeypatched return rather than actually
+    # dropping the table mid-suite (which other tests' fixtures depend on).
+    import db
+
+    async def _fake_none():
+        return None
+
+    monkeypatch.setattr(db, "get_applied_migration_version", _fake_none)
+
+    r = client.get("/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checks"]["migrations"] == {"ok": True}
+    assert body["ready"] is True
+
+
 def test_ready_does_not_require_chain(client, monkeypatch):
     # Force the chain check to fail regardless of ambient .env state (a dev
     # machine with real credentials would otherwise make this test flaky —
