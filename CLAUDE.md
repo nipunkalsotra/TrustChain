@@ -227,10 +227,13 @@ tenant drill-down goes through structured logs instead
 
 Point-in-time status for picking this work back up in a new session —
 prune/replace this section once it's stale rather than letting it
-accumulate. The task tracker (`TaskList`, tasks in the #88+ range) is
-the durable record of what's done/pending across sessions; this section
-covers what the tracker doesn't: git state and environment gotchas
-learned the hard way this session.
+accumulate. **Correction, learned the hard way in the same session that
+wrote this section: the `TaskList`/`TaskCreate`/`TaskUpdate` task
+tracker does NOT reliably persist across sessions** — tasks #88-115
+existed and were updated earlier in that session, then a later
+`TaskList` call in the same conversation came back completely empty.
+Don't treat it as a durable cross-session record; this Markdown section
+is the actual durable one.
 
 ### Git / CI state
 - Branch `phase2`, PR #24 open against `main` (`nipunkalsotra/TrustChain`,
