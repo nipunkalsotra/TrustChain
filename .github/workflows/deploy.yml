@@ -81,7 +81,7 @@ jobs:
           restore-keys: |
             forge-${{ runner.os }}-
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Same real-stack bootstrap as test.yml's sdk-integration job — the
@@ -180,7 +180,7 @@ jobs:
           restore-keys: |
             forge-${{ runner.os }}-
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Write backend/.env for docker compose
