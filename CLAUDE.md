@@ -222,3 +222,90 @@ tenant drill-down goes through structured logs instead
   format --check`, `mypy`, npm's `audit`, etc. are informational against
   a codebase that predates them; don't "fix" a job's blocking-ness
   without being asked.
+
+## Session handoff notes (as of 2026-08-16)
+
+Point-in-time status for picking this work back up in a new session —
+prune/replace this section once it's stale rather than letting it
+accumulate. The task tracker (`TaskList`, tasks in the #88+ range) is
+the durable record of what's done/pending across sessions; this section
+covers what the tracker doesn't: git state and environment gotchas
+learned the hard way this session.
+
+### Git / CI state
+- Branch `phase2`, PR #24 open against `main` (`nipunkalsotra/TrustChain`,
+  public repo).
+- Two real backend-CI failures were diagnosed and fixed this session,
+  landed in commits `5ac8959` and `29f318d` (both already on
+  `origin/phase2`):
+  1. `backend/tests/test_deprecation.py`'s two live-response tests hit
+     `/health`, which needs a real `PRIVATE_KEY`/`MONAD_RPC_URL` (the V1
+     bridge) — CI deliberately never configures those (see
+     `main.py`'s `get_bridge_or_503` docstring), so `/health` 503s
+     there. Local dev's own `backend/.env` has a real `PRIVATE_KEY`,
+     which silently masked this — a real trap when comparing local vs.
+     CI behavior. Fixed by pointing those tests at `/ready` instead
+     (DB-only, always 200 regardless of chain/bridge state).
+  2. `gitleaks` scans full git history (`fetch-depth: 0`); a since-fixed
+     fake secret (`sk_live_abcdef123456`, introduced in `a5236c2`, fixed
+     the very next commit) is still reachable at the commit that
+     introduced it — a later fix can't erase it from history. Allowlisted
+     in `.gitleaks.toml` (same pattern as the two other known-fake test
+     keys already there) rather than rewriting pushed history.
+  - Neither fix has been re-confirmed against a fresh real GitHub Actions
+    run yet (this environment has no `gh` CLI / no push-capable GitHub
+    credentials — see below) — only verified via faithful local repro
+    (real Anvil + V2 deploy + Testcontainers-self-provisioned
+    Postgres/Redis, `PRIVATE_KEY` unset to match CI exactly) and a real
+    `gitleaks detect --log-opts="--all"` scan (0 leaks). Worth checking
+    the actual PR #24 checks once a new session starts.
+- **Uncommitted, local-only as of this writing**: CI build-caching added
+  to all four workflow files (`test.yml`, `k6.yml`, `deploy.yml` —
+  `actions/cache` for `contracts/cache`+`contracts/out` keyed on Solidity
+  source hashes; `release.yml` — `docker/setup-buildx-action` +
+  `cache-from`/`cache-to: type=gha` on the image build). Verified locally
+  (`forge build` 5.6s → 0.18s on a cache hit; `actionlint`/PyYAML clean
+  on all four files) but not committed — this session has no push access,
+  so these are sitting in the working tree for the user to review/commit.
+  Run `git status` first thing in a new session to check whether they're
+  still there, already committed, or something else changed.
+
+### Environment constraints (this sandbox specifically)
+- No `gh` CLI, no authenticated GitHub push/log-access credentials.
+  Diagnosing real CI failures here means: (a) the public REST API works
+  unauthenticated for a public repo's runs/check-runs/**annotations**
+  (`GET /repos/{owner}/{repo}/check-runs/{id}/annotations`), but (b) the
+  logs endpoint (`GET .../actions/jobs/{id}/logs`) 403s without an
+  authenticated token, and (c) GitHub's own web UI now requires sign-in
+  to view raw job logs even on public repos (confirmed via WebFetch — it
+  shows only the summary/annotations to anonymous viewers). When
+  annotations alone aren't enough, a temporary CI step that captures the
+  failure tail and emits it via `::error::` (readable through the public
+  annotations API) is a working, non-destructive way to get real signal
+  back — see the git history around commit `5ac8959`/`29f318d` for the
+  pattern actually used. The other reliable path: ask the user to paste
+  the failure directly from the GitHub UI, since they're logged in.
+- Only Python 3.14 is installed locally (`/usr/bin/python3.14`, the
+  repo's own `.venv`) — CI's matrix is 3.11/3.12, and there's no way to
+  install those interpreters in this sandbox. A "local repro passes"
+  result on 3.14 is not proof CI will pass; treat Python-version-specific
+  behavior as an open question rather than ruled out.
+- `docker`, `anvil`/`forge` (Foundry), and Testcontainers-via-Docker all
+  work directly in this sandbox — a faithful CI reproduction (real Anvil,
+  real V2 contract deploy, self-provisioned Postgres/Redis) is possible
+  and was done this session; see git history for the exact command
+  sequence if repeating it.
+
+### Recurring pattern worth knowing about
+Twice this session, local file edits (that this assistant had made via
+the Edit tool but explicitly not committed) showed up committed and
+already pushed to `origin/phase2` under the user's own account, without
+an explicit "commit this" instruction ever being given in-session
+(`5ac8959` and `29f318d`). Both times the content matched exactly what
+was sitting in the working tree. Most likely explanation: the user
+commits/pushes independently from another terminal or IDE while a
+session is running. Worth a plain `git status`/`git log` sanity check at
+the start of a new session rather than assuming file state matches
+whatever this file or a task tracker entry implies — and worth asking
+the user directly if authorship of a surprising commit is ever unclear,
+rather than assuming it either way.

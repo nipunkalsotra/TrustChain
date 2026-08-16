@@ -70,6 +70,16 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Cache Foundry build artifacts
+        # Same cache as test.yml's jobs — see that file's comment.
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: forge-${{ runner.os }}-${{ hashFiles('contracts/src/**/*.sol', 'contracts/lib/**/*.sol', 'contracts/foundry.toml', 'contracts/remappings.txt') }}
+          restore-keys: |
+            forge-${{ runner.os }}-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -159,6 +169,16 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Cache Foundry build artifacts
+        # Same cache as test.yml's jobs — see that file's comment.
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: forge-${{ runner.os }}-${{ hashFiles('contracts/src/**/*.sol', 'contracts/lib/**/*.sol', 'contracts/foundry.toml', 'contracts/remappings.txt') }}
+          restore-keys: |
+            forge-${{ runner.os }}-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
