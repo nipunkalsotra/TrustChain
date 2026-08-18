@@ -224,6 +224,171 @@ def cmd_agents_register(args: argparse.Namespace) -> None:
     print(f"Registered '{args.agent_id}' — tx {tx_hash}")
 
 
+# ── Phase 3: organizations & members ─────────────────────────────────
+# Raw httpx calls, not TrustChainClient — these are human-session-scoped
+# admin operations (org/member management is JWT-only on the backend,
+# see main.py's Phase 3 section docstring), same pattern `cmd_keys_*`
+# above already uses for the same reason.
+
+def _authed_request(args: argparse.Namespace, method: str, path: str, **kwargs) -> dict:
+    base_url = _resolve_base_url(args)
+    token = _resolve_credential(args)
+    response = httpx.request(method, f"{base_url}{path}", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, **kwargs)
+    if response.status_code >= 400:
+        print(f"error: {response.status_code}: {response.text}", file=sys.stderr)
+        sys.exit(1)
+    return response.json()
+
+
+def cmd_org_list(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "GET", "/orgs"))
+
+
+def cmd_org_create(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "POST", "/orgs", json={"name": args.name, "project_name": args.project_name}))
+
+
+def cmd_org_rename(args: argparse.Namespace) -> None:
+    _authed_request(args, "PATCH", f"/orgs/{args.org_id}", json={"name": args.name})
+    print(f"Renamed org {args.org_id}.")
+
+
+def cmd_org_members(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "GET", f"/orgs/{args.org_id}/members"))
+
+
+def cmd_member_invite(args: argparse.Namespace) -> None:
+    result = _authed_request(
+        args, "POST", f"/orgs/{args.org_id}/invitations", json={"email": args.email, "role": args.role},
+    )
+    print(f"Invited {args.email} to org {args.org_id} as {args.role} (invitation id={result['id']}).")
+
+
+def cmd_member_list(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "GET", f"/orgs/{args.org_id}/members"))
+
+
+def cmd_member_set_role(args: argparse.Namespace) -> None:
+    _authed_request(args, "PATCH", f"/orgs/{args.org_id}/members/{args.user_id}", json={"role": args.role})
+    print(f"Set user {args.user_id}'s role to {args.role} in org {args.org_id}.")
+
+
+def cmd_member_remove(args: argparse.Namespace) -> None:
+    _authed_request(args, "DELETE", f"/orgs/{args.org_id}/members/{args.user_id}")
+    print(f"Removed user {args.user_id} from org {args.org_id}.")
+
+
+# ── Phase 3: alerts & integrity ──────────────────────────────────────
+
+def cmd_alerts_list(args: argparse.Namespace) -> None:
+    params = {"limit": args.limit}
+    if args.status:
+        params["status"] = args.status
+    if args.severity:
+        params["severity"] = args.severity
+    _print_json(_authed_request(args, "GET", "/alerts", params=params))
+
+
+def cmd_alerts_ack(args: argparse.Namespace) -> None:
+    _authed_request(args, "POST", f"/alerts/{args.alert_id}/acknowledge", json={})
+    print(f"Acknowledged alert {args.alert_id}.")
+
+
+def cmd_alerts_resolve(args: argparse.Namespace) -> None:
+    _authed_request(args, "POST", f"/alerts/{args.alert_id}/resolve", json={"resolution_note": args.note or ""})
+    print(f"Resolved alert {args.alert_id}.")
+
+
+def cmd_integrity_status(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "GET", "/integrity/status"))
+
+
+def cmd_integrity_verify_run(args: argparse.Namespace) -> None:
+    _print_json(_authed_request(args, "POST", f"/integrity/verify-run/{args.run_id}", json={}))
+
+
+# ── agents verify/sync --manifest — the CI integrity gate (plan §11) ──
+
+def _load_manifest(path: str) -> dict:
+    import yaml
+    with open(path) as f:
+        manifest = yaml.safe_load(f)
+    if "agents" not in manifest:
+        print(f"error: {path} has no top-level 'agents:' list", file=sys.stderr)
+        sys.exit(1)
+    return manifest
+
+
+def _agent_from_manifest_entry(entry: dict) -> dict:
+    """system_prompt_file is read relative to CWD (the CI job's checkout
+    root) — same convention as any other file path in a CI config."""
+    prompt = entry.get("system_prompt", "")
+    if "system_prompt_file" in entry:
+        with open(entry["system_prompt_file"]) as f:
+            prompt = f.read()
+    return {"id": entry["id"], "model": entry["model"], "version": str(entry["version"]), "system_prompt": prompt}
+
+
+def cmd_agents_verify_manifest(args: argparse.Namespace) -> None:
+    """`trustchain agents verify-manifest --manifest trustchain.yaml` (plan §11.2)
+    — checks every agent in the manifest against its registered on-chain
+    identity and exits non-zero if ANY differs, so a CI job fails the
+    build the moment a model/version/prompt change reaches a PR without
+    a matching `agents sync`."""
+    manifest = _load_manifest(args.manifest)
+    tc = TrustChain(_resolve_credential(args), base_url=_resolve_base_url(args), on_error="raise")
+
+    any_drift = False
+    for entry in manifest["agents"]:
+        agent = _agent_from_manifest_entry(entry)
+        try:
+            result = tc.verify_agent(**agent)
+        except TrustChainError as e:
+            print(f"  ERROR   {agent['id']:20} could not verify: {e}")
+            any_drift = True
+            continue
+        if result is None:
+            print(f"  ERROR   {agent['id']:20} verification failed")
+            any_drift = True
+        elif result.hash_matches:
+            print(f"  OK      {agent['id']:20} {result.provided_hash}")
+        else:
+            print(f"  DRIFT   {agent['id']:20} registered={result.stored_hash}  local={result.provided_hash}")
+            any_drift = True
+
+    print()
+    if any_drift:
+        print("One or more agents differ from their registered on-chain identity.")
+        print(f"If this is intentional, run: trustchain agents sync-manifest --manifest {args.manifest} --reason \"...\"")
+        sys.exit(1)
+    print(f"All {len(manifest['agents'])} agent(s) match their registered identity.")
+
+
+def cmd_agents_sync_manifest(args: argparse.Namespace) -> None:
+    """`trustchain agents sync-manifest --manifest trustchain.yaml --reason "..."`
+    (plan §11.2) — registers every agent in the manifest, unconditionally
+    (declare_agent's local-cache-only idempotency doesn't apply here,
+    since a fresh CI job has no warm cache — the backend's own
+    AgentUpdated-only-on-real-change behavior is what keeps a genuinely
+    unchanged agent from generating a spurious event). --reason is logged
+    here and by the backend's access log for correlating a specific
+    agent_identity_changed alert against a specific deploy by timestamp
+    — see indexer/agent_events.py's _raise_identity_alert docstring for
+    why it is NOT currently threaded into the alert's own evidence."""
+    manifest = _load_manifest(args.manifest)
+    tc = TrustChain(_resolve_credential(args), base_url=_resolve_base_url(args), on_error="raise")
+
+    for entry in manifest["agents"]:
+        agent = _agent_from_manifest_entry(entry)
+        try:
+            tx_hash = tc.register_agent(**agent)
+        except TrustChainError as e:
+            print(f"  ERROR   {agent['id']:20} {e}", file=sys.stderr)
+            sys.exit(1)
+        reason = f" — reason: {args.reason}" if args.reason else ""
+        print(f"  synced  {agent['id']:20} tx={tx_hash}{reason}")
+
+
 # ── dev — local docker-compose stack helpers ─────────────────────────
 
 def _find_compose_file() -> Optional["object"]:
@@ -326,6 +491,84 @@ def build_parser() -> argparse.ArgumentParser:
     p_agents_register.add_argument("--version", required=True)
     p_agents_register.add_argument("--system-prompt", required=True)
     p_agents_register.set_defaults(func=cmd_agents_register)
+    # Manifest-based bulk check/sync (Phase 3 §11's CI integrity gate) —
+    # a SEPARATE subparser rather than an optional --manifest flag on
+    # `agents verify` above: that command's agent_id/--model/--version/
+    # --system-prompt are all required positional/flags for the single-
+    # agent form, which argparse can't cleanly make mutually exclusive
+    # with a completely different multi-agent input shape.
+    p_agents_verify_manifest = p_agents.add_parser(
+        "verify-manifest", help="Verify every agent in a trustchain.yaml manifest (CI gate)",
+    )
+    p_agents_verify_manifest.add_argument("--manifest", required=True, help="Path to trustchain.yaml")
+    p_agents_verify_manifest.set_defaults(func=cmd_agents_verify_manifest)
+    p_agents_sync_manifest = p_agents.add_parser(
+        "sync-manifest", help="Register every agent in a trustchain.yaml manifest",
+    )
+    p_agents_sync_manifest.add_argument("--manifest", required=True, help="Path to trustchain.yaml")
+    p_agents_sync_manifest.add_argument("--reason", default=None, help="Logged alongside the registration (e.g. a deploy SHA)")
+    p_agents_sync_manifest.set_defaults(func=cmd_agents_sync_manifest)
+
+    p_org = sub.add_parser("org", help="Manage organizations").add_subparsers(dest="org_command", required=True)
+    p_org_list = p_org.add_parser("list", help="List organizations you belong to")
+    p_org_list.set_defaults(func=cmd_org_list)
+    p_org_create = p_org.add_parser("create", help="Create a new organization")
+    p_org_create.add_argument("name")
+    p_org_create.add_argument("--project-name", default="Default")
+    p_org_create.set_defaults(func=cmd_org_create)
+    p_org_rename = p_org.add_parser("rename", help="Rename an organization")
+    p_org_rename.add_argument("org_id", type=int)
+    p_org_rename.add_argument("name")
+    p_org_rename.set_defaults(func=cmd_org_rename)
+    p_org_members = p_org.add_parser("members", help="List an organization's members")
+    p_org_members.add_argument("org_id", type=int)
+    p_org_members.set_defaults(func=cmd_org_members)
+
+    p_member = sub.add_parser("member", help="Manage organization membership").add_subparsers(
+        dest="member_command", required=True
+    )
+    p_member_invite = p_member.add_parser("invite", help="Invite someone to an organization")
+    p_member_invite.add_argument("org_id", type=int)
+    p_member_invite.add_argument("email")
+    p_member_invite.add_argument("--role", required=True, choices=["admin", "member", "viewer"])
+    p_member_invite.set_defaults(func=cmd_member_invite)
+    p_member_list = p_member.add_parser("list", help="List an organization's members")
+    p_member_list.add_argument("org_id", type=int)
+    p_member_list.set_defaults(func=cmd_member_list)
+    p_member_set_role = p_member.add_parser("set-role", help="Change a member's role")
+    p_member_set_role.add_argument("org_id", type=int)
+    p_member_set_role.add_argument("user_id", type=int)
+    p_member_set_role.add_argument("--role", required=True, choices=["admin", "member", "viewer"])
+    p_member_set_role.set_defaults(func=cmd_member_set_role)
+    p_member_remove = p_member.add_parser("remove", help="Remove a member")
+    p_member_remove.add_argument("org_id", type=int)
+    p_member_remove.add_argument("user_id", type=int)
+    p_member_remove.set_defaults(func=cmd_member_remove)
+
+    p_alerts = sub.add_parser("alerts", help="View and manage integrity alerts").add_subparsers(
+        dest="alerts_command", required=True
+    )
+    p_alerts_list = p_alerts.add_parser("list", help="List alerts")
+    p_alerts_list.add_argument("--status", default=None, choices=["open", "acknowledged", "resolved"])
+    p_alerts_list.add_argument("--severity", default=None, choices=["critical", "warning", "info"])
+    p_alerts_list.add_argument("--limit", type=int, default=50)
+    p_alerts_list.set_defaults(func=cmd_alerts_list)
+    p_alerts_ack = p_alerts.add_parser("ack", help="Acknowledge an alert")
+    p_alerts_ack.add_argument("alert_id", type=int)
+    p_alerts_ack.set_defaults(func=cmd_alerts_ack)
+    p_alerts_resolve = p_alerts.add_parser("resolve", help="Resolve an alert")
+    p_alerts_resolve.add_argument("alert_id", type=int)
+    p_alerts_resolve.add_argument("--note", default=None)
+    p_alerts_resolve.set_defaults(func=cmd_alerts_resolve)
+
+    p_integrity = sub.add_parser("integrity", help="Continuous verification status").add_subparsers(
+        dest="integrity_command", required=True
+    )
+    p_integrity_status = p_integrity.add_parser("status", help="Coverage/health of the active project")
+    p_integrity_status.set_defaults(func=cmd_integrity_status)
+    p_integrity_verify_run = p_integrity.add_parser("verify-run", help="Synchronously verify one run")
+    p_integrity_verify_run.add_argument("run_id")
+    p_integrity_verify_run.set_defaults(func=cmd_integrity_verify_run)
 
     p_dev = sub.add_parser("dev", help="Local docker-compose dev stack helpers").add_subparsers(
         dest="dev_command", required=True

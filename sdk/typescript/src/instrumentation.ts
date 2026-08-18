@@ -57,19 +57,56 @@ export interface MerkleProofResult {
   txHash?: string;
   anchorStatus: string;
   anchorId?: number;
+  /** Which leaf preimage produced `leaf` — 1 for every step anchored
+   * before identity binding shipped, 2 for a step logged with an
+   * agentCodeHash. See backend/blockchain/merkle.py's leaf_hash_v2. */
+  leafSchemaVersion?: number;
+  agentCodeHash?: string;
 }
 
 export type OnError = "warn" | "raise";
 
-function codeHash(agentId: string, model: string, version: string, systemPrompt: string): string {
+// Found by tests/conformance.test.ts (ADR-0017's stated open gap,
+// closed here): Python's json.dumps defaults to ensure_ascii=True,
+// escaping every non-ASCII character to \uXXXX — both backend/
+// blockchain/hashing_utils.py::compute_hash AND the Python SDK's
+// _code_hash rely on that default (neither passes ensure_ascii=False).
+// JSON.stringify has no such mode; it leaves non-ASCII characters
+// literal. Left alone, codeHash() and _code_hash() silently disagreed
+// for ANY agentId/model/version/systemPrompt containing a non-ASCII
+// character (accented letters, CJK, emoji, ...) — same hash-scheme
+// class of risk the original comment below already warned about, just
+// not the specific instance it anticipated. This replicates Python's
+// escaping exactly: every UTF-16 code unit above U+007F becomes
+// \uXXXX (lowercase hex, zero-padded to 4 digits) — JS strings are
+// already UTF-16 internally, so this naturally produces the same
+// surrogate-pair escaping Python's json module uses for characters
+// outside the Basic Multilingual Plane, with no extra codepoint math
+// needed.
+function pythonEnsureAsciiEscape(jsonText: string): string {
+  let out = "";
+  for (let i = 0; i < jsonText.length; i++) {
+    const code = jsonText.charCodeAt(i);
+    out += code > 0x7f ? `\\u${code.toString(16).padStart(4, "0")}` : jsonText[i];
+  }
+  return out;
+}
+
+// Exported (not just used internally) specifically so
+// tests/conformance.test.ts can call the SAME function the Python SDK's
+// _code_hash is checked against, rather than a hand-reimplementation
+// that could silently drift from what registerAgent()/log() actually
+// send.
+export function codeHash(agentId: string, model: string, version: string, systemPrompt: string): string {
   // MUST match backend/blockchain/hashing_utils.py's compute_hash (and
   // the Python SDK's _code_hash) exactly: same key names, same object,
-  // same JSON serialisation (sorted keys, no whitespace) — or hashes
-  // computed here will silently mismatch what's registered on-chain.
+  // same JSON serialisation (sorted keys, no whitespace, non-ASCII
+  // escaped — see pythonEnsureAsciiEscape above) — or hashes computed
+  // here will silently mismatch what's registered on-chain.
   const config: Record<string, string> = { agentId, model, version, systemPrompt };
   const sortedKeys = Object.keys(config).sort();
   const serialised = "{" + sortedKeys.map((k) => `${JSON.stringify(k)}:${JSON.stringify(config[k])}`).join(",") + "}";
-  return keccak256Hex(serialised);
+  return keccak256Hex(pythonEnsureAsciiEscape(serialised));
 }
 
 export interface TrustChainOptions {
@@ -82,6 +119,11 @@ export class TrustChain {
   private onError: OnError;
   private pending: Set<Promise<void>> = new Set();
   private runIds: Map<string, string> = new Map();
+  /** agentId -> codeHash, populated by registerAgent()/declareAgent().
+   * log() attaches the cached hash to every step for that agentId — see
+   * that method's docstring. Mirrors the Python SDK's
+   * instrumentation.py::TrustChain._agent_hashes exactly. */
+  private agentHashes: Map<string, string> = new Map();
 
   constructor(apiKey: string, options: TrustChainOptions = {}) {
     this.client = new TrustChainClient(apiKey, { baseUrl: options.baseUrl ?? DEFAULT_BASE_URL });
@@ -124,14 +166,36 @@ export class TrustChain {
 
   // ── Registration / verification ──────────────────────────────────
 
+  /** Caches codeHash for agentId on success — every subsequent log()/
+   * audited() call for this agentId attaches it automatically (see
+   * log()'s docstring). NOT cached on a failed call — a cached hash the
+   * backend never actually saw registered would guarantee false-positive
+   * drift alerts instead of the true "not registered, no check happens"
+   * state. */
   async registerAgent(options: { agentId: string; model: string; version: string; systemPrompt: string }): Promise<string> {
     const hash = codeHash(options.agentId, options.model, options.version, options.systemPrompt);
+    let response;
     try {
-      const response = await this.client.registerAgent(options.agentId, hash, options.model, options.version);
-      return response.tx_hash;
+      response = await this.client.registerAgent(options.agentId, hash, options.model, options.version);
     } catch (e) {
       return this.handleError(e, "");
     }
+    this.agentHashes.set(options.agentId, hash);
+    return response.tx_hash;
+  }
+
+  /** Idempotent registration — registers ONLY if this exact
+   * {agentId, model, version, systemPrompt} isn't already what's
+   * cached, otherwise no-ops and returns "". Meant for a startup call
+   * that runs on every boot without spamming AgentUpdated events (and
+   * therefore agent_identity_changed alerts) on an unchanged config.
+   * NOTE: checks the LOCAL cache only, not the server's registered hash
+   * — call verifyAgent() first if you need to know whether the server's
+   * state already matches. */
+  async declareAgent(options: { agentId: string; model: string; version: string; systemPrompt: string }): Promise<string> {
+    const hash = codeHash(options.agentId, options.model, options.version, options.systemPrompt);
+    if (this.agentHashes.get(options.agentId) === hash) return "";
+    return this.registerAgent(options);
   }
 
   async verifyAgent(options: { agentId: string; model: string; version: string; systemPrompt: string }): Promise<VerifyResult | undefined> {
@@ -186,6 +250,7 @@ export class TrustChain {
         input: options.input,
         output: options.output,
         trustScore: options.trustScore ?? 0,
+        agentCodeHash: this.agentHashes.get(options.agentId),
       });
       receipt.stepId = response.step_id;
       receipt.status = response.status;
@@ -227,10 +292,25 @@ export class TrustChain {
       return {
         stepId: response.stepId, runId: response.runId, leaf: response.leaf, proof: response.proof,
         root: response.root, txHash: response.txHash, anchorStatus: response.anchorStatus,
-        anchorId: response.anchorId,
+        anchorId: response.anchorId, leafSchemaVersion: response.leafSchemaVersion ?? 1,
+        agentCodeHash: response.agentCodeHash,
       };
     } catch (e) {
       return this.handleError(e, undefined);
+    }
+  }
+
+  // ── Alerts ───────────────────────────────────────────────────────
+
+  /** Read access to your org's alerts, so a team can pipe TrustChain
+   * findings into their own on-call tooling. Needs an API key with the
+   * alerts:read scope. */
+  async alerts(options: { status?: string; severity?: string; limit?: number } = {}): Promise<unknown[]> {
+    try {
+      const response = await this.client.listAlerts(options);
+      return response.alerts;
+    } catch (e) {
+      return this.handleError(e, []);
     }
   }
 

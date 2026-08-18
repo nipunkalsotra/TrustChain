@@ -18,11 +18,19 @@ set JWT_SECRET in the environment.
 
 WHY project_id/org_id ARE EMBEDDED IN THE JWT rather than looked up per
 request: the API service must not need a database round-trip merely to
-authenticate (plan §6.1) — a user has exactly one org/project today
-(auto-provisioned at signup, db.tenancy.provision_personal_org), so it's
-stable for the token's lifetime. If multi-project-per-user ever ships,
-re-login (or a token refresh) picks up a project switch; there's no UI for
-that today, so it isn't a live concern yet.
+authenticate (plan §6.1). Phase 3 adds real multi-org/multi-project
+membership (invitations, additional orgs via POST /orgs) — a user can now
+legitimately hold several memberships at once, so "stable for the
+token's lifetime" no longer follows from "a user has exactly one
+org/project" the way it used to. POST /auth/switch-project (main.py)
+is the actual mechanism: it verifies the caller holds a live membership
+in the target project's org, then mints a FRESH token scoped to it,
+rather than mutating the current one — so this embedding assumption
+still holds for any single token's lifetime, it's just that a user may
+now hold several tokens (one per active project) instead of exactly one.
+_check_membership_still_live below is what stops an already-issued token
+from outliving a later removal or role change to the org/project it
+names — see membership_cache.py.
 
 WHY THE PRIMARY TOKEN STAYS 7-DAY-LIVED rather than the plan's specified
 15-minute access token: the deployed frontend stores this token and
@@ -82,11 +90,23 @@ class Principal:
     a machine-credential concept, plan §11.3) and a list for an API key
     (least-privilege by default — see require_scope)."""
 
-    def __init__(self, project_id: int, org_id: int, actor: str, scopes: Optional[list[str]] = None):
+    def __init__(
+        self, project_id: int, org_id: int, actor: str, scopes: Optional[list[str]] = None,
+        user_id: Optional[int] = None,
+    ):
         self.project_id = project_id
         self.org_id = org_id
         self.actor = actor  # user email, or "api_key:<id>" — for audit_events/logging
         self.scopes = scopes
+        # Phase 3: None for an API-key principal (a key belongs to a
+        # project, not a person — there is no user to attach a role to).
+        # Set for a human/JWT principal, so endpoints reachable by BOTH
+        # credential types (e.g. GET /alerts) can still apply
+        # permissions.require_permission's role check for the human case
+        # while an API key's authorization stays purely scope-based (see
+        # require_scope) — the two are deliberately different mechanisms
+        # for the two different credential types, not one unified check.
+        self.user_id = user_id
 
     @property
     def is_api_key(self) -> bool:
@@ -120,6 +140,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Curre
     except jwt.PyJWTError:
         raise ApiError(401, "invalid or expired token", ErrorCode.INVALID_TOKEN)
 
+    await _check_membership_still_live(payload)
+
     # Sets the RLS session context for every DB transaction this request
     # opens from here on — see db/engine.py's module docstring. Also
     # binds the same identity onto every subsequent log line for this
@@ -133,6 +155,26 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Curre
         project_id=payload["project_id"], org_id=payload["org_id"],
         user_id=payload.get("user_id", 0),
     )
+
+
+async def _check_membership_still_live(payload: dict) -> None:
+    """Phase 3 §4.3: the 7-day JWT is self-contained and asserts
+    project_id/org_id at issuance time — this is what stops that
+    assertion from outliving an org removal or role demotion. user_id=0
+    is the sentinel a handful of pre-Phase-3 test/legacy tokens carry
+    (auth.create_token's default) — skip the check for those rather than
+    treating "no real user id in this token" as "revoked", since there is
+    no membership row to even look up."""
+    user_id = payload.get("user_id", 0)
+    if not user_id:
+        return
+
+    from membership_cache import get_role_cached  # deferred: avoids a Redis-at-import-time coupling
+
+    settings = get_settings()
+    role = await get_role_cached(user_id, payload["org_id"], settings.membership_cache_ttl_seconds)
+    if role is None:
+        raise ApiError(401, "membership revoked or organization no longer accessible", ErrorCode.MEMBERSHIP_REVOKED)
 
 
 async def get_current_principal(authorization: Optional[str] = Header(None)) -> Principal:
@@ -164,10 +206,15 @@ async def get_current_principal(authorization: Optional[str] = Header(None)) -> 
     except jwt.PyJWTError:
         raise ApiError(401, "invalid or expired token", ErrorCode.INVALID_TOKEN)
 
+    await _check_membership_still_live(payload)
+
     current_project_id.set(payload["project_id"])
     current_org_id.set(payload["org_id"])
     bind_tenant_context(payload["project_id"], payload["org_id"])
-    return Principal(project_id=payload["project_id"], org_id=payload["org_id"], actor=payload["sub"], scopes=None)
+    return Principal(
+        project_id=payload["project_id"], org_id=payload["org_id"], actor=payload["sub"], scopes=None,
+        user_id=payload.get("user_id") or None,
+    )
 
 
 def require_scope(principal: Principal, scope: str) -> None:

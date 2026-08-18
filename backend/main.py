@@ -18,7 +18,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +33,11 @@ import observability
 import rate_limit
 import refresh
 import run_events
+import alert_events
 from db import idempotency, read_model, tenancy
+from db import alerts as alerts_db
+from db import invitations as invitations_db
+from db import orgs as orgs_db
 from errors import ApiError, ErrorCode
 from config import get_settings
 from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
@@ -41,6 +45,8 @@ from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
 from agents.base import make_run_id, log_step
 from blockchain import identity_writer
+import membership_cache
+import permissions
 
 configure_logging(log_level=get_settings().log_level, json_logs=get_settings().environment != "development")
 logger = get_logger(__name__)
@@ -330,6 +336,12 @@ class LogStepRequest(BaseModel):
     input:       str = Field(max_length=100_000)
     output:      str = Field(max_length=100_000)
     trust_score: int = Field(default=0, ge=0, le=100)
+    # Phase 3 §6.2 — the SDK's own fingerprint of the agent that produced
+    # this step, computed the same way register_agent()'s code_hash is.
+    # Optional: an older SDK that doesn't send this gets leaf schema v1
+    # (agents/base.py::log_step) and no drift check, exactly Phase 2
+    # behavior — nothing breaks for a caller that hasn't upgraded.
+    agent_code_hash: Optional[str] = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
 
 
 class LogStepResponse(BaseModel):
@@ -345,10 +357,28 @@ class VerifyRequest(BaseModel):
                  # Backend must accept runId and verify all 4 agents itself.
 
 
+class VerifyContentRequest(BaseModel):
+    """POST /integrity/verify-content's body — see that endpoint's own
+    docstring. `field` as Literal, not a manual runtime check, so an
+    invalid value is a standard 422 for free."""
+    stepId:        int
+    field:         Literal["input", "output"]
+    candidateText: str = Field(min_length=1, max_length=100_000)
+
+
 class SignupRequest(BaseModel):
     name:     str = Field(min_length=1, max_length=100)
     email:    EmailStr
     password: str = Field(min_length=8, max_length=200)
+    # Phase 3 §4.1 — all three optional so the deployed frontend's existing
+    # 3-field signup request keeps working completely unchanged. Omitted
+    # org_name/project_name fall back to the original "<Name>'s
+    # Organization"/"Default" defaults verbatim. invite_token routes
+    # signup through the invitation path (§5.3) instead of provisioning a
+    # personal org — org_name/project_name are ignored when it's given.
+    org_name:     Optional[str] = Field(default=None, min_length=1, max_length=200)
+    project_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    invite_token: Optional[str] = Field(default=None, max_length=128)
 
 
 class LoginRequest(BaseModel):
@@ -418,13 +448,34 @@ async def signup(body: SignupRequest, request: Request):
                 ErrorCode.PASSWORD_PWNED,
             )
 
+    invitation = None
+    if body.invite_token:
+        # Raises 404/400 directly (INVITATION_NOT_FOUND / EMAIL_MISMATCH)
+        # if the token is invalid, expired, revoked, already used, or
+        # addressed to a different email than this signup — Phase 3 §5.3.
+        invitation = await invitations_db.validate_for_signup(body.invite_token, body.email, int(time.time()))
+
     try:
         user = await db.create_user(
             email=body.email, name=body.name, password=body.password,
             created_at=int(time.time()),
+            org_name=body.org_name, project_name=body.project_name,
+            invitation=invitation,
         )
     except ValueError:
         raise ApiError(409, "email already registered", ErrorCode.EMAIL_ALREADY_REGISTERED)
+
+    if invitation is not None:
+        accepted = await invitations_db.mark_accepted(invitation["invitation_id"], user["userId"], int(time.time()))
+        if not accepted:
+            # Lost the single-use race — extremely unlikely (this token was
+            # just validated above), but the user row and membership are
+            # already committed at this point, so the honest outcome is
+            # "signed up successfully, into an org via a token that was
+            # simultaneously consumed elsewhere" rather than a rollback
+            # that would orphan a real user account.
+            logger.warning("invitation_race_lost_after_signup", invitation_id=invitation["invitation_id"])
+        observability.INVITATIONS_TOTAL.labels(action="accepted").inc()
 
     token = auth.create_token(
         email=user["email"], name=user["name"],
@@ -501,9 +552,13 @@ async def logout(body: RefreshRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _require_admin(current_user: auth.CurrentUser) -> None:
-    role = await tenancy.get_membership_role(current_user.user_id, current_user.org_id)
-    if role not in ("owner", "admin"):
-        raise ApiError(403, "owner or admin role required", ErrorCode.INSUFFICIENT_ROLE)
+    """Thin wrapper kept for this section's existing call sites — Phase 3
+    generalized the underlying check into permissions.require_permission
+    (backend/permissions.py), which every new Phase 3 endpoint calls
+    directly with a specific Permission rather than this API-key-era
+    admin-or-nothing helper. Behavior for THESE THREE routes (API key
+    create/list/revoke) is unchanged: owner or admin, same as before."""
+    await permissions.require_permission(current_user.user_id, current_user.org_id, permissions.Permission.APIKEY_CREATE)
 
 
 @router.post("/api-keys", response_model=ApiKeyCreatedResponse)
@@ -1248,6 +1303,55 @@ async def verify_agent(
         raise ApiError(502, "on-chain verification failed — see server logs for details", ErrorCode.AGENT_VERIFICATION_FAILED)
 
 
+@router.get("/agents/{agent_id}/integrity")
+async def get_agent_integrity(agent_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Phase 3 §6.2/§6.3/§9.7 — the current-state summary a dashboard
+    reads directly rather than re-aggregating rm_agent_events on every
+    request: registered identity, last time it was seen matching (detector
+    1, on the write path) or drifting, and recent identity events/alerts.
+    """
+    auth.require_scope(principal, "agents:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
+    from sqlalchemy import select
+    from db.engine import get_sessionmaker
+    from db.models import Agent, ReadModelAgentEvent
+
+    async with get_sessionmaker()() as session:
+        record = (await session.execute(
+            select(Agent).where(Agent.project_id == principal.project_id, Agent.agent_id == agent_id)
+        )).scalar_one_or_none()
+        if record is None:
+            raise ApiError(404, f"agent '{agent_id}' not found", ErrorCode.STEP_NOT_FOUND)
+
+        events = (await session.execute(
+            select(ReadModelAgentEvent)
+            .where(ReadModelAgentEvent.project_id == principal.project_id, ReadModelAgentEvent.agent_id == agent_id)
+            .order_by(ReadModelAgentEvent.timestamp.desc()).limit(20)
+        )).scalars().all()
+
+    project = await orgs_db.get_project(principal.project_id)
+    open_alerts: list[dict] = []
+    if project is not None:
+        rows, _ = await alerts_db.list_alerts(
+            project["orgId"], status="open", project_id=principal.project_id, limit=20,
+        )
+        open_alerts = [a for a in rows if a["subject"] == f"agent:{agent_id}"]
+
+    return {
+        "agentId": agent_id, "registeredCodeHash": record.code_hash, "model": record.model, "version": record.version,
+        "isActive": record.is_active, "lastVerifiedAt": record.last_verified_at, "lastDriftAt": record.last_drift_at,
+        "events": [
+            {"eventType": e.event_type, "actor": e.actor, "codeHash": e.code_hash, "timestamp": e.timestamp,
+             "txHash": e.tx_hash, "blockNumber": e.block_number}
+            for e in events
+        ],
+        "openAlerts": open_alerts,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  POST /steps, GET /steps/{step_id}/proof — SDK ingest of a THIRD-PARTY
 #  agent's own step, and the Merkle inclusion proof for it (plan §7.2/
@@ -1299,6 +1403,8 @@ async def log_external_step(
         step_index=step_index,
         run_id=body.run_id,
         trust_score=body.trust_score,
+        agent_code_hash=body.agent_code_hash,
+        project_id=principal.project_id,
     )
     response = LogStepResponse(
         step_id=event["stepId"], outbox_id=event["outboxId"], anchor_status=event["anchorStatus"],
@@ -1342,6 +1448,871 @@ async def platform_stats(request: Request):
         request, "stats", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
     )
     return await read_model.get_platform_stats()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PHASE 3 — organizations, roles, invitations, alerts & continuous integrity
+#
+#  Everything below is additive: no existing route's request/response shape
+#  changes. Human-only endpoints (org/project/member/invitation/alert
+#  mutation, notification prefs) depend on auth.get_current_user (JWT only,
+#  never an API key — same rule api-key management above already follows).
+#  Read endpoints an SDK/API-key consumer can legitimately also want
+#  (agents/{id}/integrity, steps/{id}/proof) stay on
+#  auth.get_current_principal. See permissions.py for the full matrix this
+#  enforces (Appendix A of the Phase 3 plan).
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def audit_log_org_action(user_id: int, org_id: int, action: str, target: Optional[str] = None) -> None:
+    """Like audit_log_admin_action above, but takes an explicit org_id —
+    Phase 3 endpoints act on an org_id path parameter that may differ
+    from current_user.org_id (their JWT's currently-active org), so
+    recording current_user.org_id would attribute the event to the wrong
+    organization whenever someone manages an org that isn't their active
+    session one. Best-effort, same as the original."""
+    try:
+        from db.engine import get_sessionmaker
+        from db.models import AuditEvent
+
+        async with get_sessionmaker()() as session:
+            session.add(AuditEvent(actor_id=user_id, org_id=org_id, action=action, target=target, created_at=int(time.time())))
+            await session.commit()
+    except Exception as e:
+        logger.error("audit_log_write_failed", action=action, error=str(e))
+
+
+async def _org_read_rate_limit(org_id: int) -> None:
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:read:org:{org_id}", settings.read_path_rate_limit_capacity,
+        settings.read_path_rate_limit_refill_per_second, kind="read",
+    )
+
+
+async def _org_write_rate_limit(org_id: int, user_id: int) -> None:
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:write:org:{org_id}:{user_id}", settings.log_step_rate_limit_capacity,
+        settings.log_step_rate_limit_refill_per_second, kind="org_write",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GET /me, POST /auth/switch-project (plan §9.1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SwitchProjectRequest(BaseModel):
+    project_id: int
+
+
+@router.get("/me")
+async def get_me(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """The one call the frontend makes on load — every org the user
+    belongs to, their role in each, and every project in each org. Backs
+    the org switcher, role badge, and every permission-gated control."""
+    org_rows = await orgs_db.list_orgs_for_user(current_user.user_id)
+    memberships = []
+    for org in org_rows:
+        projects = await orgs_db.list_projects(org["id"])
+        memberships.append({
+            "org": {"id": org["id"], "name": org["name"], "plan": org["plan"]},
+            "role": org["role"], "joinedAt": org["createdAt"],
+            "projects": [{"id": p["id"], "name": p["name"], "environment": p["environment"]} for p in projects],
+        })
+    return {
+        "user": {"id": current_user.user_id, "name": current_user.name, "email": current_user.email},
+        "active": {"orgId": current_user.org_id, "projectId": current_user.project_id,
+                   "role": await permissions.get_role(current_user.user_id, current_user.org_id)},
+        "memberships": memberships,
+    }
+
+
+@router.post("/auth/switch-project")
+async def switch_project(body: SwitchProjectRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Mints a FRESH token scoped to a different project the caller
+    already holds a membership in — see auth.py's module docstring for
+    why this mints a new token rather than mutating the current one."""
+    project = await orgs_db.get_project(body.project_id)
+    if project is None:
+        raise ApiError(404, f"Project {body.project_id} not found", ErrorCode.PROJECT_NOT_FOUND)
+    role = await permissions.get_role(current_user.user_id, project["orgId"])
+    if role is None:
+        raise ApiError(403, "not a member of this project's organization", ErrorCode.INSUFFICIENT_ROLE)
+
+    token = auth.create_token(
+        email=current_user.email, name=current_user.name,
+        project_id=project["id"], org_id=project["orgId"], user_id=current_user.user_id,
+    )
+    return {"token": token, "orgId": project["orgId"], "projectId": project["id"], "role": role}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Organizations (plan §9.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CreateOrgRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    project_name: str = Field(default="Default", min_length=1, max_length=200)
+
+
+class RenameOrgRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class TransferOwnershipRequest(BaseModel):
+    user_id: int
+
+
+@router.get("/orgs")
+async def list_orgs(current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    return {"orgs": await orgs_db.list_orgs_for_user(current_user.user_id)}
+
+
+@router.post("/orgs")
+async def create_org_endpoint(body: CreateOrgRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:org-create:{current_user.user_id}", settings.log_step_rate_limit_capacity,
+        settings.log_step_rate_limit_refill_per_second, kind="org_create",
+    )
+    result = await orgs_db.create_org(current_user.user_id, body.name, body.project_name, int(time.time()))
+    await audit_log_org_action(current_user.user_id, result["orgId"], "org.created", target=body.name)
+    return result
+
+
+@router.get("/orgs/{org_id}")
+async def get_org_endpoint(org_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.ORG_READ)
+    await _org_read_rate_limit(org_id)
+    org = await orgs_db.get_org(org_id)
+    if org is None:
+        raise ApiError(404, f"Organization {org_id} not found", ErrorCode.ORG_NOT_FOUND)
+    return org
+
+
+@router.patch("/orgs/{org_id}")
+async def rename_org_endpoint(org_id: int, body: RenameOrgRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.ORG_UPDATE)
+    if not await orgs_db.rename_org(org_id, body.name):
+        raise ApiError(404, f"Organization {org_id} not found", ErrorCode.ORG_NOT_FOUND)
+    await audit_log_org_action(current_user.user_id, org_id, "org.renamed", target=body.name)
+    return {"ok": True}
+
+
+@router.delete("/orgs/{org_id}")
+async def delete_org_endpoint(org_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.ORG_DELETE)
+    if await orgs_db.count_active_orgs_for_user(current_user.user_id) <= 1:
+        raise ApiError(400, "cannot delete your only organization", ErrorCode.CANNOT_DELETE_ONLY_ORG)
+    if not await orgs_db.soft_delete_org(org_id, int(time.time())):
+        raise ApiError(404, f"Organization {org_id} not found", ErrorCode.ORG_NOT_FOUND)
+    await audit_log_org_action(current_user.user_id, org_id, "org.deleted")
+    return {"ok": True}
+
+
+@router.post("/orgs/{org_id}/transfer-ownership")
+async def transfer_ownership_endpoint(
+    org_id: int, body: TransferOwnershipRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.ORG_TRANSFER_OWNERSHIP)
+    now = int(time.time())
+    if not await orgs_db.transfer_ownership(current_user.user_id, body.user_id, org_id, now):
+        raise ApiError(404, "target user is not a member of this organization", ErrorCode.MEMBER_NOT_FOUND)
+
+    await membership_cache.invalidate(current_user.user_id, org_id)
+    await membership_cache.invalidate(body.user_id, org_id)
+    await audit_log_org_action(current_user.user_id, org_id, "org.ownership_transferred", target=str(body.user_id))
+
+    # A silent ownership transfer is what an account takeover looks like —
+    # critical, unconditionally, regardless of who performed it (plan §5.5).
+    await alerts_db.raise_alert(
+        org_id=org_id, alert_type="ownership_transferred", severity="critical",
+        title="Organization ownership was transferred",
+        summary=f"Ownership transferred from user {current_user.user_id} to user {body.user_id}.",
+        subject=f"org:{org_id}",
+        evidence={"fromUser": current_user.user_id, "toUser": body.user_id, "actor": current_user.email},
+        detector="api",
+    )
+    return {"ok": True}
+
+
+@router.get("/orgs/{org_id}/audit-events")
+async def list_audit_events(
+    org_id: int, limit: int = Query(default=50, le=200),
+    current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.AUDIT_READ)
+    await _org_read_rate_limit(org_id)
+    from db.engine import get_sessionmaker
+    from db.models import AuditEvent
+    from sqlalchemy import select as _select
+
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(
+            _select(AuditEvent).where(AuditEvent.org_id == org_id).order_by(AuditEvent.created_at.desc()).limit(limit)
+        )).scalars().all()
+    return {"events": [
+        {"id": e.id, "actorId": e.actor_id, "action": e.action, "target": e.target, "createdAt": e.created_at}
+        for e in rows
+    ]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Projects (plan §9.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    environment: str = Field(default="live", pattern="^(test|live)$")
+
+
+class RenameProjectRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+@router.get("/orgs/{org_id}/projects")
+async def list_projects_endpoint(org_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.PROJECT_READ)
+    await _org_read_rate_limit(org_id)
+    return {"projects": await orgs_db.list_projects(org_id)}
+
+
+@router.post("/orgs/{org_id}/projects")
+async def create_project_endpoint(
+    org_id: int, body: CreateProjectRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.PROJECT_CREATE)
+    await _org_write_rate_limit(org_id, current_user.user_id)
+    project = await orgs_db.create_project(org_id, body.name, body.environment, int(time.time()))
+    await audit_log_org_action(current_user.user_id, org_id, "project.created", target=body.name)
+    return project
+
+
+@router.get("/projects/{project_id}")
+async def get_project_endpoint(project_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    project = await orgs_db.get_project(project_id)
+    if project is None:
+        raise ApiError(404, f"Project {project_id} not found", ErrorCode.PROJECT_NOT_FOUND)
+    await permissions.require_permission(current_user.user_id, project["orgId"], permissions.Permission.PROJECT_READ)
+    return project
+
+
+@router.patch("/projects/{project_id}")
+async def rename_project_endpoint(
+    project_id: int, body: RenameProjectRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    project = await orgs_db.get_project(project_id)
+    if project is None:
+        raise ApiError(404, f"Project {project_id} not found", ErrorCode.PROJECT_NOT_FOUND)
+    await permissions.require_permission(current_user.user_id, project["orgId"], permissions.Permission.PROJECT_UPDATE)
+    await orgs_db.rename_project(project_id, body.name)
+    await audit_log_org_action(current_user.user_id, project["orgId"], "project.renamed", target=body.name)
+    return {"ok": True}
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project_endpoint(project_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    project = await orgs_db.get_project(project_id)
+    if project is None:
+        raise ApiError(404, f"Project {project_id} not found", ErrorCode.PROJECT_NOT_FOUND)
+    await permissions.require_permission(current_user.user_id, project["orgId"], permissions.Permission.PROJECT_DELETE)
+    if await orgs_db.count_active_projects(project["orgId"]) <= 1:
+        raise ApiError(400, "cannot delete the organization's last project", ErrorCode.CANNOT_DELETE_LAST_PROJECT)
+    await orgs_db.soft_delete_project(project_id, int(time.time()))
+    await audit_log_org_action(current_user.user_id, project["orgId"], "project.deleted", target=str(project_id))
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Members (plan §9.4, §5.5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChangeRoleRequest(BaseModel):
+    role: str
+
+
+@router.get("/orgs/{org_id}/members")
+async def list_members_endpoint(org_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_READ)
+    await _org_read_rate_limit(org_id)
+    members = await orgs_db.list_members(org_id)
+    return {"members": members, "total": len(members)}
+
+
+@router.patch("/orgs/{org_id}/members/{user_id}")
+async def change_role_endpoint(
+    org_id: int, user_id: int, body: ChangeRoleRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    actor_role = await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_ROLE_CHANGE)
+    if body.role not in permissions.VALID_ROLES or body.role == "owner":
+        raise ApiError(400, f"invalid role: {body.role!r}", ErrorCode.INVALID_ROLE)
+    if user_id == current_user.user_id:
+        raise ApiError(400, "cannot change your own role", ErrorCode.CANNOT_MODIFY_OWN_ROLE)
+
+    target = await orgs_db.get_membership(user_id, org_id)
+    if target is None:
+        raise ApiError(404, f"user {user_id} is not a member of organization {org_id}", ErrorCode.MEMBER_NOT_FOUND)
+
+    actor_rank, target_rank, requested_rank = permissions.rank_of(actor_role), permissions.rank_of(target["role"]), permissions.rank_of(body.role)
+    if not orgs_db.rank_allows_target_modification(actor_rank, target_rank, requested_rank):
+        raise ApiError(403, "cannot modify a member at or above your own rank", ErrorCode.INSUFFICIENT_ROLE)
+    if target["role"] == "owner" and await orgs_db.count_owners(org_id) <= 1:
+        raise ApiError(400, "cannot demote the organization's last owner", ErrorCode.CANNOT_REMOVE_LAST_OWNER)
+
+    await orgs_db.change_role(user_id, org_id, body.role, int(time.time()))
+    await membership_cache.invalidate(user_id, org_id)
+    observability.MEMBERSHIP_CHANGES_TOTAL.labels(action="role_changed").inc()
+    await audit_log_org_action(current_user.user_id, org_id, "member.role_changed", target=f"user:{user_id}->{body.role}")
+
+    if body.role in ("admin", "owner"):
+        await alerts_db.raise_alert(
+            org_id=org_id, alert_type="admin_role_granted", severity="warning",
+            title=f"User {user_id} was granted {body.role}",
+            summary=f"Role changed to {body.role} by {current_user.email}.",
+            subject=f"user:{user_id}", evidence={"targetUser": user_id, "newRole": body.role, "actor": current_user.email},
+            detector="api",
+        )
+    return {"ok": True}
+
+
+@router.delete("/orgs/{org_id}/members/me")
+async def leave_org_endpoint(org_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Registered BEFORE DELETE /orgs/{org_id}/members/{user_id} below,
+    deliberately — both are single-segment paths after .../members/, and
+    FastAPI/Starlette matches route DEFINITIONS in registration order,
+    not by preferring a literal segment over a path-param one. With the
+    {user_id}: int route registered first, a request for .../members/me
+    would match ITS pattern first, fail int("me") validation, and 422
+    instead of ever reaching this handler — a real bug this exact
+    ordering caught via test_memberships.py's real HTTP-level tests
+    (test_cannot_remove_the_last_owner / test_member_can_leave_voluntarily),
+    not by inspection. Same ordering requirement GET /alerts/summary and
+    GET /alerts/stream already have relative to GET /alerts/{alert_id}."""
+    membership = await orgs_db.get_membership(current_user.user_id, org_id)
+    if membership is None:
+        raise ApiError(404, f"not a member of organization {org_id}", ErrorCode.MEMBER_NOT_FOUND)
+    if membership["role"] == "owner" and await orgs_db.count_owners(org_id) <= 1:
+        raise ApiError(400, "cannot leave — you are the last owner; transfer ownership first", ErrorCode.CANNOT_REMOVE_LAST_OWNER)
+
+    await orgs_db.remove_member(current_user.user_id, org_id)
+    await membership_cache.invalidate(current_user.user_id, org_id)
+    observability.MEMBERSHIP_CHANGES_TOTAL.labels(action="removed").inc()
+    await audit_log_org_action(current_user.user_id, org_id, "member.left")
+    return {"ok": True}
+
+
+@router.delete("/orgs/{org_id}/members/{user_id}")
+async def remove_member_endpoint(org_id: int, user_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    actor_role = await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_REMOVE)
+    target = await orgs_db.get_membership(user_id, org_id)
+    if target is None:
+        raise ApiError(404, f"user {user_id} is not a member of organization {org_id}", ErrorCode.MEMBER_NOT_FOUND)
+    if permissions.rank_of(target["role"]) >= permissions.rank_of(actor_role):
+        raise ApiError(403, "cannot remove a member at or above your own rank", ErrorCode.INSUFFICIENT_ROLE)
+    if target["role"] == "owner" and await orgs_db.count_owners(org_id) <= 1:
+        raise ApiError(400, "cannot remove the organization's last owner", ErrorCode.CANNOT_REMOVE_LAST_OWNER)
+
+    await orgs_db.remove_member(user_id, org_id)
+    await membership_cache.invalidate(user_id, org_id)
+    observability.MEMBERSHIP_CHANGES_TOTAL.labels(action="removed").inc()
+    await audit_log_org_action(current_user.user_id, org_id, "member.removed", target=f"user:{user_id}")
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Invitations (plan §5, §9.5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CreateInvitationRequest(BaseModel):
+    email:  EmailStr
+    role:   str
+
+
+class AcceptInvitationRequest(BaseModel):
+    pass
+
+
+@router.post("/orgs/{org_id}/invitations")
+async def create_invitation_endpoint(
+    org_id: int, body: CreateInvitationRequest, request: Request,
+    current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_INVITE)
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "invitation-create", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:invitation:{org_id}", settings.invitation_rate_limit_capacity,
+        settings.invitation_rate_limit_refill_per_second, kind="invitation",
+    )
+
+    if body.role not in ("admin", "member", "viewer"):
+        raise ApiError(400, f"invalid role: {body.role!r}", ErrorCode.INVALID_ROLE)
+
+    now = int(time.time())
+    if await invitations_db.count_pending(org_id, now) >= settings.max_pending_invitations_per_org:
+        raise ApiError(400, "too many pending invitations for this organization", ErrorCode.TOO_MANY_PENDING_INVITATIONS)
+
+    existing_membership_role = None
+    for m in await orgs_db.list_members(org_id):
+        if m["email"].lower() == body.email.lower():
+            existing_membership_role = m["role"]
+    if existing_membership_role is not None:
+        raise ApiError(409, "this email is already a member", ErrorCode.ALREADY_A_MEMBER)
+
+    try:
+        result = await invitations_db.create_invitation(
+            org_id, body.email, body.role, current_user.user_id, now, settings.invitation_ttl_seconds,
+        )
+    except ValueError as e:
+        raise ApiError(409, str(e), ErrorCode.TOO_MANY_PENDING_INVITATIONS)
+
+    observability.INVITATIONS_TOTAL.labels(action="created").inc()
+    await audit_log_org_action(current_user.user_id, org_id, "member.invited", target=body.email)
+
+    # Queued for delivery via notifications/sender.py — see main.py's
+    # module-level note on why this doesn't send inline (Phase 3 §7.4/§5.3).
+    from notifications.invite import queue_invitation_email
+    await queue_invitation_email(
+        org_id=org_id, email=body.email, role=body.role, raw_token=result["rawToken"],
+        invited_by_name=current_user.name, now=now,
+    )
+
+    return {"id": result["id"], "email": body.email, "role": body.role, "expiresAt": result["expiresAt"], "status": "pending"}
+
+
+@router.get("/orgs/{org_id}/invitations")
+async def list_invitations_endpoint(
+    org_id: int, status: Optional[str] = Query(default=None),
+    current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_INVITE)
+    await _org_read_rate_limit(org_id)
+    return {"invitations": await invitations_db.list_invitations(org_id, status)}
+
+
+@router.delete("/orgs/{org_id}/invitations/{invitation_id}")
+async def revoke_invitation_endpoint(
+    org_id: int, invitation_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_INVITE)
+    if not await invitations_db.revoke_invitation(invitation_id, org_id, current_user.user_id, int(time.time())):
+        raise ApiError(404, f"pending invitation {invitation_id} not found", ErrorCode.INVITATION_NOT_FOUND)
+    observability.INVITATIONS_TOTAL.labels(action="revoked").inc()
+    await audit_log_org_action(current_user.user_id, org_id, "member.invite_revoked", target=str(invitation_id))
+    return {"ok": True}
+
+
+@router.post("/orgs/{org_id}/invitations/{invitation_id}/resend")
+async def resend_invitation_endpoint(
+    org_id: int, invitation_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    """Issues a NEW token (invalidating the old hash) and re-queues
+    delivery — implemented as revoke-then-recreate rather than a dedicated
+    code path, so it inherits the exact same validation, rate limiting,
+    and pending-count ceiling as creating a fresh invitation."""
+    await permissions.require_permission(current_user.user_id, org_id, permissions.Permission.MEMBER_INVITE)
+    settings = get_settings()
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:invitation:{org_id}", settings.invitation_rate_limit_capacity,
+        settings.invitation_rate_limit_refill_per_second, kind="invitation",
+    )
+    now = int(time.time())
+    pending = await invitations_db.list_invitations(org_id, status="pending", now=now)
+    match = next((i for i in pending if i["id"] == invitation_id), None)
+    if match is None:
+        raise ApiError(404, f"pending invitation {invitation_id} not found", ErrorCode.INVITATION_NOT_FOUND)
+
+    await invitations_db.revoke_invitation(invitation_id, org_id, current_user.user_id, now)
+    result = await invitations_db.create_invitation(
+        org_id, match["email"], match["role"], current_user.user_id, now, settings.invitation_ttl_seconds,
+    )
+    from notifications.invite import queue_invitation_email
+    await queue_invitation_email(
+        org_id=org_id, email=match["email"], role=match["role"], raw_token=result["rawToken"],
+        invited_by_name=current_user.name, now=now,
+    )
+    return {"id": result["id"], "email": match["email"], "role": match["role"], "expiresAt": result["expiresAt"]}
+
+
+@router.get("/invitations/{token}")
+async def preview_invitation(token: str, request: Request):
+    """Unauthenticated by design — the recipient has no account yet
+    (Phase 3 §5.1/§9.5). Any invalid/expired/revoked/used token returns
+    the SAME 404 so a scanner learns nothing from the difference."""
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "invitation-preview", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    preview = await invitations_db.get_invitation_preview(token, int(time.time()))
+    if preview is None:
+        raise ApiError(404, "invitation not found, expired, or already used", ErrorCode.INVITATION_NOT_FOUND)
+    return preview
+
+
+@router.post("/invitations/{token}/accept")
+async def accept_invitation_endpoint(token: str, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """The already-registered-user path (Phase 3 §5.4) — POST /auth/signup's
+    invite_token field is the new-user path instead."""
+    result = await invitations_db.accept_for_existing_user(token, current_user.user_id, current_user.email, int(time.time()))
+    observability.INVITATIONS_TOTAL.labels(action="accepted").inc()
+    await audit_log_org_action(current_user.user_id, result["orgId"], "member.joined")
+
+    new_token = auth.create_token(
+        email=current_user.email, name=current_user.name,
+        project_id=result["projectId"], org_id=result["orgId"], user_id=current_user.user_id,
+    )
+    return {"membership": {"orgId": result["orgId"], "role": result["role"]}, "token": new_token}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Alerts (plan §6, §7, §9.6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ResolveAlertRequest(BaseModel):
+    resolution_note: str = Field(default="", max_length=2000)
+
+
+class AcknowledgeAlertRequest(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+async def _authorize_alert_read(principal: auth.Principal) -> None:
+    """GET /alerts and friends are reachable by EITHER credential type
+    (plan §10.1 — "pipe TrustChain alerts into your own on-call tooling"
+    needs a project API key to work, not just a human session), unlike
+    every other Phase 3 endpoint in this file. The two credential types
+    use their own, different authorization mechanism rather than one
+    unified check: an API key's authority is its granted scopes
+    (alerts:read) — full-stop, no separate role concept exists for a
+    machine credential. A human/JWT principal still goes through the real
+    role-based permission matrix (viewer+)."""
+    if principal.is_api_key:
+        auth.require_scope(principal, "alerts:read")
+    else:
+        await permissions.require_permission(principal.user_id, principal.org_id, permissions.Permission.ALERT_READ)
+
+
+@router.get("/alerts")
+async def list_alerts_endpoint(
+    status: Optional[str] = Query(default=None), severity: Optional[str] = Query(default=None),
+    alert_type: Optional[str] = Query(default=None), project_id: Optional[int] = Query(default=None),
+    before_id: Optional[int] = Query(default=None), limit: int = Query(default=50, le=200),
+    principal: auth.Principal = Depends(auth.get_current_principal),
+):
+    await _authorize_alert_read(principal)
+    await _org_read_rate_limit(principal.org_id)
+    rows, total_open = await alerts_db.list_alerts(
+        principal.org_id, status=status, severity=severity, alert_type=alert_type,
+        project_id=project_id, limit=limit, before_id=before_id,
+    )
+    next_cursor = rows[-1]["id"] if len(rows) == limit else None
+    return {"alerts": rows, "nextCursor": next_cursor, "totalOpen": total_open}
+
+
+@router.get("/alerts/summary")
+async def alert_summary_endpoint(principal: auth.Principal = Depends(auth.get_current_principal)):
+    await _authorize_alert_read(principal)
+    return await alerts_db.alert_summary(principal.org_id)
+
+
+@router.get("/alerts/stream")
+async def alerts_stream_endpoint(request: Request, principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Live push for the alert badge/inbox — a bounded, from-now-only
+    Redis stream (alert_events.py), NOT a replacement for GET /alerts
+    (Postgres remains the system of record for full history; a client
+    should call that on load, then subscribe here for deltas). Registered
+    ABOVE /alerts/{alert_id} so 'stream' is never swallowed as an
+    alert_id path param — see GET /alerts/summary's identical ordering
+    requirement just above."""
+    await _authorize_alert_read(principal)
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "alerts-stream", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+
+    async def event_generator():
+        try:
+            async for event in alert_events.read_alert_events(principal.org_id):
+                if event is None:
+                    yield ": keep-alive\n\n"  # SSE comment line — no-op, just keeps the connection/proxies alive
+                else:
+                    yield f"data: {json.dumps(event)}\n\n"
+        except asyncio.CancelledError:
+            logger.info("alerts_sse_client_disconnected", org_id=principal.org_id)
+
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/alerts/{alert_id}")
+async def get_alert_endpoint(alert_id: int, principal: auth.Principal = Depends(auth.get_current_principal)):
+    await _authorize_alert_read(principal)
+    alert = await alerts_db.get_alert(alert_id, principal.org_id)
+    if alert is None:
+        raise ApiError(404, f"alert {alert_id} not found", ErrorCode.ALERT_NOT_FOUND)
+    return alert
+
+
+@router.post("/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert_endpoint(
+    alert_id: int, body: AcknowledgeAlertRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, current_user.org_id, permissions.Permission.ALERT_ACKNOWLEDGE)
+    if not await alerts_db.acknowledge_alert(alert_id, current_user.org_id, current_user.user_id, int(time.time())):
+        raise ApiError(404, f"open alert {alert_id} not found", ErrorCode.ALERT_NOT_FOUND)
+    await audit_log_org_action(current_user.user_id, current_user.org_id, "alert.acknowledged", target=str(alert_id))
+    return {"ok": True}
+
+
+@router.post("/alerts/{alert_id}/resolve")
+async def resolve_alert_endpoint(
+    alert_id: int, body: ResolveAlertRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    await permissions.require_permission(current_user.user_id, current_user.org_id, permissions.Permission.ALERT_RESOLVE)
+    if not await alerts_db.resolve_alert(alert_id, current_user.org_id, current_user.user_id, int(time.time()), body.resolution_note):
+        raise ApiError(409, f"alert {alert_id} not found or already resolved", ErrorCode.ALERT_ALREADY_RESOLVED)
+    await audit_log_org_action(current_user.user_id, current_user.org_id, "alert.resolved", target=str(alert_id))
+    return {"ok": True}
+
+
+@router.post("/alerts/{alert_id}/reopen")
+async def reopen_alert_endpoint(alert_id: int, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    await permissions.require_permission(current_user.user_id, current_user.org_id, permissions.Permission.ALERT_RESOLVE)
+    if not await alerts_db.reopen_alert(alert_id, current_user.org_id, int(time.time())):
+        raise ApiError(409, f"alert {alert_id} not found or not resolved", ErrorCode.ALERT_NOT_RESOLVABLE)
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Notification preferences (plan §9.8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SetNotificationPreferencesRequest(BaseModel):
+    org_id: int
+    email_critical: bool = True
+    email_warning: bool = True
+    email_info: bool = False
+    email_digest_only: bool = False
+
+
+@router.get("/me/notification-preferences")
+async def get_notification_preferences_endpoint(
+    org_id: int = Query(...), current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    return await alerts_db.get_notification_preferences(current_user.user_id, org_id)
+
+
+@router.put("/me/notification-preferences")
+async def set_notification_preferences_endpoint(
+    body: SetNotificationPreferencesRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    # Own preferences only (permissions.Permission.NOTIFICATION_PREFS_MANAGE
+    # is "viewer" — any member — deliberately unscoped by role beyond that,
+    # since a user managing their OWN notification settings needs no
+    # elevated authority; just needs to still be a member of the org).
+    role = await permissions.get_role(current_user.user_id, body.org_id)
+    if role is None:
+        raise ApiError(403, "not a member of this organization", ErrorCode.INSUFFICIENT_ROLE)
+    await alerts_db.set_notification_preferences(
+        current_user.user_id, body.org_id, body.email_critical, body.email_warning,
+        body.email_info, body.email_digest_only, int(time.time()),
+    )
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Integrity status & on-demand verification (plan §9.7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/integrity/status")
+async def integrity_status(principal: auth.Principal = Depends(auth.get_current_principal)):
+    """'Is everything OK right now' for the caller's active project —
+    reads the watchdog's own persisted cursor/coverage state
+    (watchdog_cursor, batch_verifications) rather than running anything
+    live; see POST /integrity/verify-run/{run_id} for an immediate,
+    synchronous, single-run check instead."""
+    auth.require_scope(principal, "runs:read")
+    from sqlalchemy import select as _select, func as _func, text
+    from db.engine import get_sessionmaker
+    from db.models import AnchorBatch, BatchVerification, Run, Step
+
+    async with get_sessionmaker()() as session:
+        steps_verified = (await session.execute(
+            _select(_func.count()).select_from(Step).join(Run, Run.run_id == Step.run_id)
+            .where(Run.project_id == principal.project_id)
+        )).scalar_one()
+        batch_ids = (await session.execute(
+            _select(AnchorBatch.id).join(Step, Step.anchor_batch_id == AnchorBatch.id)
+            .join(Run, Run.run_id == Step.run_id).where(Run.project_id == principal.project_id).distinct()
+        )).scalars().all()
+        batches_verified = len(batch_ids)
+        batches_root_confirmed = 0
+        if batch_ids:
+            batches_root_confirmed = (await session.execute(
+                _select(_func.count()).select_from(BatchVerification)
+                .where(BatchVerification.batch_id.in_(batch_ids), BatchVerification.last_result == "ok")
+            )).scalar_one()
+
+        cursors = []
+        for detector in ("step_rows_rolling", "merkle_roots_rolling"):
+            result = await session.execute(
+                text("SELECT last_id, wrapped_at, last_run_at, last_duration_ms FROM watchdog_cursor WHERE detector = :d"),
+                {"d": detector},
+            )
+            row = result.first()
+            cursors.append({
+                "name": detector, "lastRunAt": row.last_run_at if row else 0,
+                "lastDurationMs": row.last_duration_ms if row else 0,
+                "cursorPosition": row.last_id if row else 0, "wrappedAt": row.wrapped_at if row else None,
+            })
+
+    project = await orgs_db.get_project(principal.project_id)
+    open_critical = open_warning = 0
+    last_sweep_at = max((c["lastRunAt"] for c in cursors), default=0)
+    if project is not None:
+        summary = await alerts_db.alert_summary(project["orgId"])
+        open_critical, open_warning = summary["open"]["critical"], summary["open"]["warning"]
+
+    return {
+        "projectId": principal.project_id, "lastSweepAt": last_sweep_at or None,
+        "stepsVerified": steps_verified, "batchesVerified": batches_verified,
+        "batchesRootConfirmed": batches_root_confirmed,
+        "coveragePercent": round(100.0 * batches_root_confirmed / batches_verified, 1) if batches_verified else 100.0,
+        "openCritical": open_critical, "openWarning": open_warning, "detectors": cursors,
+    }
+
+
+@router.post("/integrity/verify-run/{run_id}")
+async def verify_run(run_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Runs detectors 3 and 4 against every step in ONE run, synchronously
+    — 'is this specific run still intact right now', answered immediately
+    rather than waiting for the watchdog's rolling sweep to reach it.
+    Deliberately expensive (real Merkle rebuilds, real RPC calls if the
+    run's batches haven't been on-chain-verified yet) — rate limited
+    harder than an ordinary read."""
+    auth.require_scope(principal, "runs:read")
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:verify-run:{principal.project_id}", 6.0, 6.0 / 60, kind="verify_run",
+    )
+    from sqlalchemy import select as _select
+    from db.engine import get_sessionmaker
+    from db.models import AnchorBatch, Run, Step
+    from integrity_watchdog.detectors import merkle_roots, step_rows
+
+    async with get_sessionmaker()() as session:
+        run = await session.get(Run, run_id)
+        if run is None or run.project_id != principal.project_id:
+            raise ApiError(404, f"run '{run_id}' not found", ErrorCode.RUN_NOT_FOUND)
+
+        steps = (await session.execute(_select(Step).where(Step.run_id == run_id).order_by(Step.step_index))).scalars().all()
+        if not steps:
+            return {"runId": run_id, "steps": [], "allVerified": True}
+
+        row_mismatches = {m["step"].id for m in await step_rows.check_steps(steps)}
+
+        batch_ids = {s.anchor_batch_id for s in steps if s.anchor_batch_id is not None}
+        root_bad_batches: set[int] = set()
+        for batch_id in batch_ids:
+            batch = await session.get(AnchorBatch, batch_id)
+            if batch is None:
+                continue
+            batch_steps = (await session.execute(_select(Step).where(Step.id.in_(batch.leaf_order)))).scalars().all()
+            steps_by_id = {s.id: s for s in batch_steps}
+            rebuilt_root, missing = merkle_roots.rebuild_root(steps_by_id, list(batch.leaf_order))
+            if missing or rebuilt_root.lower() != batch.merkle_root.lower():
+                root_bad_batches.add(batch_id)
+                continue
+            if batch.onchain_anchor_id is not None:
+                try:
+                    matches, _ = await merkle_roots.check_onchain_root(batch)
+                    if not matches:
+                        root_bad_batches.add(batch_id)
+                except Exception as e:
+                    logger.warning("verify_run_onchain_check_failed", run_id=run_id, batch_id=batch_id, error=str(e))
+
+    results = []
+    all_ok = True
+    for step in steps:
+        ok = step.id not in row_mismatches and (step.anchor_batch_id is None or step.anchor_batch_id not in root_bad_batches)
+        anchored = step.anchor_batch_id is not None
+        results.append({
+            "stepId": step.id, "stepIndex": step.step_index, "agentId": step.agent_id,
+            "verified": ok, "anchored": anchored,
+            "reason": None if ok else ("row_hash_mismatch" if step.id in row_mismatches else "batch_root_mismatch"),
+        })
+        all_ok = all_ok and ok
+
+    return {"runId": run_id, "steps": results, "allVerified": all_ok}
+
+
+@router.post("/integrity/verify-content")
+async def verify_content(body: VerifyContentRequest, principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Turns an opaque hash sitting in an alert's evidence into an actual
+    yes/no answer about content — WITHOUT TrustChain ever storing that
+    content itself (see ADR-0020's 'what changed' discussion for exactly
+    why raw agent input/output text isn't persisted here: input_hash/
+    output_hash are one-way hashes, so nobody — including TrustChain
+    itself — can work backwards from them to recover text nobody kept a
+    copy of).
+
+    What this DOES let an owner do: they supply a CANDIDATE piece of text
+    they already have from their OWN systems (their own application
+    logs, an observability tool, wherever their agent framework actually
+    logs transcripts) — this hashes it the identical way
+    agents/base.py::log_step does and reports whether it matches the
+    step's CURRENT stored hash, and — if steps_history recorded this
+    step being modified — whether it instead matches what the hash WAS
+    before that change. That second case is the actual answer to "what
+    did this used to say": not TrustChain telling you, but TrustChain
+    confirming or denying a candidate YOU already suspected.
+
+    This is verification of one candidate at a time, not a search over
+    unknown content — rate limited the same as verify-run for the same
+    reason (real Merkle rebuilds there, a real hash computation here;
+    neither should be hammerable)."""
+    auth.require_scope(principal, "runs:read")
+    await rate_limit.enforce_rate_limit(
+        f"ratelimit:verify-content:{principal.project_id}", 6.0, 6.0 / 60, kind="verify_content",
+    )
+
+    from web3 import Web3
+    from sqlalchemy import select as _select, desc as _desc
+    from db.engine import get_sessionmaker
+    from db.models import Run, Step, StepHistory
+
+    computed_hash = "0x" + Web3.solidity_keccak(["string"], [body.candidateText]).hex()
+
+    async with get_sessionmaker()() as session:
+        step = await session.get(Step, body.stepId)
+        if step is None:
+            raise ApiError(404, f"step {body.stepId} not found", ErrorCode.STEP_NOT_FOUND)
+        run = await session.get(Run, step.run_id)
+        if run is None or run.project_id != principal.project_id:
+            # Same 404-not-403 shape as verify_run above — a step ID from
+            # another tenant should look identical to a nonexistent one.
+            raise ApiError(404, f"step {body.stepId} not found", ErrorCode.STEP_NOT_FOUND)
+
+        current_hash = step.input_hash if body.field == "input" else step.output_hash
+        matches_current = computed_hash.lower() == current_hash.lower()
+
+        history = (await session.execute(
+            _select(StepHistory).where(StepHistory.step_id == body.stepId).order_by(_desc(StepHistory.changed_at)).limit(1)
+        )).scalar_one_or_none()
+
+        matches_original = None  # None = "no history to compare against", distinct from False
+        if history is not None:
+            old_hash = history.old_input_hash if body.field == "input" else history.old_output_hash
+            if old_hash is not None:
+                matches_original = computed_hash.lower() == old_hash.lower()
+
+    return {
+        "stepId": body.stepId, "field": body.field, "computedHash": computed_hash,
+        "matchesCurrent": matches_current, "matchesOriginal": matches_original,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

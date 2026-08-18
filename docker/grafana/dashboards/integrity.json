@@ -1,0 +1,132 @@
+{
+  "title": "TrustChain — Integrity & Alerting",
+  "uid": "trustchain-integrity",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Integrity check outcomes by detector",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum by (detector, result) (rate(integrity_checks_total[5m]))", "legendFormat": "{{detector}} — {{result}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Alerts raised by severity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum by (severity) (rate(integrity_alerts_raised_total[5m]))", "legendFormat": "{{severity}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Watchdog sweep duration (p95) by detector/tier",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, detector, tier) (rate(watchdog_sweep_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{detector}} ({{tier}})"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Watchdog rolling-tier cursor lag (items behind head)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "watchdog_cursor_lag_items", "legendFormat": "{{detector}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Time since each detector's last successful cycle",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "description": "What TrustChainWatchdogSilent (docker/prometheus/alerts.yml) actually watches — a sustained climb with no reset means the watchdog has stopped, not just slowed down.",
+      "targets": [
+        { "expr": "time() - watchdog_last_success_timestamp", "legendFormat": "{{detector}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Rolling-tier full-sweep age",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "description": "What TrustChainFullSweepStale watches — how long since the rolling tier last completed a full pass over all history.",
+      "targets": [
+        { "expr": "watchdog_full_sweep_age_seconds", "legendFormat": "full sweep age (s)" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Open alerts by severity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "open_alerts", "legendFormat": "{{severity}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Alert delivery queue depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "description": "What TrustChainAlertDeliveryBacklog watches.",
+      "targets": [
+        { "expr": "alert_delivery_queue_depth", "legendFormat": "pending + claimed" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Alert delivery outcomes by channel",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "description": "What TrustChainAlertDeliveryFailing watches (status=\"failed\").",
+      "targets": [
+        { "expr": "sum by (channel, status) (rate(alert_deliveries_total[15m]))", "legendFormat": "{{channel}} — {{status}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Alert delivery latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, channel) (rate(alert_delivery_latency_seconds_bucket[15m])))",
+          "legendFormat": "{{channel}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Membership cache outcomes (auth.py liveness check)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "description": "A rising miss rate under steady traffic points at TTL churn, not correctness — see ADR-0019.",
+      "targets": [
+        { "expr": "sum by (result) (rate(membership_cache_total[5m]))", "legendFormat": "{{result}}" }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Invitations & membership changes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        { "expr": "sum by (action) (rate(invitations_total[15m]))", "legendFormat": "invitation: {{action}}" },
+        { "expr": "sum by (action) (rate(membership_changes_total[15m]))", "legendFormat": "membership: {{action}}" }
+      ]
+    }
+  ]
+}

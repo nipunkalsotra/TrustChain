@@ -196,19 +196,37 @@ export class TrustChainClient {
    * default) rather than this directly. */
   async logStep(options: {
     runId: string; agentId: string; action: string; input: string; output: string;
-    trustScore?: number; idempotencyKey?: string;
+    trustScore?: number; idempotencyKey?: string; agentCodeHash?: string;
   }): Promise<{ step_id: number; outbox_id: number; status: string; anchor_status: string }> {
+    // agentCodeHash (identity-binding, see TrustChain.log's docstring in
+    // instrumentation.ts): the backend compares it synchronously against
+    // the registered on-chain hash and raises an agent_identity_drift
+    // alert on mismatch. Omitted entirely (not sent as null/undefined)
+    // when there's nothing cached — matches the Python SDK's client.py::
+    // log_step, which only includes the key in the JSON body when set.
+    const json: Record<string, unknown> = {
+      run_id: options.runId, agent_id: options.agentId, action: options.action,
+      input: options.input, output: options.output, trust_score: options.trustScore ?? 0,
+    };
+    if (options.agentCodeHash) json.agent_code_hash = options.agentCodeHash;
     return this.request("POST", "/steps", {
-      json: {
-        run_id: options.runId, agent_id: options.agentId, action: options.action,
-        input: options.input, output: options.output, trust_score: options.trustScore ?? 0,
-      },
+      json,
       headers: options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {},
     });
   }
 
   async getStepProof(stepId: number): Promise<Record<string, unknown>> {
     return this.request("GET", `/steps/${stepId}/proof`);
+  }
+
+  /** Read access to your org's alerts (human session OR a project API
+   * key with the alerts:read scope — see backend/main.py's
+   * _authorize_alert_read). */
+  async listAlerts(options: { status?: string; severity?: string; limit?: number } = {}): Promise<{ alerts: unknown[]; nextCursor: number | null; totalOpen: number }> {
+    const params: Record<string, string | number> = { limit: options.limit ?? 50 };
+    if (options.status) params.status = options.status;
+    if (options.severity) params.severity = options.severity;
+    return this.request("GET", "/alerts", { params });
   }
 
   /** GET /stats — public, no auth required (this call still sends the

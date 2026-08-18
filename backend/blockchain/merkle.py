@@ -77,6 +77,45 @@ def leaf_hash(
     return _keccak(_keccak(preimage))
 
 
+def leaf_hash_v2(
+    run_id_hash: bytes,
+    agent_id_hash: bytes,
+    action_hash: bytes,
+    input_hash: bytes,
+    output_hash: bytes,
+    step_index: int,
+    timestamp: int,
+    agent_code_hash: bytes,
+) -> bytes:
+    """
+    Identity-bound leaf (Phase 3 §6.2) — leaf_hash's exact preimage plus
+    one more bytes32: the SDK's own fingerprint of the agent that
+    produced this step. WHY THIS MATTERS: storing agent_code_hash as an
+    ordinary `steps` column would be database-editable by the same
+    attacker this whole system exists to catch — putting it in the leaf
+    preimage means editing that column breaks the anchored hash, exactly
+    like editing input_hash/output_hash already does. An attacker with DB
+    access can no longer make a step LOOK like it was produced by a
+    different, unregistered identity without also invalidating the
+    Merkle proof that step's batch anchored on-chain.
+
+    THIS IS A NEW SCHEME, NOT A REPLACEMENT: `steps.leaf_schema_version`
+    (default 1) tracks which preimage a given row's leaf_hash was built
+    from — leaf_hash (v1) for every row anchored before Phase 3, this
+    function (v2) for rows an identity-aware SDK logs afterward. A v1 and
+    a v2 leaf coexist in the SAME Merkle tree with no special handling —
+    build_tree/build_levels operate on opaque 32-byte leaves regardless of
+    which preimage produced them, and AgentAuditLogV2.verifyProof takes an
+    opaque bytes32 leaf too; the contract never knew either preimage.
+    Existing anchored proofs are completely unaffected.
+    """
+    preimage = abi_encode(
+        ["bytes32", "bytes32", "bytes32", "bytes32", "bytes32", "uint64", "uint64", "bytes32"],
+        [run_id_hash, agent_id_hash, action_hash, input_hash, output_hash, step_index, timestamp, agent_code_hash],
+    )
+    return _keccak(_keccak(preimage))
+
+
 def hash_pair(a: bytes, b: bytes) -> bytes:
     """Sorted-pair hash — matches OpenZeppelin MerkleProof.sol's _hashPair
     exactly. Order of arguments never matters, only numeric value (Python

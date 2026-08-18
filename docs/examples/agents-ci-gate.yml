@@ -1,0 +1,66 @@
+# agents-ci-gate.yml — example CI job for a THIRD-PARTY REPO that uses
+# the TrustChain SDK/CLI to run agents (Phase 3 plan §11). Copy this into
+# your own .github/workflows/, alongside a trustchain.yaml manifest (see
+# docs/examples/trustchain.yaml) declaring your agents' id/model/version/
+# system_prompt_file.
+#
+# WHY TWO SEPARATE JOBS WITH TWO SEPARATE KEYS: the PR job holds a
+# READ-ONLY key (scope agents:read) — it can tell you your agent's
+# identity has drifted from what's registered, but it cannot itself
+# change what's registered. Only the job that runs on your protected
+# main branch holds a key that CAN (scope agents:register). A compromised
+# PR from a fork can therefore never re-register one of your agents,
+# because the credential that could isn't available to it — the same
+# role separation AgentIdentityRegistryV2.sol enforces on-chain between
+# REGISTRAR_ROLE and ANCHOR_ROLE (see contracts/src/v2/), applied here at
+# the CI layer instead of the contract layer.
+name: TrustChain agent identity check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Verify agent identities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install trustchain-cli
+      - name: Verify agent identities
+        env:
+          # Scope: agents:read only. Create with:
+          #   trustchain keys create --scopes agents:read
+          TRUSTCHAIN_API_KEY: ${{ secrets.TRUSTCHAIN_API_KEY }}
+        run: trustchain agents verify-manifest --manifest trustchain.yaml
+        # Non-zero exit here fails the build the moment a model/version/
+        # prompt change reaches a PR without a matching `sync-manifest` —
+        # at merge time, in front of the person who made the change,
+        # rather than as a surprise alert email hours or days later.
+
+  sync:
+    name: Register intentional identity changes
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install trustchain-cli
+      - name: Register intentional identity changes
+        env:
+          # Scope: agents:register. This key should NOT be available to
+          # the `verify` job above or to any job that runs on pull_request
+          # (a fork's PR must never have write access to it) — set it as
+          # an Environment secret gated to a protected branch/environment,
+          # not a plain repo secret every workflow run can read.
+          TRUSTCHAIN_API_KEY: ${{ secrets.TRUSTCHAIN_REGISTRAR_KEY }}
+        run: |
+          trustchain agents sync-manifest --manifest trustchain.yaml \
+            --reason "deploy ${{ github.sha }}"

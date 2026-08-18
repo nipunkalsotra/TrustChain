@@ -178,23 +178,44 @@ class TrustChainClient(_BaseClient):
 
     def log_step(
         self, run_id: str, agent_id: str, action: str, input: str, output: str,  # noqa: A002
-        trust_score: int = 0, idempotency_key: Optional[str] = None,
+        trust_score: int = 0, idempotency_key: Optional[str] = None, agent_code_hash: Optional[str] = None,
     ) -> dict:
         """Low-level, synchronous SDK-ingest call (POST /steps) — most
         callers want trustchain_sdk.TrustChain.log (non-blocking by
-        default) rather than this directly."""
+        default) rather than this directly.
+
+        agent_code_hash (Phase 3 §6.2/§10.1): the same fingerprint
+        register_agent() computed, if TrustChain.log() has one cached for
+        this agent_id — lets the backend synchronously compare "what this
+        step claims produced it" against "what's actually registered
+        on-chain" and raise an agent_identity_drift alert on mismatch,
+        with zero extra round trips. Optional — omitting it just means
+        this step gets no drift check (Phase 2 behavior)."""
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
-        return self._request(
-            "POST", "/steps",
-            json={
-                "run_id": run_id, "agent_id": agent_id, "action": action,
-                "input": input, "output": output, "trust_score": trust_score,
-            },
-            headers=headers,
-        )
+        body = {
+            "run_id": run_id, "agent_id": agent_id, "action": action,
+            "input": input, "output": output, "trust_score": trust_score,
+        }
+        if agent_code_hash:
+            body["agent_code_hash"] = agent_code_hash
+        return self._request("POST", "/steps", json=body, headers=headers)
 
     def get_step_proof(self, step_id: int) -> dict:
         return self._request("GET", f"/steps/{step_id}/proof")
+
+    def list_alerts(self, status: Optional[str] = None, severity: Optional[str] = None, limit: int = 50) -> dict:
+        """Phase 3 §10.1 — read access to the alert list, so a team can
+        pipe TrustChain alerts into their own on-call tooling. Human-JWT
+        endpoint on the backend (see main.py's Phase 3 section docstring
+        on why alert mutation/read stays get_current_user-only) — this
+        call will 401 against a project API key; it needs a real session
+        token."""
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        if severity:
+            params["severity"] = severity
+        return self._request("GET", "/alerts", params=params)
 
     def platform_stats(self) -> dict:
         """GET /stats — public, no auth required (this call still sends

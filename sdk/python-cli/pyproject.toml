@@ -12,6 +12,9 @@ license = { text = "MIT" }
 dependencies = [
     "trustchain-sdk",
     "httpx>=0.27,<1.0",
+    # trustchain.yaml manifest parsing for `agents verify/sync --manifest`
+    # (Phase 3 §11's CI integrity gate).
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]

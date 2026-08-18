@@ -21,6 +21,13 @@ together into the system as it actually exists today.
 | [0010](0010-jwt-issuer-and-audience-claims.md) | JWT issuer/audience claims |
 | [0011](0011-canary-rollout-for-a-single-host-deploy.md) | Canary rollout for a single-host deploy |
 | [0012](0012-multisig-default-deployment-posture.md) | Default deployment posture for multisig admin |
+| [0013](0013-role-model-and-permission-matrix.md) | Role model and permission matrix (Phase 3) |
+| [0014](0014-invitation-tokens.md) | Invitation tokens (Phase 3) |
+| [0015](0015-tiered-continuous-verification.md) | Tiered continuous verification — hot/rolling/on-demand (Phase 3) |
+| [0016](0016-alert-dedupe-and-delivery-outbox.md) | Alert dedupe and delivery outbox (Phase 3) |
+| [0017](0017-leaf-schema-v2-identity-binding.md) | Leaf schema v2: binding agent identity into the anchored hash (Phase 3) |
+| [0018](0018-pluggable-email-backends.md) | Pluggable email backends (Phase 3) |
+| [0019](0019-jwt-membership-liveness-check.md) | JWT membership liveness check (Phase 3) |
 
 ## Format
 

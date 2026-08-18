@@ -16,3 +16,9 @@ slither-analyzer==0.11.6
 # and ruff.toml for what's actually gated vs informational.
 ruff==0.16.3
 mypy==2.3.0
+
+# Real in-process SMTP server for notifications/ tests (Phase 3) — this
+# repo's own testing philosophy is "verify against real infrastructure,
+# not mocks" (see CLAUDE.md); this is that, for email, the same way
+# Testcontainers is that for Postgres/Redis.
+aiosmtpd==1.4.6

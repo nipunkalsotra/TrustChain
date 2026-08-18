@@ -102,6 +102,44 @@ async def _sync_current_state(session: AsyncSession, project_id: int, agent_id: 
     )
 
 
+async def _org_id_for_project(session: AsyncSession, project_id: int):
+    result = await session.execute(text("SELECT org_id FROM projects WHERE id = :pid"), {"pid": project_id})
+    return result.scalar_one_or_none()
+
+
+async def _raise_identity_alert(
+    session: AsyncSession, *, project_id: int, agent_id: str, alert_type: str, severity: str,
+    title: str, summary: str, evidence: dict, now: int,
+) -> None:
+    """Detector 2 (Phase 3 §6.3) — EVERY identity-changing event raises an
+    alert, unconditionally, including sanctioned ones. This is deliberate,
+    not noise: the system cannot tell a legitimate re-registration apart
+    from a stolen-key one at index time — that judgment belongs to a
+    human, and an alert that was never surfaced is exactly the miss this
+    detector exists to prevent.
+
+    NOTE on the CI gate's "change reason" (Phase 3 §11): AgentUpdated's
+    on-chain event args carry no free-text field for it (see
+    AgentIdentityRegistryV2.sol's event definitions) — a reason string
+    passed to `trustchain agents sync-manifest --reason "..."` is NOT currently
+    threaded into this alert's evidence. It's visible in the CI job's own
+    logs and in POST /agents' access log line, which is enough to
+    correlate a specific alert against a specific deploy by timestamp, but
+    reading the reason FROM the alert itself would need either a contract
+    change (a new indexed event field) or an off-chain side-table keyed on
+    tx_hash — both out of scope for this pass; tracked as a real gap, not
+    silently assumed done."""
+    org_id = await _org_id_for_project(session, project_id)
+    if org_id is None:
+        return  # project no longer exists (soft-deleted or a data anomaly) — nothing to notify
+    from db.alerts import raise_alert
+    await raise_alert(
+        org_id=org_id, project_id=project_id, alert_type=alert_type, severity=severity,
+        title=title, summary=summary, subject=f"agent:{agent_id}", evidence=evidence,
+        detector="identity_events", now=now,
+    )
+
+
 async def index_agent_registered(session: AsyncSession, event) -> bool:
     args = event["args"]
     inserted = await _insert(session, event, "AgentRegistered", {
@@ -130,6 +168,17 @@ async def index_agent_updated(session: AsyncSession, event) -> bool:
     })
     if inserted:
         await _sync_current_state(session, args["projectId"], args["agentId"])
+        await _raise_identity_alert(
+            session, project_id=args["projectId"], agent_id=args["agentId"],
+            alert_type="agent_identity_changed", severity="warning",
+            title=f"Agent '{args['agentId']}' identity was updated",
+            summary=f"'{args['agentId']}' was re-registered with a new code hash.",
+            evidence={
+                "agentId": args["agentId"], "newHash": "0x" + args["newCodeHash"].hex(),
+                "txHash": "0x" + event["transactionHash"].hex(), "blockNumber": event["blockNumber"],
+            },
+            now=args["timestamp"],
+        )
     return inserted
 
 
@@ -143,6 +192,17 @@ async def index_agent_revoked(session: AsyncSession, event) -> bool:
     })
     if inserted:
         await _sync_current_state(session, args["projectId"], args["agentId"])
+        await _raise_identity_alert(
+            session, project_id=args["projectId"], agent_id=args["agentId"],
+            alert_type="agent_revoked", severity="warning",
+            title=f"Agent '{args['agentId']}' was revoked",
+            summary=f"'{args['agentId']}' is no longer an active registered identity.",
+            evidence={
+                "agentId": args["agentId"], "actor": args["revokedBy"],
+                "txHash": "0x" + event["transactionHash"].hex(), "blockNumber": event["blockNumber"],
+            },
+            now=args["timestamp"],
+        )
     return inserted
 
 
@@ -157,4 +217,22 @@ async def index_integrity_violation(session: AsyncSession, event) -> bool:
     })
     if inserted:
         observability.AGENT_INTEGRITY_VIOLATIONS_TOTAL.inc()
+        # Critical, not warning — unlike AgentUpdated/AgentRevoked above,
+        # this event is the CONTRACT ITSELF reporting a hash mismatch
+        # (verifyAgentAndLog found the provided config hash didn't match
+        # what's registered) — as authoritative a tamper signal as this
+        # system can produce, see AgentIdentityRegistryV2.sol's own
+        # docstring on why this event exists at all.
+        await _raise_identity_alert(
+            session, project_id=args["projectId"], agent_id=args["agentId"],
+            alert_type="onchain_integrity_violation", severity="critical",
+            title=f"On-chain integrity violation for agent '{args['agentId']}'",
+            summary=f"verifyAgentAndLog() found a config hash mismatch for '{args['agentId']}'.",
+            evidence={
+                "agentId": args["agentId"], "expectedHash": "0x" + args["expectedHash"].hex(),
+                "providedHash": "0x" + args["providedHash"].hex(),
+                "txHash": "0x" + event["transactionHash"].hex(), "blockNumber": event["blockNumber"],
+            },
+            now=args["timestamp"],
+        )
     return inserted

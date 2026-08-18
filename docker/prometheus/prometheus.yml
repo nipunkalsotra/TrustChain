@@ -1,8 +1,9 @@
 # Prometheus scrape config for the local dev stack (docker-compose.yml).
-# Three targets: the API (its own /metrics route, main.py) and the anchor
-# worker / indexer (each a plain asyncio loop with no HTTP server of its
-# own otherwise — they start a dedicated prometheus_client HTTP server via
-# observability.start_metrics_server(), see backend/observability.py).
+# Four targets: the API (its own /metrics route, main.py) and the anchor
+# worker / indexer / integrity-watchdog (each a plain asyncio loop with no
+# HTTP server of its own otherwise — they start a dedicated
+# prometheus_client HTTP server via observability.start_metrics_server(),
+# see backend/observability.py).
 
 global:
   scrape_interval: 15s
@@ -24,3 +25,7 @@ scrape_configs:
   - job_name: trustchain-indexer
     static_configs:
       - targets: ["indexer:9102"]
+
+  - job_name: trustchain-watchdog
+    static_configs:
+      - targets: ["integrity-watchdog:9103"]

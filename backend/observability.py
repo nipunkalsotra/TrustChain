@@ -254,6 +254,72 @@ AGENT_INTEGRITY_VIOLATIONS_TOTAL = Counter(
 )
 
 
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Phase 3 — continuous integrity monitoring & alerting (integrity_watchdog,
+#  notifications/, db/alerts.py, db/orgs.py). No metric here carries a
+#  tenant identifier, same rule as every metric above — per-tenant
+#  drill-down goes through structured logs instead.
+# ─────────────────────────────────────────────────────────────────────────
+
+INTEGRITY_CHECKS_TOTAL = Counter(
+    "integrity_checks_total",
+    "Detector runs, by outcome — integrity_watchdog's step_rows/merkle_roots/liveness "
+    "detectors and the synchronous identity-drift check on POST /steps.",
+    ["detector", "result"],  # result: ok | mismatch | missing | error
+)
+INTEGRITY_ALERTS_RAISED_TOTAL = Counter(
+    "integrity_alerts_raised_total", "Alerts raised via db/alerts.py::raise_alert (new OR recurring)",
+    ["alert_type", "severity"],
+)
+WATCHDOG_SWEEP_DURATION_SECONDS = Histogram(
+    "watchdog_sweep_duration_seconds", "One detector's one pass over its current tier's batch of work",
+    ["detector", "tier"],  # tier: hot | rolling
+)
+WATCHDOG_CURSOR_LAG_ITEMS = Gauge(
+    "watchdog_cursor_lag_items", "Rows behind the current max id — how far the rolling sweep's cursor trails 'now'",
+    ["detector"],
+)
+WATCHDOG_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "watchdog_last_success_timestamp", "Unix time of each detector's last successful run — "
+    "docker/prometheus/alerts.yml's TrustChainWatchdogSilent watches this for absence, "
+    "since a suppressed watchdog raising zero alerts looks identical to 'nothing is wrong' "
+    "from every other metric here.",
+    ["detector"],
+)
+WATCHDOG_FULL_SWEEP_AGE_SECONDS = Gauge(
+    "watchdog_full_sweep_age_seconds", "Seconds since the rolling tier last completed a full wrap over all history",
+)
+ALERT_DELIVERIES_TOTAL = Counter(
+    "alert_deliveries_total", "notifications/sender.py delivery attempts, by outcome", ["channel", "status"],
+)
+ALERT_DELIVERY_QUEUE_DEPTH = Gauge(
+    "alert_delivery_queue_depth", "alert_deliveries rows currently pending or claimed",
+)
+ALERT_DELIVERY_LATENCY_SECONDS = Histogram(
+    "alert_delivery_latency_seconds", "Time from alert_deliveries row creation to a successful send",
+    ["channel"],
+)
+OPEN_ALERTS = Gauge(
+    "open_alerts", "Platform-wide open alert count, by severity — no tenant label, see module note above",
+    ["severity"],
+)
+INVITATIONS_TOTAL = Counter(
+    "invitations_total", "Invitation lifecycle events", ["action"],  # created | accepted | revoked | expired
+)
+MEMBERSHIP_CHANGES_TOTAL = Counter(
+    "membership_changes_total", "Membership lifecycle events", ["action"],  # added | role_changed | removed
+)
+MEMBERSHIP_CACHE_TOTAL = Counter(
+    "membership_cache_total",
+    "auth.py's Redis-cached membership liveness check outcomes (Phase 3 §4.3) — a rising "
+    "miss rate under steady traffic points at TTL churn, not correctness; 'invalidated' "
+    "counts explicit deletes on role change/removal, the path that makes revocation "
+    "effectively immediate rather than bounded only by the TTL.",
+    ["result"],  # hit | miss | invalidated
+)
+
+
 def start_metrics_server(port: int) -> None:
     """For non-HTTP processes (anchor worker, indexer) only — the API
     exposes /metrics through its own FastAPI router instead (main.py),

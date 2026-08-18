@@ -217,3 +217,130 @@ def test_audit_events_are_scoped_by_org(api_role_session_factory):
     finally:
         current_org_id.reset(token)
     assert visible == [alice["orgId"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Phase 3 tables — migration d7e8f9a0b1c2. Same "seed via the real
+#  superuser-role module functions, read back through the RLS-bound
+#  api_role_session_factory" shape as every test above.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_alerts_are_scoped_by_org(api_role_session_factory):
+    import db.alerts as alerts_db
+
+    alice, bob = _seed_two_projects()
+    run(alerts_db.raise_alert(
+        org_id=alice["orgId"], alert_type="rls_test", severity="warning", title="t", summary="s",
+        subject="rls:alice", evidence={}, detector="test",
+    ))
+    run(alerts_db.raise_alert(
+        org_id=bob["orgId"], alert_type="rls_test", severity="warning", title="t", summary="s",
+        subject="rls:bob", evidence={}, detector="test",
+    ))
+
+    async def _visible_subjects():
+        async with api_role_session_factory() as session:
+            rows = (await session.execute(text("SELECT subject FROM alerts"))).all()
+            return [r[0] for r in rows]
+
+    token = current_org_id.set(alice["orgId"])
+    try:
+        visible = run(_visible_subjects())
+    finally:
+        current_org_id.reset(token)
+    assert visible == ["rls:alice"]
+
+
+def test_alert_deliveries_are_scoped_via_parent_alert(api_role_session_factory):
+    """Same shape as steps -> runs above: alert_deliveries has no org_id
+    of its own, scoped via a join to alerts (migration d7e8f9a0b1c2)."""
+    import db.alerts as alerts_db
+
+    alice, bob = _seed_two_projects()
+    run(alerts_db.raise_alert(
+        org_id=alice["orgId"], alert_type="rls_test_delivery", severity="critical", title="t", summary="s",
+        subject="rls:alice:delivery", evidence={}, detector="test",
+    ))
+    run(alerts_db.raise_alert(
+        org_id=bob["orgId"], alert_type="rls_test_delivery", severity="critical", title="t", summary="s",
+        subject="rls:bob:delivery", evidence={}, detector="test",
+    ))
+
+    async def _visible_recipients():
+        async with api_role_session_factory() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT ad.recipient FROM alert_deliveries ad "
+                    "JOIN alerts a ON a.id = ad.alert_id WHERE a.alert_type = 'rls_test_delivery'"
+                )
+            )).all()
+            return [r[0] for r in rows]
+
+    # No recipients were queued (no owners/admins in these throwaway
+    # orgs beyond the creating user, who has no NotificationPreference
+    # row — defaults to opted-in, so the creator IS the recipient here).
+    token = current_org_id.set(alice["orgId"])
+    try:
+        visible = run(_visible_recipients())
+    finally:
+        current_org_id.reset(token)
+    assert all(r == "rls_alice@example.com" for r in visible)
+
+
+def test_invitations_are_scoped_by_org(api_role_session_factory):
+    import db.invitations as invitations_db
+
+    alice, bob = _seed_two_projects()
+    run(invitations_db.create_invitation(alice["orgId"], "invitee-alice@example.com", "member", alice["userId"], 9000, 604800))
+    run(invitations_db.create_invitation(bob["orgId"], "invitee-bob@example.com", "member", bob["userId"], 9000, 604800))
+
+    async def _visible_emails():
+        async with api_role_session_factory() as session:
+            rows = (await session.execute(text("SELECT email FROM invitations"))).all()
+            return [r[0] for r in rows]
+
+    token = current_org_id.set(alice["orgId"])
+    try:
+        visible = run(_visible_emails())
+    finally:
+        current_org_id.reset(token)
+    assert visible == ["invitee-alice@example.com"]
+
+
+def test_notification_preferences_are_scoped_by_org(api_role_session_factory):
+    import db.alerts as alerts_db
+
+    alice, bob = _seed_two_projects()
+    run(alerts_db.set_notification_preferences(alice["userId"], alice["orgId"], True, True, False, False, 9000))
+    run(alerts_db.set_notification_preferences(bob["userId"], bob["orgId"], True, True, False, False, 9000))
+
+    async def _visible_user_ids():
+        async with api_role_session_factory() as session:
+            rows = (await session.execute(text("SELECT user_id FROM notification_preferences"))).all()
+            return [r[0] for r in rows]
+
+    token = current_org_id.set(alice["orgId"])
+    try:
+        visible = run(_visible_user_ids())
+    finally:
+        current_org_id.reset(token)
+    assert visible == [alice["userId"]]
+
+
+def test_watchdog_tables_are_not_reachable_by_api_role(api_role_session_factory):
+    """watchdog_cursor/batch_verifications are deliberately NOT tenant
+    data (no org_id/project_id column to key an RLS policy on at all) —
+    migration d7e8f9a0b1c2 explicitly REVOKEs trustchain_api's access
+    rather than leaving it implicitly reachable via the blanket
+    default-privilege grant every other new table gets. This should fail
+    with a permission error, not just return zero rows — those are two
+    different guarantees (RLS hides ROWS; a REVOKE denies the query
+    outright, closer to 'this table doesn't exist' from api's perspective)."""
+    from sqlalchemy.exc import DBAPIError
+
+    async def _try_read():
+        async with api_role_session_factory() as session:
+            await session.execute(text("SELECT * FROM watchdog_cursor"))
+
+    with pytest.raises(DBAPIError):
+        run(_try_read())
