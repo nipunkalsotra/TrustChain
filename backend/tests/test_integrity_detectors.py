@@ -342,6 +342,151 @@ def test_deleted_step_is_detected():
     assert counts["missing"] == 1
 
 
+def test_deleted_step_attribution_resolves_a_real_display_name():
+    """Phase 4: a step deleted (not just edited) after being anchored
+    must ALSO be attributed to a real operator, the same way
+    test_operator_role_attribution_resolves_a_real_display_name already
+    covers the edit case. Found missing by a real end-to-end run
+    (scripts/e2e_demo.py's Stage 8) — sweep_merkle_roots' "missing" branch
+    raised a step_missing alert with no attribution at all before this
+    fix, because it never called _forensic_evidence the way
+    _raise_step_row_alerts (the edit-detection path) already did."""
+    project_id = seed_project()
+    ids = [_seed_run_with_step(f"tamper_run_delete_attr_{i}", project_id) for i in range(3)]
+    batch_id = run(_confirm_batch(ids))
+    role = "trustchain_op_test_deleter"
+
+    async def _setup_operator_and_delete():
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+            await session.execute(text(f'CREATE ROLE "{role}" LOGIN SUPERUSER PASSWORD \'test_pw_not_a_real_secret\''))
+            await session.execute(
+                text("INSERT INTO db_operators (role_name, display_name, created_at) VALUES (:role, :name, :now)"),
+                {"role": role, "name": "Test Deleter", "now": int(time.time())},
+            )
+            await session.commit()
+
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'SET SESSION AUTHORIZATION "{role}"'))
+            await session.execute(text("DELETE FROM anchor_outbox WHERE step_id = :id"), {"id": ids[1]})
+            await session.execute(text("DELETE FROM steps WHERE id = :id"), {"id": ids[1]})
+            await session.execute(text("RESET SESSION AUTHORIZATION"))
+            await session.commit()
+
+        async with get_sessionmaker()() as session:
+            batch = await session.get(AnchorBatch, batch_id)
+            return await sweep_merkle_roots(session, [batch], check_onchain=False)
+
+    counts = run(_setup_operator_and_delete())
+    assert counts["missing"] == 1
+
+    async def _fetch_project_org():
+        from db.models import Project
+        async with get_sessionmaker()() as session:
+            p = await session.get(Project, project_id)
+            return p.org_id
+
+    org_id = run(_fetch_project_org())
+
+    async def _find_alert():
+        from db.models import Alert
+        async with get_sessionmaker()() as session:
+            return (await session.execute(
+                select(Alert).where(Alert.org_id == org_id, Alert.alert_type == "step_missing")
+            )).scalar_one_or_none()
+
+    alert = run(_find_alert())
+    assert alert is not None
+    evidence = json.loads(alert.evidence_json)
+    forensics = evidence["deletionForensics"][str(ids[1])]
+    assert forensics["editedByDbRole"] == role
+    assert forensics["editedByOperator"] == "Test Deleter"
+    assert forensics["whatHappened"] == "the entire step row was DELETED, not edited"
+
+    async def _cleanup():
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+            await session.commit()
+
+    run(_cleanup())
+
+
+def test_deleting_the_only_step_in_a_batch_still_raises_an_alert():
+    """The real bug test_deleted_step_attribution_resolves_a_real_display_name
+    above does NOT actually exercise: that test's batch has 3 steps and
+    only deletes 1, so integrity_watchdog.tenancy.group_steps_by_org's
+    PRIMARY join (steps -> runs -> projects) still resolves an org fine
+    via the 2 SURVIVING steps in the same batch — the bug is invisible
+    there. This test uses a batch with exactly ONE step, deleted, so the
+    primary join finds ZERO rows for the whole batch and org resolution
+    can ONLY succeed via the steps_history.project_id fallback this fix
+    added. Before that fix (found via a real end-to-end run of
+    scripts/e2e_demo.py's Stage 8, whose batch is also single-step, same
+    shape as a real support-agent demo's own traffic): sweep_merkle_roots
+    correctly counted the step as 'missing' but group_steps_by_org
+    resolved to an EMPTY dict, so _raise_batch_alerts' `for org_id,
+    bucket in grouped.items()` loop never executed — no alert was ever
+    raised for anyone. The single most damaging tamper case (deleting the
+    evidence outright) silently evaded attribution entirely."""
+    project_id = seed_project()
+    step_id = _seed_run_with_step("tamper_run_delete_solo", project_id)
+    batch_id = run(_confirm_batch([step_id]))
+    role = "trustchain_op_test_solo_deleter"
+
+    async def _setup_operator_and_delete():
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+            await session.execute(text(f'CREATE ROLE "{role}" LOGIN SUPERUSER PASSWORD \'test_pw_not_a_real_secret\''))
+            await session.execute(
+                text("INSERT INTO db_operators (role_name, display_name, created_at) VALUES (:role, :name, :now)"),
+                {"role": role, "name": "Solo Deleter", "now": int(time.time())},
+            )
+            await session.commit()
+
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'SET SESSION AUTHORIZATION "{role}"'))
+            await session.execute(text("DELETE FROM anchor_outbox WHERE step_id = :id"), {"id": step_id})
+            await session.execute(text("DELETE FROM steps WHERE id = :id"), {"id": step_id})
+            await session.execute(text("RESET SESSION AUTHORIZATION"))
+            await session.commit()
+
+        async with get_sessionmaker()() as session:
+            batch = await session.get(AnchorBatch, batch_id)
+            return await sweep_merkle_roots(session, [batch], check_onchain=False)
+
+    counts = run(_setup_operator_and_delete())
+    assert counts["missing"] == 1  # the detector itself always worked — this is not what was broken
+
+    async def _fetch_project_org():
+        from db.models import Project
+        async with get_sessionmaker()() as session:
+            p = await session.get(Project, project_id)
+            return p.org_id
+
+    org_id = run(_fetch_project_org())
+
+    async def _find_alert():
+        from db.models import Alert
+        async with get_sessionmaker()() as session:
+            return (await session.execute(
+                select(Alert).where(Alert.org_id == org_id, Alert.alert_type == "step_missing")
+            )).scalar_one_or_none()
+
+    alert = run(_find_alert())
+    assert alert is not None, "no alert was raised at all — the org-resolution fallback regressed"
+    evidence = json.loads(alert.evidence_json)
+    assert evidence["missingStepIds"] == [step_id]
+    forensics = evidence["deletionForensics"][str(step_id)]
+    assert forensics["editedByOperator"] == "Solo Deleter"
+
+    async def _cleanup():
+        async with get_sessionmaker()() as session:
+            await session.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+            await session.commit()
+
+    run(_cleanup())
+
+
 def test_identity_drift_alerts_but_still_records_the_step():
     """Detector 1 — the SDK's presented agent_code_hash differs from what
     the agent is registered as. Must NOT reject the write (the step is

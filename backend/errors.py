@@ -101,6 +101,11 @@ class ErrorCode(str, Enum):
     INTEGRITY_CHECK_FAILED = "integrity_check_failed"
     RUN_NOT_VERIFIABLE = "run_not_verifiable"
 
+    # Email verification / password reset (Phase 4 G1/G2)
+    VERIFICATION_TOKEN_INVALID = "verification_token_invalid"
+    EMAIL_NOT_VERIFIED = "email_not_verified"
+    RESET_TOKEN_INVALID = "reset_token_invalid"
+
     # Catch-all for genuinely unexpected failures — a client can't act
     # differently based on WHICH endpoint hit this, so unlike everything
     # above it stays one generic code rather than one per call site.

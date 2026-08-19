@@ -28,6 +28,10 @@ together into the system as it actually exists today.
 | [0017](0017-leaf-schema-v2-identity-binding.md) | Leaf schema v2: binding agent identity into the anchored hash (Phase 3) |
 | [0018](0018-pluggable-email-backends.md) | Pluggable email backends (Phase 3) |
 | [0019](0019-jwt-membership-liveness-check.md) | JWT membership liveness check (Phase 3) |
+| [0020](0020-database-audit-logging-and-attribution.md) | Database audit logging and attribution (Phase 3) |
+| [0021](0021-single-global-email-sender-identity.md) | Single global email sender identity (Phase 4) |
+| [0022](0022-email-verification-and-password-reset-tokens.md) | Email verification and password reset tokens (Phase 4) |
+| [0023](0023-unverified-account-permission-limits.md) | Unverified-account permission limits (Phase 4) |
 
 ## Format
 

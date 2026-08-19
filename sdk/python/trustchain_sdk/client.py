@@ -217,6 +217,19 @@ class TrustChainClient(_BaseClient):
             params["severity"] = severity
         return self._request("GET", "/alerts", params=params)
 
+    def verify_content(self, step_id: int, field: str, candidate_text: str) -> dict:
+        """POST /integrity/verify-content — Phase 4 G3. Most callers want
+        trustchain_sdk.TrustChain.verify_content (a typed VerifyContentResult)
+        rather than this directly; this is the raw JSON-in/JSON-out call
+        it wraps. See that endpoint's own docstring in backend/main.py for
+        what matchesCurrent/matchesOriginal mean — this never sends or
+        receives the step's actual stored content, only a hash comparison
+        against the candidate_text you already have."""
+        return self._request(
+            "POST", "/integrity/verify-content",
+            json={"stepId": step_id, "field": field, "candidateText": candidate_text},
+        )
+
     def platform_stats(self) -> dict:
         """GET /stats — public, no auth required (this call still sends
         the configured API key/JWT like every other method here, which

@@ -53,14 +53,20 @@ async def _recipients_for(session, org_id: int, severity: str) -> list[dict]:
     "your audit trail no longer matches the chain" by up to a day."""
     pref_field = _SEVERITY_PREF_FIELD[severity]
     stmt = (
-        select(User.id, User.email, Membership.role)
+        select(User.id, User.email, User.email_verified, Membership.role)
         .join(Membership, Membership.user_id == User.id)
         .where(Membership.org_id == org_id, Membership.role.in_(("owner", "admin")))
     )
     rows = (await session.execute(stmt)).all()
 
     recipients = []
-    for user_id, email, role in rows:
+    for user_id, email, email_verified, role in rows:
+        if not email_verified:
+            # Phase 4 G1: an unverified address might not be this
+            # person's — mailing it an alert (which can carry forensic
+            # detail about who tampered with what) is exactly the kind
+            # of consequential send verification exists to gate.
+            continue
         pref = await session.get(NotificationPreference, {"user_id": user_id, "org_id": org_id})
         opted_in = getattr(pref, pref_field) if pref is not None else (severity != "info")
         wants_digest_only = pref is not None and pref.email_digest_only and severity != "critical"
@@ -160,6 +166,16 @@ def _row_to_dict(a: Alert) -> dict:
         "firstSeenAt": a.first_seen_at, "lastSeenAt": a.last_seen_at,
         "acknowledgedAt": a.acknowledged_at, "acknowledgedBy": a.acknowledged_by,
         "resolvedAt": a.resolved_at, "resolvedBy": a.resolved_by, "resolutionNote": a.resolution_note,
+        # Phase 4 G4 — GET /alerts (the list endpoint the SDK's alerts()
+        # wraps) previously omitted this entirely; only GET /alerts/{id}
+        # included it (via a now-redundant second assignment in get_alert
+        # below, since this function covers it too). Without it here, a
+        # typed accessor on the SDK side would have nothing to read —
+        # editedByOperator/oldOutputHash/etc. (integrity_watchdog/main.py's
+        # _forensic_evidence) live inside this JSON blob. Small (a
+        # handful of hash strings per alert), so including it in the list
+        # response isn't a meaningful payload-size concern.
+        "evidence": json.loads(a.evidence_json) if a.evidence_json else {},
     }
 
 
@@ -207,8 +223,7 @@ async def get_alert(alert_id: int, org_id: int) -> Optional[dict]:
             await session.execute(select(AlertDelivery).where(AlertDelivery.alert_id == alert_id))
         ).scalars().all()
 
-    result = _row_to_dict(alert)
-    result["evidence"] = json.loads(alert.evidence_json) if alert.evidence_json else {}
+    result = _row_to_dict(alert)  # already includes "evidence" — see that function
     result["deliveries"] = [
         {
             "channel": d.channel, "recipient": d.recipient, "status": d.status,
@@ -335,7 +350,7 @@ async def get_due_digest_recipients(org_id: int, now: int, interval_seconds: int
     digest (if any) was sent more than interval_seconds ago — a row-absent
     last_digest_sent_at (never sent) is always due."""
     stmt = (
-        select(User.id, User.email, NotificationPreference)
+        select(User.id, User.email, User.email_verified, NotificationPreference)
         .join(NotificationPreference, NotificationPreference.user_id == User.id)
         .join(Membership, (Membership.user_id == User.id) & (Membership.org_id == NotificationPreference.org_id))
         .where(
@@ -348,7 +363,9 @@ async def get_due_digest_recipients(org_id: int, now: int, interval_seconds: int
         rows = (await session.execute(stmt)).all()
 
     due = []
-    for user_id, email, pref in rows:
+    for user_id, email, email_verified, pref in rows:
+        if not email_verified:
+            continue  # Phase 4 G1 — same reasoning as _recipients_for above
         last_sent = pref.last_digest_sent_at
         if last_sent is None or (now - last_sent) >= interval_seconds:
             due.append({"userId": user_id, "email": email})

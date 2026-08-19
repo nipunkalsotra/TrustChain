@@ -16,6 +16,7 @@ import uuid
 import httpx
 import pytest
 
+from conftest import verified_signup
 from trustchain_sdk import (
     AuthenticationError,
     BadRequestError,
@@ -50,13 +51,7 @@ def api_key() -> str:
     tests failed with RateLimitError because five run_agent() calls
     across earlier tests had already exhausted the shared bucket.)"""
     email = f"sdk_test_{uuid.uuid4().hex}@example.com"
-    signup = httpx.post(
-        f"{BASE_URL}/auth/signup",
-        json={"name": "SDK integration test", "email": email, "password": "sdk-test-password-123"},
-        timeout=10.0,
-    )
-    assert signup.status_code == 200, signup.text
-    jwt = signup.json()["token"]
+    jwt = verified_signup(BASE_URL, "SDK integration test", email, "sdk-test-password-123")
 
     created = httpx.post(
         f"{BASE_URL}/api-keys",
@@ -96,16 +91,11 @@ def test_list_agents_returns_empty_for_a_fresh_project():
     # only (backend/db/read_model.py::list_agents), no Anvil/on-chain
     # call needed, unlike register_agent/verify_agent.
     email = f"sdk_test_{uuid.uuid4().hex}@example.com"
-    signup = httpx.post(
-        f"{BASE_URL}/auth/signup",
-        json={"name": "SDK integration test", "email": email, "password": "sdk-test-password-123"},
-        timeout=10.0,
-    )
-    assert signup.status_code == 200, signup.text
+    jwt = verified_signup(BASE_URL, "SDK integration test", email, "sdk-test-password-123")
     created = httpx.post(
         f"{BASE_URL}/api-keys",
         json={"scopes": ["agents:read"], "environment": "test"},
-        headers={"Authorization": f"Bearer {signup.json()['token']}"},
+        headers={"Authorization": f"Bearer {jwt}"},
         timeout=10.0,
     )
     assert created.status_code == 200, created.text

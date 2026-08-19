@@ -125,3 +125,69 @@ def render_invitation_email(*, org_name: str, role: str, invited_by_name: str, r
         f"</div>"
     )
     return subject, text_body, html_body
+
+
+def render_verification_email(*, name: str, raw_token: str, ttl_seconds: int) -> tuple[str, str, str]:
+    """Same stated exception as the invitation email above: the token IS
+    the payload. The raw token is surfaced as plain text too, not only
+    inside the link — there is no frontend route to consume it yet
+    (Phase 4 is backend-only; Phase 5 adds one), so `POST
+    /auth/verify-email/{token}` is what a caller actually hits today,
+    exactly as docs/e2e-walkthrough.md's Stage 1 does."""
+    subject = "Verify your email address for TrustChain"
+    link = _frontend_url(f"/verify-email/{raw_token}")
+    hours = ttl_seconds // 3600
+
+    text_body = (
+        f"Hi {name},\n\n"
+        f"Confirm this is your email address to finish setting up your TrustChain account.\n\n"
+        f"  Verification token: {raw_token}\n"
+        f"  Or click: {link}\n\n"
+        f"This link/token is single-use and expires in {hours} hours. If you didn't create this "
+        f"account, you can ignore this email — nothing further happens until it's verified.\n"
+    )
+    html_body = (
+        f"<div style='font-family:sans-serif;max-width:560px'>"
+        f"<p>Hi {html.escape(name)},</p>"
+        f"<p>Confirm this is your email address to finish setting up your TrustChain account.</p>"
+        f"<p><a href='{link}' style='display:inline-block;padding:10px 20px;background:#0f4f4f;color:#fff;"
+        f"text-decoration:none;border-radius:4px'>Verify email address</a></p>"
+        f"<p style='color:#888;font-size:12px'>Verification token: <code>{html.escape(raw_token)}</code></p>"
+        f"<p style='color:#888;font-size:12px'>This link/token is single-use and expires in {hours} hours. "
+        f"If you didn't create this account, you can ignore this email.</p>"
+        f"</div>"
+    )
+    return subject, text_body, html_body
+
+
+def render_password_reset_email(*, name: str, raw_token: str, ttl_seconds: int) -> tuple[str, str, str]:
+    """Deliberately does NOT reveal whether the account exists (main.py's
+    /auth/forgot-password never calls this for an unknown email at all —
+    see that endpoint's docstring), so by the time this renders, the
+    caller already knows the account is real. The token is a live
+    account-takeover credential if intercepted, same class of secret as
+    the invitation/verification tokens above, surfaced the same way."""
+    subject = "Reset your TrustChain password"
+    link = _frontend_url(f"/reset-password/{raw_token}")
+    minutes = ttl_seconds // 60
+
+    text_body = (
+        f"Hi {name},\n\n"
+        f"Someone (hopefully you) requested a password reset for your TrustChain account.\n\n"
+        f"  Reset token: {raw_token}\n"
+        f"  Or click: {link}\n\n"
+        f"This link/token is single-use and expires in {minutes} minutes. If you didn't request this, "
+        f"you can ignore this email — your password will not change.\n"
+    )
+    html_body = (
+        f"<div style='font-family:sans-serif;max-width:560px'>"
+        f"<p>Hi {html.escape(name)},</p>"
+        f"<p>Someone (hopefully you) requested a password reset for your TrustChain account.</p>"
+        f"<p><a href='{link}' style='display:inline-block;padding:10px 20px;background:#0f4f4f;color:#fff;"
+        f"text-decoration:none;border-radius:4px'>Reset password</a></p>"
+        f"<p style='color:#888;font-size:12px'>Reset token: <code>{html.escape(raw_token)}</code></p>"
+        f"<p style='color:#888;font-size:12px'>This link/token is single-use and expires in {minutes} minutes. "
+        f"If you didn't request this, you can ignore this email — your password will not change.</p>"
+        f"</div>"
+    )
+    return subject, text_body, html_body

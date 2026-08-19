@@ -116,6 +116,22 @@ MIN_ROLE_FOR: dict[Permission, str] = {
 
 assert set(MIN_ROLE_FOR) == set(Permission), "every Permission must have a MIN_ROLE_FOR entry"
 
+# Phase 4 G1: an unverified account's email address might not actually
+# belong to the person who registered it — every guarantee this system
+# makes about "the owner gets emailed" assumes it does. Rather than
+# scatter `if not current_user.email_verified` checks across the
+# specific endpoints that matter (member invites, API key creation — the
+# two ways an unverified account could hand out real authority or
+# credentials before that assumption holds), the check lives here,
+# alongside the role check every one of those endpoints already goes
+# through require_permission for. A permission NOT in this set is
+# unaffected — read access, for instance, never required a verified
+# email and still doesn't.
+REQUIRES_VERIFIED_EMAIL: frozenset[Permission] = frozenset({
+    Permission.MEMBER_INVITE,
+    Permission.APIKEY_CREATE,
+})
+
 
 async def get_role(user_id: int, org_id: int) -> Optional[str]:
     """Bare membership-role lookup, no error handling — used both by
@@ -132,14 +148,38 @@ async def require_permission(user_id: int, org_id: int, permission: Permission) 
     """Raises ApiError(403, INSUFFICIENT_ROLE) if the caller's rank in
     org_id is below MIN_ROLE_FOR[permission]; raises the same error if
     they hold no membership in that org at all (a non-member has rank
-    -infinity, functionally). Returns the resolved role so callers that
-    need finer-grained logic afterward (e.g. the rank-vs-target comparison
-    member-management endpoints do, see main.py's member handlers) get it
-    without a second query."""
+    -infinity, functionally). For permission in REQUIRES_VERIFIED_EMAIL,
+    also raises ApiError(403, EMAIL_NOT_VERIFIED) if the caller's own
+    email isn't verified yet — checked AFTER the role check, so a caller
+    who additionally lacks the role gets the more fundamental
+    INSUFFICIENT_ROLE error, not a confusing EMAIL_NOT_VERIFIED for an
+    action they couldn't do anyway. Returns the resolved role so callers
+    that need finer-grained logic afterward (e.g. the rank-vs-target
+    comparison member-management endpoints do, see main.py's member
+    handlers) get it without a second query."""
     role = await get_role(user_id, org_id)
     if role is None or ROLE_RANK.get(role, -1) < ROLE_RANK[MIN_ROLE_FOR[permission]]:
         raise ApiError(403, f"role '{role}' cannot perform '{permission.value}'", ErrorCode.INSUFFICIENT_ROLE)
+
+    if permission in REQUIRES_VERIFIED_EMAIL and not await _is_email_verified(user_id):
+        raise ApiError(
+            403, f"email address must be verified before '{permission.value}'", ErrorCode.EMAIL_NOT_VERIFIED,
+        )
     return role
+
+
+async def _is_email_verified(user_id: int) -> bool:
+    """Thin re-export of db.email_verification.is_verified — deferred
+    import to avoid a module-load-time cycle (db/email_verification.py
+    doesn't import permissions.py, but db/__init__.py's own import graph
+    is broad enough that importing it eagerly at permissions.py's module
+    level isn't worth the risk for one function). A fresh DB read, not
+    JWT-embedded — verifying an email takes effect immediately for the
+    very next request, without requiring the caller to log in again for
+    a new token."""
+    from db.email_verification import is_verified
+
+    return await is_verified(user_id)
 
 
 def rank_of(role: str) -> int:

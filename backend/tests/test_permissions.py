@@ -83,6 +83,13 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # permissions.require_permission).
 _EXEMPT_PATHS = {
     "/auth/signup", "/auth/login", "/auth/refresh", "/auth/logout", "/auth/token-pair",
+    # Phase 4 G1/G2 — same category as the /auth/* bootstrapping routes
+    # above: account-lifecycle actions authorized by the caller's own
+    # identity (a bearer JWT scoped to no particular org, or a token
+    # that IS the authorization, same reasoning as invitation accept
+    # below), never by an org membership rank there is nothing to check.
+    "/auth/resend-verification", "/auth/verify-email/{token}",
+    "/auth/forgot-password", "/auth/reset-password/{token}",
     "/health", "/ready", "/metrics", "/verify", "/verify/tamper-demo",
     "/invitations/{token}",  # public preview — unauthenticated by design
     "/run-agent", "/v1/runs",  # pre-Phase-3, project-API-key-scoped (auth.require_scope)

@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { TrustChain, hashPair, verifyProof } from "../src/index.js";
+import { verifiedSignup } from "./testHelpers.js";
 
 const BASE_URL = "http://localhost:8000";
 const ANVIL_RPC = "http://localhost:8545";
@@ -46,14 +47,7 @@ async function anvilIsUp(): Promise<boolean> {
 
 async function freshApiKey(): Promise<string> {
   const email = `sdk_ts_instr_${randomUUID()}@example.com`;
-  const signupRes = await fetch(`${BASE_URL}/auth/signup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "TS instrumentation test", email, password: "sdk-ts-instr-password-123" }),
-  });
-  const signupBody = await signupRes.text();
-  assert.equal(signupRes.status, 200, signupBody);
-  const { token } = JSON.parse(signupBody) as { token: string };
+  const token = await verifiedSignup(BASE_URL, "TS instrumentation test", email, "sdk-ts-instr-password-123");
 
   const createdRes = await fetch(`${BASE_URL}/api-keys`, {
     method: "POST",
@@ -206,18 +200,34 @@ test(
     const receipt = await tc.logAndWait({ agentId: "proof-test-agent", action: "a", input: "i", output: "o" });
     assert.notEqual(receipt.stepId, undefined);
 
+    // Polls until anchorStatus === "confirmed" specifically, not just
+    // until getProof stops returning undefined — see the Python SDK's
+    // equivalent test (sdk/python/tests/test_instrumentation.py::
+    // test_get_proof_after_real_anchoring_verifies_locally_and_onchain)
+    // for the full reasoning: GET /steps/{id}/proof returns a real proof
+    // the moment the anchor-worker places a step into a batch, while
+    // that batch is still "building" — a loop exiting as soon as a proof
+    // exists at all races the batch's later "confirmed" transition
+    // rather than actually waiting for it, a real bug (not flaky luck)
+    // that surfaced as an intermittent CI failure once a slower CI
+    // runner made the race actually visible.
     let proof;
-    const deadline = Date.now() + 30_000;
-    while (!proof && Date.now() < deadline) {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      let candidate;
       try {
-        proof = await tc.getProof(receipt.stepId!);
+        candidate = await tc.getProof(receipt.stepId!);
       } catch {
-        proof = undefined;
+        candidate = undefined;
       }
-      if (!proof) await new Promise((r) => setTimeout(r, 1000));
+      if (candidate && candidate.anchorStatus === "confirmed") {
+        proof = candidate;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
     }
 
-    assert.ok(proof, "step was not anchored by the anchor-worker container within 30s");
+    assert.ok(proof, "step was not anchored to 'confirmed' by the anchor-worker container within 60s");
     assert.equal(proof!.anchorStatus, "confirmed");
     assert.notEqual(proof!.anchorId, undefined);
 

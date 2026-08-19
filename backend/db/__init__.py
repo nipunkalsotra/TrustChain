@@ -90,10 +90,29 @@ async def create_user(
     of provision_personal_org (Phase 3 §5.3): a brand-new user accepting
     an invite joins someone else's org and must not also get an empty
     personal one of their own. org_name/project_name are ignored when
-    invitation is given, for the same reason."""
+    invitation is given, for the same reason.
+
+    Phase 4 G1: a user signing up via `invitation` starts email_verified
+    already TRUE, not the usual False default. Redeeming a real,
+    single-use, emailed invitation link IS proof of controlling that
+    inbox — arguably stronger proof than the standalone verify-email
+    click, since it's also tied to a specific admin action (an admin
+    chose to send it to exactly this address) rather than just "an email
+    arrived and something down here clicked it." Sending a second,
+    redundant verification email to someone who just proved this would
+    be pure noise — found via a real end-to-end run of
+    scripts/e2e_demo.py, whose Stage 3 (an invited admin inviting a
+    member) 403'd on EMAIL_NOT_VERIFIED before this fix, exposing that
+    the original implementation had every invited user starting
+    unverified with no way to act on admin-level permissions until they
+    ALSO separately verified — not what the Phase 4 plan's own walkthrough
+    assumes."""
     session_factory = get_sessionmaker()
     async with session_factory() as session:
-        user = User(email=email, name=name, password_hash=hash_password(password), created_at=created_at)
+        user = User(
+            email=email, name=name, password_hash=hash_password(password), created_at=created_at,
+            email_verified=invitation is not None,
+        )
         session.add(user)
         try:
             await session.flush()  # populates user.id; surfaces the unique-email violation now

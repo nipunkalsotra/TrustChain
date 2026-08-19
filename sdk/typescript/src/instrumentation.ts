@@ -64,6 +64,65 @@ export interface MerkleProofResult {
   agentCodeHash?: string;
 }
 
+/** Typed result of TrustChain.verifyContent (Phase 4 G3) — see backend/
+ * main.py's POST /integrity/verify-content docstring for the full
+ * reasoning. `matchesOriginal` is null (not false) when there's no edit
+ * history to compare against at all — distinct from "compared, and it
+ * didn't match". */
+export interface VerifyContentResult {
+  stepId: number;
+  field: string;
+  computedHash: string;
+  matchesCurrent: boolean;
+  matchesOriginal: boolean | null;
+}
+
+/** One alert as returned by TrustChain.alerts() (Phase 4 G4). Every raw
+ * field GET /alerts already returned is still present (this is a plain
+ * object built by spreading the raw response, not a narrower re-shaping
+ * of it) — `alert.id`, `alert.evidence`, `alert["someNewBackendField"]`
+ * all keep working unchanged. On top of that it exposes typed
+ * convenience accessors for the forensic-evidence fields
+ * integrity_watchdog/main.py's `_forensic_evidence` nests inside
+ * `evidence`, so a caller doesn't need to know that nesting or those
+ * exact camelCase key names to act on tamper attribution.
+ *
+ * Every accessor is undefined when the field isn't present — most
+ * alert_types carry no forensic evidence at all (it's specific to
+ * step_row_tampered), and even for that type it's only populated for
+ * edits made after the steps_audit_trigger migrations existed. A
+ * missing field is a normal, expected case to handle, not an error. */
+export interface AlertRecord {
+  evidence: Record<string, unknown>;
+  /** True if this evidence describes a DELETEd step row rather than an
+   * edited one (integrity_watchdog's deletion-sentinel case has no
+   * old/new hash pairs to diff against, since the row is simply gone;
+   * "whatHappened" is the marker key only that case sets). */
+  isDeletion: boolean;
+  editedByOperator?: string;
+  editedByDbRole?: string;
+  oldOutputHash?: string;
+  newOutputHash?: string;
+  oldInputHash?: string;
+  newInputHash?: string;
+  [key: string]: unknown;
+}
+
+function toAlertRecord(raw: Record<string, unknown>): AlertRecord {
+  const evidence = (raw.evidence as Record<string, unknown> | undefined) ?? {};
+  return {
+    ...raw,
+    evidence,
+    isDeletion: Object.hasOwn(evidence, "whatHappened"),
+    editedByOperator: evidence.editedByOperator as string | undefined,
+    editedByDbRole: evidence.editedByDbRole as string | undefined,
+    oldOutputHash: evidence.oldOutputHash as string | undefined,
+    newOutputHash: evidence.newOutputHash as string | undefined,
+    oldInputHash: evidence.oldInputHash as string | undefined,
+    newInputHash: evidence.newInputHash as string | undefined,
+  };
+}
+
 export type OnError = "warn" | "raise";
 
 // Found by tests/conformance.test.ts (ADR-0017's stated open gap,
@@ -304,13 +363,41 @@ export class TrustChain {
 
   /** Read access to your org's alerts, so a team can pipe TrustChain
    * findings into their own on-call tooling. Needs an API key with the
-   * alerts:read scope. */
-  async alerts(options: { status?: string; severity?: string; limit?: number } = {}): Promise<unknown[]> {
+   * alerts:read scope.
+   *
+   * Returns AlertRecord objects (Phase 4 G4), not bare unknown values —
+   * see that interface's own docstring for the typed forensic-evidence
+   * accessors it adds on top of every raw field GET /alerts returns. */
+  async alerts(options: { status?: string; severity?: string; limit?: number } = {}): Promise<AlertRecord[]> {
     try {
       const response = await this.client.listAlerts(options);
-      return response.alerts;
+      return (response.alerts as Record<string, unknown>[]).map(toAlertRecord);
     } catch (e) {
       return this.handleError(e, []);
+    }
+  }
+
+  // ── Content verification (Phase 4 G3) ───────────────────────────────
+
+  /** Confirms or refutes a candidate piece of text against a step's
+   * stored hash — the SDK-reachable form of what was previously only
+   * available via a hand-written call to POST /integrity/verify-content.
+   * TrustChain never stores or returns your agent's actual input/output
+   * text; `candidateText` must come from your own systems (application
+   * logs, an observability tool, wherever your agent framework actually
+   * logs transcripts).
+   *
+   * Returns undefined (never throws, unless onError="raise") on any
+   * failure — same fail-open contract as getProof. */
+  async verifyContent(stepId: number, field: "input" | "output", candidateText: string): Promise<VerifyContentResult | undefined> {
+    try {
+      const response = await this.client.verifyContent(stepId, field, candidateText);
+      return {
+        stepId: response.stepId, field: response.field, computedHash: response.computedHash,
+        matchesCurrent: response.matchesCurrent, matchesOriginal: response.matchesOriginal,
+      };
+    } catch (e) {
+      return this.handleError(e, undefined);
     }
   }
 

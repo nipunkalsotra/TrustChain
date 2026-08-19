@@ -178,6 +178,50 @@ def test_steps_are_scoped_via_the_parent_run(api_role_session_factory):
     assert visible == ["rls_run_alice"]
 
 
+def test_steps_history_is_scoped_by_its_own_denormalized_project_id(api_role_session_factory):
+    """Phase 4 §3 step 13 — steps_history postdates this file's original
+    coverage (added by migration b9a8a1970b3c, well after 9f3a1c7d5e2b's
+    original RLS pass), so it's never been exercised here even though the
+    migration that created it DID add real RLS for it (ENABLE + FORCE
+    ROW LEVEL SECURITY + a tenant_isolation policy, same file). This
+    confirms that policy actually holds — not just that it was written.
+
+    Scoped by a column ON steps_history directly (project_id), not by a
+    join through `steps` the way `steps` itself is scoped via `runs` —
+    deliberately denormalized (see that migration's own comment) so this
+    row's tenant scoping survives the referenced step later being
+    DELETED entirely, exactly what integrity_watchdog's deletion-
+    forensics path depends on (see test_integrity_detectors.py's
+    test_deleting_the_only_step_in_a_batch_still_raises_an_alert)."""
+    alice, bob = _seed_two_projects()
+
+    async def _insert_history_row(project_id: int, step_id: int) -> None:
+        async with db.engine.get_sessionmaker()() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO steps_history (step_id, project_id, changed_at, changed_columns) "
+                    "VALUES (:step_id, :project_id, 4000, '[\"__deleted__\"]')"
+                ),
+                {"step_id": step_id, "project_id": project_id},
+            )
+            await session.commit()
+
+    run(_insert_history_row(alice["projectId"], 90001))
+    run(_insert_history_row(bob["projectId"], 90002))
+
+    async def _visible_history_step_ids():
+        async with api_role_session_factory() as session:
+            rows = (await session.execute(text("SELECT step_id FROM steps_history ORDER BY step_id"))).all()
+            return [r[0] for r in rows]
+
+    token = current_project_id.set(alice["projectId"])
+    try:
+        visible = run(_visible_history_step_ids())
+    finally:
+        current_project_id.reset(token)
+    assert visible == [90001]  # not bob's 90002, despite no application-level filter in this raw query
+
+
 def test_rls_bypass_sees_every_tenant(api_role_session_factory):
     """Mirrors db/read_model.py's get_platform_stats — the one
     deliberate, explicit cross-tenant read."""

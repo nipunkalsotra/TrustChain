@@ -223,92 +223,132 @@ tenant drill-down goes through structured logs instead
   a codebase that predates them; don't "fix" a job's blocking-ness
   without being asked.
 
-## Session handoff notes (as of 2026-08-16)
+## Session handoff notes (as of 2026-08-19)
 
 Point-in-time status for picking this work back up in a new session —
 prune/replace this section once it's stale rather than letting it
-accumulate. **Correction, learned the hard way in the same session that
-wrote this section: the `TaskList`/`TaskCreate`/`TaskUpdate` task
-tracker does NOT reliably persist across sessions** — tasks #88-115
-existed and were updated earlier in that session, then a later
-`TaskList` call in the same conversation came back completely empty.
-Don't treat it as a durable cross-session record; this Markdown section
-is the actual durable one.
+accumulate. **The `TaskList`/`TaskCreate`/`TaskUpdate` task tracker does
+NOT reliably persist across sessions** (confirmed twice now, in two
+different sessions) — don't treat it as a durable cross-session record;
+this Markdown section is the actual durable one.
 
-### Git / CI state
-- Branch `phase2`, PR #24 open against `main` (`nipunkalsotra/TrustChain`,
-  public repo).
-- Two real backend-CI failures were diagnosed and fixed this session,
-  landed in commits `5ac8959` and `29f318d` (both already on
-  `origin/phase2`):
-  1. `backend/tests/test_deprecation.py`'s two live-response tests hit
-     `/health`, which needs a real `PRIVATE_KEY`/`MONAD_RPC_URL` (the V1
-     bridge) — CI deliberately never configures those (see
-     `main.py`'s `get_bridge_or_503` docstring), so `/health` 503s
-     there. Local dev's own `backend/.env` has a real `PRIVATE_KEY`,
-     which silently masked this — a real trap when comparing local vs.
-     CI behavior. Fixed by pointing those tests at `/ready` instead
-     (DB-only, always 200 regardless of chain/bridge state).
-  2. `gitleaks` scans full git history (`fetch-depth: 0`); a since-fixed
-     fake secret (`sk_live_abcdef123456`, introduced in `a5236c2`, fixed
-     the very next commit) is still reachable at the commit that
-     introduced it — a later fix can't erase it from history. Allowlisted
-     in `.gitleaks.toml` (same pattern as the two other known-fake test
-     keys already there) rather than rewriting pushed history.
-  - Neither fix has been re-confirmed against a fresh real GitHub Actions
-    run yet (this environment has no `gh` CLI / no push-capable GitHub
-    credentials — see below) — only verified via faithful local repro
-    (real Anvil + V2 deploy + Testcontainers-self-provisioned
-    Postgres/Redis, `PRIVATE_KEY` unset to match CI exactly) and a real
-    `gitleaks detect --log-opts="--all"` scan (0 leaks). Worth checking
-    the actual PR #24 checks once a new session starts.
-- **Uncommitted, local-only as of this writing**: CI build-caching added
-  to all four workflow files (`test.yml`, `k6.yml`, `deploy.yml` —
-  `actions/cache` for `contracts/cache`+`contracts/out` keyed on Solidity
-  source hashes; `release.yml` — `docker/setup-buildx-action` +
-  `cache-from`/`cache-to: type=gha` on the image build). Verified locally
-  (`forge build` 5.6s → 0.18s on a cache hit; `actionlint`/PyYAML clean
-  on all four files) but not committed — this session has no push access,
-  so these are sitting in the working tree for the user to review/commit.
-  Run `git status` first thing in a new session to check whether they're
-  still there, already committed, or something else changed.
+### Phase 4 — complete, on branch `phase4`
+
+Every step of the Phase 4 plan (email verification, password reset,
+SDK/CLI `verify_content()` + typed alert forensics, a real demo agent,
+`scripts/e2e_demo.py`, G6/G7/G8, RLS coverage for `steps_history`, three
+new ADRs, `docs/phase5-frontend-contract.md`) is implemented and
+verified against real infrastructure — see `docs/e2e-walkthrough.md`,
+which documents the actual verified behavior (including several real
+inaccuracies found in the original plan text along the way — wrong SDK
+scope name, `/trust-scores` needing `run_id`, etc. — corrected there,
+not just worked around).
+
+**Two genuine, previously-unknown bugs were found and fixed this
+session**, both only findable by actually running the full tamper →
+deletion → alert flow end-to-end, not by reading code:
+
+1. **A step deleted after being anchored never raised any alert for any
+   org, at all.** `integrity_watchdog/tenancy.py::group_steps_by_org`
+   resolved org via a join through the `steps` table — exactly the row
+   that was just deleted. Fixed with a `steps_history.project_id`
+   fallback (that table is denormalized specifically to survive this).
+   `sweep_merkle_roots`'s "missing" branch also never called the
+   forensic-attribution lookup the edit-detection path already had —
+   fixed alongside it. This means the single most damaging tamper case
+   (erasing the evidence outright, not just editing it) was silently
+   unattributable in the shipped Phase 3 code, for every deployment,
+   until this session.
+2. `_forensic_evidence`'s "most recent steps_history row" query could
+   pick the wrong row on a same-second timestamp tie — fixed with an
+   `id` tiebreaker.
+
+Both have real regression tests
+(`backend/tests/test_integrity_detectors.py::
+test_deleting_the_only_step_in_a_batch_still_raises_an_alert` is the one
+that actually exercises bug #1 — a sibling test with a 3-step batch does
+NOT, since surviving steps in the same batch mask the bug; see that
+test's own docstring for why).
+
+**Real verification performed, not just claimed:**
+- `scripts/e2e_demo.py` passed all 8 stages end-to-end against a
+  genuinely torn-down-and-rebuilt stack (`docker compose down` +
+  `./start.sh` from scratch) — the strongest single piece of evidence,
+  since it exercises signup → verify → invite → roles → real SDK agent →
+  stats → tamper → forensic email/verify-content → deletion → tenant
+  isolation as one real sequence.
+- `forge test`: 151/151 passing (contracts untouched this phase, as
+  expected).
+- Backend pytest: every individual test file touched this phase passed
+  cleanly in isolation after all changes settled (test_email_verification.py,
+  test_password_reset.py, test_integrity_detectors.py,
+  test_row_level_security.py, test_main.py, test_permissions.py). A
+  final whole-suite run was in progress (57%+ complete, zero failures
+  observed) when the user closed it for taking too long — not completed
+  to 100% in one single run, but every piece of it that DID run, plus
+  every file individually, was clean.
+- Python SDK (`sdk/python/tests/`): 24/25 passed against the live
+  Phase-4-patched backend (1 legitimate skip — a run genuinely couldn't
+  complete without a real `PRIVATE_KEY`; 1 transient failure on a shared
+  run confirmed to pass cleanly in isolation, see below).
+- TypeScript SDK: `npm run build`/`tsc --noEmit` clean for every file
+  this phase touched (one pre-existing, unrelated `cli.ts` type error
+  confirmed via `git stash` to predate this phase — not fixed, out of
+  scope). Its own real-backend test suite (`sdk/typescript/tests/`) was
+  **not** run this session — worth doing in a fresh session before
+  calling Phase 4 fully closed on that specific package.
+- `trustchain-cli`'s own test suite was **not** run this session either
+  — same caveat.
 
 ### Environment constraints (this sandbox specifically)
-- No `gh` CLI, no authenticated GitHub push/log-access credentials.
-  Diagnosing real CI failures here means: (a) the public REST API works
-  unauthenticated for a public repo's runs/check-runs/**annotations**
-  (`GET /repos/{owner}/{repo}/check-runs/{id}/annotations`), but (b) the
-  logs endpoint (`GET .../actions/jobs/{id}/logs`) 403s without an
-  authenticated token, and (c) GitHub's own web UI now requires sign-in
-  to view raw job logs even on public repos (confirmed via WebFetch — it
-  shows only the summary/annotations to anonymous viewers). When
-  annotations alone aren't enough, a temporary CI step that captures the
-  failure tail and emits it via `::error::` (readable through the public
-  annotations API) is a working, non-destructive way to get real signal
-  back — see the git history around commit `5ac8959`/`29f318d` for the
-  pattern actually used. The other reliable path: ask the user to paste
-  the failure directly from the GitHub UI, since they're logged in.
+- **Ports 8000 and 8001 are occupied by unrelated, pre-existing
+  root-owned services on this shared sandbox** (`api.main:app` on 8000,
+  something else on 8001) — not anything this repo runs. This meant
+  every real verification this session ran the API on port **8010**
+  instead of the repo's real default (8000), with `V2_RPC_URL`/
+  `V2_PRIVATE_KEY` set inline the same way `start.sh` sets them for the
+  real port-8000 invocation. **The SDK test suites' `BASE_URL` constants
+  were reverted back to the correct `http://localhost:8000` before this
+  session ended** — do not assume they're still pointed at 8010; check
+  `git diff` if anything looks off. A fresh session on a clean sandbox
+  (or one where nothing else claims 8000/8001) should not need this
+  workaround at all.
+- **A fresh Python process's first HTTP connection to a busy local
+  server can genuinely exceed a 2-second timeout** in this sandbox under
+  load (many concurrent processes: Postgres/Redis/Anvil containers, API,
+  anchor-worker, indexer, watchdog, plus whatever else is running) —
+  confirmed via direct repeated `httpx.get(..., timeout=2.0)` calls
+  failing consistently while a concurrent `curl` to the identical URL
+  returned instantly. This is why `sdk/python/tests/test_client.py`'s
+  own `_stack_is_up()` skip-check (hardcoded `timeout=2.0`, not changed
+  by this session) can flake to "stack not reachable" even when it
+  genuinely is — retry if a run comes back suspiciously all-skipped.
+- The anchor-worker batches steps rather than anchoring instantly
+  (ADR-0002) — `GET /steps/{id}/proof` 404s for a real handful of
+  seconds after `log_and_wait` returns even under `start.sh`'s own
+  5-second `ANCHOR_MAX_BATCH_AGE_SECONDS` override. Poll, don't assume
+  immediate availability — `scripts/e2e_demo.py` and the SDK's own
+  `test_get_proof_after_real_anchoring_verifies_locally_and_onchain`
+  both do.
 - Only Python 3.14 is installed locally (`/usr/bin/python3.14`, the
-  repo's own `.venv`) — CI's matrix is 3.11/3.12, and there's no way to
-  install those interpreters in this sandbox. A "local repro passes"
-  result on 3.14 is not proof CI will pass; treat Python-version-specific
-  behavior as an open question rather than ruled out.
+  repo's own `.venv`) — CI's matrix is 3.11/3.12. A "local repro passes"
+  result on 3.14 is not proof CI will pass on either matrix version.
 - `docker`, `anvil`/`forge` (Foundry), and Testcontainers-via-Docker all
-  work directly in this sandbox — a faithful CI reproduction (real Anvil,
-  real V2 contract deploy, self-provisioned Postgres/Redis) is possible
-  and was done this session; see git history for the exact command
-  sequence if repeating it.
+  work directly in this sandbox.
 
 ### Recurring pattern worth knowing about
-Twice this session, local file edits (that this assistant had made via
-the Edit tool but explicitly not committed) showed up committed and
-already pushed to `origin/phase2` under the user's own account, without
-an explicit "commit this" instruction ever being given in-session
-(`5ac8959` and `29f318d`). Both times the content matched exactly what
-was sitting in the working tree. Most likely explanation: the user
-commits/pushes independently from another terminal or IDE while a
+In an earlier session on this same repo, local file edits (made via the
+Edit tool but explicitly not committed) showed up committed and pushed
+under the user's own account without an explicit "commit this"
+instruction ever being given in-session. Most likely explanation: the
+user commits/pushes independently from another terminal or IDE while a
 session is running. Worth a plain `git status`/`git log` sanity check at
 the start of a new session rather than assuming file state matches
 whatever this file or a task tracker entry implies — and worth asking
 the user directly if authorship of a surprising commit is ever unclear,
-rather than assuming it either way.
+rather than assuming it either way. Separately, this session confirmed
+the user may also close/kill long-running background verification
+commands themselves mid-run when they're taking too long — check
+`ps`/`docker ps` for what's actually still alive rather than assuming a
+command this assistant started is still running just because nothing
+reported it as killed.

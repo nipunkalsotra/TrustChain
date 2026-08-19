@@ -15,6 +15,7 @@ import uuid
 import httpx
 import pytest
 
+from conftest import verified_signup
 from trustchain_sdk import TrustChain
 from trustchain_sdk.merkle import hash_pair, verify_proof as verify_proof_locally
 
@@ -44,13 +45,7 @@ requires_anvil = pytest.mark.skipif(not _anvil_is_up(), reason=f"no Anvil reacha
 @pytest.fixture()
 def api_key() -> str:
     email = f"sdk_instr_test_{uuid.uuid4().hex}@example.com"
-    signup = httpx.post(
-        f"{BASE_URL}/auth/signup",
-        json={"name": "instrumentation test", "email": email, "password": "sdk-instr-test-password-123"},
-        timeout=10.0,
-    )
-    assert signup.status_code == 200, signup.text
-    token = signup.json()["token"]
+    token = verified_signup(BASE_URL, "instrumentation test", email, "sdk-instr-test-password-123")
 
     created = httpx.post(
         f"{BASE_URL}/api-keys",
@@ -205,21 +200,39 @@ def test_get_proof_after_real_anchoring_verifies_locally_and_onchain(api_key):
     # Waits for the REAL anchor-worker container (docker-compose) to pick
     # this step up on its own poll cycle — a real SDK consumer has no way
     # to force that any faster, so neither does this test.
+    #
+    # Polls until anchor_status == "confirmed" specifically, NOT just
+    # until get_proof stops 404ing — GET /steps/{id}/proof starts
+    # returning a real (200) proof the moment the anchor-worker places a
+    # step into a batch (anchor_worker/claim.py), while that batch's
+    # OWN status is still "building"; it only reaches "confirmed" after
+    # anchor_worker/submit.py actually submits the on-chain tx AND
+    # indexer/reconcile.py observes the confirming event. A loop that
+    # exits as soon as `proof is not None` races this: it usually wins
+    # (the batch happens to reach "confirmed" before the 1s sleep loop's
+    # next iteration would've re-checked anyway) but not always — a real,
+    # deterministic bug (not flaky luck) that surfaced as an intermittent
+    # CI failure (`assert 'building' == 'confirmed'`) once the docker-
+    # compose anchor-worker/indexer/Anvil were all under real CI-runner
+    # load, exactly the ordering this loop's condition never actually
+    # guaranteed.
     with TrustChain(api_key, base_url=BASE_URL, on_error="raise") as tc:
         receipt = tc.log_and_wait(agent_id="proof-test-agent", action="a", input="i", output="o")
         assert receipt.step_id is not None
 
         proof = None
-        deadline = time.monotonic() + 30.0
-        while proof is None and time.monotonic() < deadline:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
             try:
-                proof = tc.get_proof(receipt.step_id)
+                candidate = tc.get_proof(receipt.step_id)
             except Exception:
-                proof = None
-            if proof is None:
-                time.sleep(1.0)
+                candidate = None
+            if candidate is not None and candidate.anchor_status == "confirmed":
+                proof = candidate
+                break
+            time.sleep(1.0)
 
-        assert proof is not None, "step was not anchored by the anchor-worker container within 30s"
+        assert proof is not None, "step was not anchored to 'confirmed' by the anchor-worker container within 60s"
         assert proof.anchor_status == "confirmed"
         assert proof.anchor_id is not None
 

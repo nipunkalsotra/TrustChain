@@ -41,6 +41,49 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Phase 4 G1 — defaults False for every row, including ones that
+    # existed before this column did (migration 94f2eb1f0a39); a real
+    # deployment backfilling pre-existing users as verified is a separate,
+    # conscious decision, not something this column's default should make
+    # for it. See permissions.py::REQUIRES_VERIFIED_EMAIL for what an
+    # unverified account is blocked from doing.
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class EmailVerificationToken(Base):
+    """A bearer credential proving control of `users.email` — same
+    discipline as Invitation.token_hash / RefreshToken.token_hash: only
+    sha256(token) is stored, single-use (`used_at` set via a conditional
+    UPDATE, see db/email_verification.py), expiring. Scoped by user_id,
+    not org_id — a user's email identity isn't tenant data, so (like
+    `users`/`refresh_tokens`) this table carries no RLS policy."""
+
+    __tablename__ = "email_verification_tokens"
+
+    id:         Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id:    Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    used_at:    Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+
+class PasswordResetToken(Base):
+    """A bearer credential authorizing a password change for one user —
+    same discipline as EmailVerificationToken above, but shorter-lived
+    (config.password_reset_ttl_seconds, default 1 hour vs. 24) since this
+    one is a live account-takeover credential if intercepted, not merely
+    proof of inbox control. Scoped by user_id, no RLS policy, same
+    reasoning as EmailVerificationToken."""
+
+    __tablename__ = "password_reset_tokens"
+
+    id:         Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id:    Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    used_at:    Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class Organization(Base):
