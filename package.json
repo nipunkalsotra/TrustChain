@@ -3,7 +3,7 @@
   "private": true,
   "description": "Release tooling for the TrustChain monorepo (contracts/, backend/, frontend/, sdk/) — see docs/release-process.md. Not a publishable package itself.",
   "devDependencies": {
-    "semantic-release": "^24.2.3",
+    "semantic-release": "^25.0.9",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
     "conventional-changelog-conventionalcommits": "^10.4.0"
