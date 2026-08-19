@@ -210,17 +210,14 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
       MONAD_RPC_URL: http://anvil:8545
-      # console by default even in the compose stack — see backend/.env.example
-      # for how to point this at smtp/ses/brevo for a real deployment;
-      # nothing here should silently start sending real email in local dev.
-      #
-      # TEMPORARILY overridden to brevo to verify real delivery for real
-      # (Phase 3 plan §16 rollout step — see backend/.env's BREVO_API_KEY
-      # and notifications/backends/brevo.py) — revert this line back to
-      # "console" once that's confirmed. smtp was tried first here but
-      # this sandbox's outbound port 587 proved unreliable — see
-      # notifications/backends/smtp.py's docstring.
-      EMAIL_BACKEND: "brevo"
+      # Deliberately NOT hardcoded here (was pinned to "brevo" earlier in
+      # Phase 3 to verify real delivery for real — confirmed working, see
+      # docs/adr/0020-database-audit-logging-and-attribution.md — and then
+      # reverted). EMAIL_BACKEND now comes from env_file: ./backend/.env
+      # above like everything else Brevo/SMTP-related, defaulting to
+      # config.py's "console" (log-only, no network call) when that file
+      # doesn't set it. Set EMAIL_BACKEND=brevo (or smtp) in your own
+      # backend/.env, never in this committed file, to send real email.
     volumes:
       - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:

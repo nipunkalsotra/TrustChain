@@ -208,7 +208,7 @@ echo -e "${BOLD}Starting services...${NC}"
 echo ""
 
 # ── 1. MCP web_search server ───────────────────────────────────────
-echo -e "  ${CYAN}[1/6]${NC} MCP web_search server    ${DIM}→ localhost:8001${NC}"
+echo -e "  ${CYAN}[1/7]${NC} MCP web_search server    ${DIM}→ localhost:8001${NC}"
 source "$VENV"
 cd "$ROOT"
 python "$MCP_SEARCH" > "$SEARCH_LOG" 2>&1 &
@@ -222,7 +222,7 @@ else
 fi
 
 # ── 2. MCP blockchain server ───────────────────────────────────────
-echo -e "  ${CYAN}[2/6]${NC} MCP blockchain server     ${DIM}→ localhost:8002${NC}"
+echo -e "  ${CYAN}[2/7]${NC} MCP blockchain server     ${DIM}→ localhost:8002${NC}"
 python "$MCP_CHAIN" > "$CHAIN_LOG" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -243,7 +243,7 @@ fi
 # to MONAD_RPC_URL/PRIVATE_KEY (the real V1 testnet bridge's creds) — see
 # config.py's resolved_v2_rpc_url()/resolved_v2_private_key() fallback and
 # the identical override docker-compose.yml's `api` service makes.
-echo -e "  ${CYAN}[3/6]${NC} FastAPI backend           ${DIM}→ localhost:8000${NC}"
+echo -e "  ${CYAN}[3/7]${NC} FastAPI backend           ${DIM}→ localhost:8000${NC}"
 cd "$BACKEND"
 V2_RPC_URL="$ANVIL_RPC" V2_PRIVATE_KEY="$ANVIL_KEY" \
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload > "$API_LOG" 2>&1 &
@@ -273,7 +273,7 @@ done
 # overridden the same way as docker-compose.yml's anchor-worker service
 # (real .env values are the V1 testnet bridge's, not local Anvil's).
 ANCHOR_LOG="$ROOT/.logs/anchor_worker.log"
-echo -e "  ${CYAN}[4/6]${NC} Anchor worker             ${DIM}→ :9101/metrics${NC}"
+echo -e "  ${CYAN}[4/7]${NC} Anchor worker             ${DIM}→ :9101/metrics${NC}"
 # Direct launch, not a `(...) &` subshell — $! must be the actual python3
 # PID or `kill "$pid"` in cleanup() above only kills an already-exited
 # subshell wrapper on Ctrl+C, orphaning this process still running.
@@ -294,7 +294,7 @@ fi
 # model — without this, /verify and the dashboard's anchor status never
 # reflect confirmed batches even once the anchor worker does its job.
 INDEXER_LOG="$ROOT/.logs/indexer.log"
-echo -e "  ${CYAN}[5/6]${NC} Indexer                   ${DIM}→ :9102/metrics${NC}"
+echo -e "  ${CYAN}[5/7]${NC} Indexer                   ${DIM}→ :9102/metrics${NC}"
 cd "$BACKEND"
 MONAD_RPC_URL="$ANVIL_RPC" python3 -m indexer.main > "$INDEXER_LOG" 2>&1 &
 PIDS+=($!)
@@ -306,8 +306,34 @@ else
     echo -e "       ${RED}✗ failed to start — check .logs/indexer.log${NC}"
 fi
 
-# ── 6. Next.js frontend ────────────────────────────────────────────
-echo -e "  ${CYAN}[6/6]${NC} Next.js frontend          ${DIM}→ localhost:3000${NC}"
+# ── 6. Integrity watchdog + alert-email sender ─────────────────────
+# Sweeps for on-chain/DB drift (e.g. a step tampered with directly in
+# Postgres, bypassing the app entirely) and drains the resulting alerts as
+# email in the same process — see integrity_watchdog/main.py's own
+# docstring for why sender.py's delivery loop runs in-process here rather
+# than as a separate service, and docker-compose.yml's own
+# integrity-watchdog service for the containerized equivalent. Without
+# this running, tampering still gets DETECTED next time something reads
+# that data, but no alert row/email is ever produced — this is the one
+# piece that actually notices and tells someone. EMAIL_BACKEND defaults to
+# "console" (log-only) unless backend/.env sets it to smtp/brevo — see
+# backend/.env.example's "Integrity watchdog + alert email delivery"
+# section for what each of those needs.
+WATCHDOG_LOG="$ROOT/.logs/integrity_watchdog.log"
+echo -e "  ${CYAN}[6/7]${NC} Integrity watchdog        ${DIM}→ :9103/metrics${NC}"
+cd "$BACKEND"
+MONAD_RPC_URL="$ANVIL_RPC" python3 -m integrity_watchdog.main > "$WATCHDOG_LOG" 2>&1 &
+PIDS+=($!)
+cd "$ROOT"
+sleep 1
+if kill -0 "${PIDS[-1]}" 2>/dev/null; then
+    echo -e "       ${GREEN}✓ running${NC} ${DIM}(PID ${PIDS[-1]})${NC}"
+else
+    echo -e "       ${RED}✗ failed to start — check .logs/integrity_watchdog.log${NC}"
+fi
+
+# ── 7. Next.js frontend ────────────────────────────────────────────
+echo -e "  ${CYAN}[7/7]${NC} Next.js frontend          ${DIM}→ localhost:3000${NC}"
 cd "$FRONTEND"
 npm run dev > "$FRONTEND_LOG" 2>&1 &
 PIDS+=($!)
@@ -340,12 +366,14 @@ echo -e "  ${BOLD}API docs    ${NC}${CYAN}http://localhost:8000/docs${NC}"
 echo -e "  ${BOLD}Health      ${NC}${CYAN}http://localhost:8000/health${NC}"
 echo -e "  ${BOLD}Anchor metrics${NC}${CYAN} http://localhost:9101/metrics${NC}"
 echo -e "  ${BOLD}Indexer metrics${NC}${CYAN} http://localhost:9102/metrics${NC}"
+echo -e "  ${BOLD}Watchdog metrics${NC}${CYAN} http://localhost:9103/metrics${NC}"
 echo ""
 echo -e "  ${DIM}Logs:${NC}"
 echo -e "  ${DIM}  MCP search    .logs/mcp_search.log${NC}"
 echo -e "  ${DIM}  MCP chain     .logs/mcp_blockchain.log${NC}"
 echo -e "  ${DIM}  FastAPI       .logs/fastapi.log${NC}"
 echo -e "  ${DIM}  Anchor worker .logs/anchor_worker.log${NC}"
+echo -e "  ${DIM}  Integrity watchdog .logs/integrity_watchdog.log${NC}"
 echo -e "  ${DIM}  Indexer       .logs/indexer.log${NC}"
 echo -e "  ${DIM}  Frontend      .logs/frontend.log${NC}"
 echo ""
