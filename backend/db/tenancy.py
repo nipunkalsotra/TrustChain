@@ -24,28 +24,70 @@ from db.models import ApiKey, Membership, Organization, Project
 # "logs:write" covers SDK tc.log(); "runs:write" covers starting a pipeline
 # run; "agents:register" covers SDK tc.register_agent(); the ":read" scopes
 # cover their respective GET endpoints.
-VALID_SCOPES = frozenset({"logs:write", "runs:read", "runs:write", "agents:register", "agents:read"})
+# "alerts:read" (Phase 3 §10.1): read-only access to GET /alerts and
+# friends for a project's own API key — lets a team pipe TrustChain
+# alerts into their own on-call tooling without a human session. Deliberately
+# NOT paired with an "alerts:write" scope — acknowledging/resolving an
+# alert stays human-JWT-only (main.py's Phase 3 section), same reasoning
+# api-key management already follows for membership/org mutation.
+VALID_SCOPES = frozenset({"logs:write", "runs:read", "runs:write", "agents:register", "agents:read", "alerts:read"})
 
 
-async def provision_personal_org(session: AsyncSession, user_id: int, user_name: str, created_at: int) -> Project:
+async def provision_personal_org(
+    session: AsyncSession, user_id: int, user_name: str, created_at: int,
+    org_name: Optional[str] = None, project_name: Optional[str] = None,
+) -> Project:
     """Creates Organization + default Project + owner Membership for a
     freshly-created user, all in the CALLER's transaction (so a crash
     between "user row committed" and "org/project/membership committed"
     is impossible — a user with no project would break every downstream
     invariant that assumes principal.project_id always resolves to
     something real). Returns the new Project; caller is responsible for
-    flushing/committing the session."""
-    org = Organization(name=f"{user_name}'s Organization", plan="free", gas_spent_wei=0, created_at=created_at)
+    flushing/committing the session.
+
+    org_name/project_name (Phase 3 §4.1): optional so the deployed
+    frontend's existing 3-field signup request keeps working completely
+    unchanged — when either is omitted, the original Phase 1/2 defaults
+    ("<Name>'s Organization" / "Default") apply verbatim. NOT called at
+    all when a user is joining via an invitation (see db/__init__.py's
+    create_user) — that user is joining someone ELSE's organization and
+    must not also acquire a stray empty one of their own."""
+    org = Organization(
+        name=org_name or f"{user_name}'s Organization", plan="free", gas_spent_wei=0, created_at=created_at,
+    )
     session.add(org)
     await session.flush()
 
-    project = Project(org_id=org.id, name="Default", environment="live", created_at=created_at)
+    project = Project(org_id=org.id, name=project_name or "Default", environment="live", created_at=created_at)
     session.add(project)
     await session.flush()
 
-    session.add(Membership(user_id=user_id, org_id=org.id, role="owner", created_at=created_at))
+    # invited_by NULL: nobody invited the founding owner (Phase 3 §4.5).
+    session.add(Membership(user_id=user_id, org_id=org.id, role="owner", created_at=created_at, updated_at=created_at))
     await session.flush()
 
+    return project
+
+
+async def join_org_via_invitation(
+    session: AsyncSession, user_id: int, org_id: int, role: str, invited_by: int, created_at: int,
+) -> Project:
+    """The invitation-flow counterpart to provision_personal_org — used
+    when a brand-new user signs up through a valid invite_token (Phase 3
+    §5.3) instead of getting their own org. Returns the org's oldest
+    project (same "first membership's first project" resolution
+    get_default_project_for_user uses elsewhere) so the caller can mint a
+    JWT scoped to something real immediately, without a second query."""
+    session.add(
+        Membership(user_id=user_id, org_id=org_id, role=role, created_at=created_at,
+                    updated_at=created_at, invited_by=invited_by)
+    )
+    await session.flush()
+
+    stmt = select(Project).where(Project.org_id == org_id, Project.deleted_at.is_(None)).order_by(Project.id).limit(1)
+    project = (await session.execute(stmt)).scalar_one_or_none()
+    if project is None:
+        raise RuntimeError(f"org {org_id} has an invitation but no project — data integrity issue")
     return project
 
 

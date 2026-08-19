@@ -38,3 +38,8 @@ opentelemetry-api==1.44.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-grpc==1.44.0
 opentelemetry-instrumentation-fastapi==0.65b0
+
+# Email delivery (Phase 3) — notifications/backends/ses.py, the production
+# choice for the EC2 deploy target (IAM instance role, no SMTP credentials
+# on the box). SMTP/console/memory backends use stdlib smtplib only.
+boto3==1.40.24

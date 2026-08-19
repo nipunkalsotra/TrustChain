@@ -200,3 +200,70 @@ groups:
           summary: "RPC calls are failing at an elevated rate"
           description: "{{ $value }} RPC call failures in the last 15m across all configured endpoints (blockchain/resilient_provider.py) — check whether RpcCircuitBreakerOpen is also firing; if not, failures aren't yet concentrated enough on one endpoint to trip its breaker but the overall chain connection is degraded."
           runbook: "docs/runbooks.md#rpc-call-failures-elevated"
+
+  - name: trustchain-integrity-watchdog
+    rules:
+      # Phase 3 §6/§13 — see docs/adr/0015 for the tiered-scanning design
+      # these rules assume (hot + rolling, per-cycle-bounded cost).
+
+      - alert: TrustChainIntegrityMismatch
+        # Page immediately, no `for:` delay — a real tamper finding
+        # (step_row_tampered / batch_root_mismatch / onchain_root_mismatch /
+        # step_missing) is exactly the event this whole system exists to
+        # surface fast; waiting out a `for:` window here would add pure
+        # detection latency on top of the watchdog's own sweep cadence for
+        # no benefit — the email alert (db/alerts.py::raise_alert) already
+        # fires the moment the finding is raised, this rule just makes it
+        # visible in Grafana/Alertmanager too.
+        expr: increase(integrity_checks_total{result="mismatch"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "The integrity watchdog found a tamper-evident mismatch"
+          description: "detector={{ $labels.detector }} — a step or batch no longer matches its own recorded hash. Check GET /alerts?severity=critical for the specific finding; every match here should correspond to a raised alert row with full evidence."
+          runbook: "docs/runbooks.md#trustchain-integrity-mismatch"
+
+      - alert: TrustChainWatchdogSilent
+        # A suppressed/crashed watchdog raises zero alerts, which looks
+        # identical to "nothing is wrong" from every other metric in this
+        # file — this is the one rule that watches for the watchdog's own
+        # absence rather than for a specific finding (Phase 3 §6.8's
+        # stated residual risk: "a fully compromised host defeats
+        # everything... mitigations are operational").
+        expr: time() - max(watchdog_last_success_timestamp) > 600
+        labels:
+          severity: critical
+        annotations:
+          summary: "The integrity watchdog has not completed a cycle in 10+ minutes"
+          description: "No successful sweep recorded — verify the integrity-watchdog process/container is running and can reach Postgres."
+          runbook: "docs/runbooks.md#trustchain-watchdog-silent"
+
+      - alert: TrustChainFullSweepStale
+        expr: watchdog_full_sweep_age_seconds > 86400
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The rolling tier hasn't completed a full pass over history in 24h+"
+          description: "watchdog_full_sweep_age_seconds={{ $value }} — history has grown faster than watchdog_rolling_steps_per_cycle/watchdog_rolling_batches_per_cycle can keep up with within one target window; coverage is still happening, just slower than the informational target (config.watchdog_full_sweep_target_seconds)."
+          runbook: "docs/runbooks.md#trustchain-full-sweep-stale"
+
+      - alert: TrustChainAlertDeliveryBacklog
+        expr: alert_delivery_queue_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Alert email deliveries are backing up"
+          description: "alert_delivery_queue_depth={{ $value }} pending/claimed alert_deliveries rows — the sender loop (notifications/sender.py) may be stuck or the configured email_backend may be failing; see TrustChainAlertDeliveryFailing."
+          runbook: "docs/runbooks.md#trustchain-alert-delivery-backlog"
+
+      - alert: TrustChainAlertDeliveryFailing
+        expr: rate(alert_deliveries_total{status="failed"}[15m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alert email delivery is failing at an elevated rate"
+          description: "channel={{ $labels.channel }} — check the configured email_backend's credentials/connectivity (notifications/backends/). Failing to deliver an alert is itself worth paging on, since it means owners/admins are NOT being told about whatever the underlying alert was."
+          runbook: "docs/runbooks.md#trustchain-alert-delivery-failing"

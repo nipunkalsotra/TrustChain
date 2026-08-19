@@ -17,7 +17,9 @@ what else we considered".
 |---|---|---|
 | **API** | `backend/main.py` | FastAPI app — auth, run orchestration, read endpoints, the third-party self-instrumentation surface (`POST /agents`, `POST /steps`, ...) |
 | **Anchor worker** | `backend/anchor_worker/` | Claims pending steps from the outbox, batches them into Merkle trees, submits `anchorBatch()` on-chain |
-| **Indexer** | `backend/indexer/` | Polls `BatchAnchored`/`ScoreUpdated` events, populates the read model (`rm_scores`), reconciles the anchor worker's crash window |
+| **Indexer** | `backend/indexer/` | Polls `BatchAnchored`/`ScoreUpdated`/agent-identity events, populates the read model (`rm_scores`, `rm_agent_events`, `agents`), reconciles the anchor worker's crash window |
+| **Integrity watchdog** | `backend/integrity_watchdog/` | Continuously re-verifies anchored steps/batches against their own hashes and the real on-chain root; also runs the alert-email drain loop — see [Organizations, roles & continuous integrity](#organizations-roles--continuous-integrity-phase-3) |
+| **Notifications** | `backend/notifications/` | Pluggable email backends (console/smtp/ses) + templates for alert and invitation email |
 | **MCP servers** | `mcp_servers/{web_search,blockchain}/` | Tool servers the pipeline's agents call over MCP — search grounding for the researcher, on-chain reads for the scorer |
 | **Contracts (V1)** | `contracts/src/*.sol` | Original single-tenant contracts — kept read-only for `/verify`/`/verify/tamper-demo`'s live on-chain demo, no longer written to |
 | **Contracts (V2)** | `contracts/src/v2/*.sol` | `AgentAuditLogV2` (Merkle-batch anchoring), `TrustScoreRegistryV2`, `AgentIdentityRegistryV2`, `TrustChainRegistry` (version→deployment resolution) |
@@ -137,6 +139,79 @@ migration history: `backend/alembic/versions/`):
   admin power, and routine multi-tenant operations never need a
   multisig ceremony.
 
+## Organizations, roles & continuous integrity (Phase 3)
+
+Phase 1/2 gave every signup an invisible, unnamed, single-person
+organization — no invitations, no roles beyond an implicit `owner`, and
+no process watching for tampering after the fact; verification was
+strictly pull ("call `/verify` and ask"). Phase 3 makes organizations a
+real multi-person object and adds an always-on process that answers the
+question nothing previously did: *has anything TrustChain anchored
+stopped matching what it anchored?*
+
+**Roles.** Four org-level ranks — `viewer < member < admin < owner`
+(`backend/permissions.py`) — checked through one function,
+`require_permission`, against one table, `MIN_ROLE_FOR`, rather than a
+role check hand-rolled at each route. See
+[ADR-0013](adr/0013-role-model-and-permission-matrix.md).
+
+**Invitations.** Hashed-at-rest, single-use (enforced by a conditional
+`UPDATE`, not read-then-write), expiring, email-bound tokens
+(`backend/db/invitations.py`) — a new user signing up through a valid
+`invite_token` joins the inviter's org instead of getting an auto-
+provisioned personal one. See
+[ADR-0014](adr/0014-invitation-tokens.md).
+
+**Continuous integrity — five detectors, two different mechanisms:**
+
+| # | What it catches | How | Cost |
+|---|---|---|---|
+| 1 | Silent model/prompt swap | SDK attaches its own fingerprint to every logged step; the backend compares it against the registered on-chain hash **synchronously, on the write path** (`agents/base.py::_check_identity_drift`) | Free — one indexed read, no RPC |
+| 2 | Unauthorised re-registration | Indexer raises an alert on **every** `AgentUpdated`/`AgentRevoked`/`IntegrityViolation` event, sanctioned or not (`indexer/agent_events.py`) | Free — already-polled events |
+| 3 | A step edited, hash not recomputed | Recompute `leaf_hash` from the row's own stored fields, compare (`integrity_watchdog/detectors/step_rows.py`) | CPU only |
+| 4 | A step edited *and* re-hashed consistently, or deleted, or the batch's own root row was edited | Rebuild the Merkle root from current leaves and compare to `anchor_batches.merkle_root` **and** the real on-chain root via `AgentAuditLogV2.getBatch()` (`integrity_watchdog/detectors/merkle_roots.py`) | One RPC call per *newly*-confirmed batch, then cached forever (`batch_verifications`) |
+| 5 | Anchoring itself has stalled or dead-lettered | Postgres aggregate over `anchor_outbox` (`integrity_watchdog/detectors/liveness.py`) | Free |
+
+Detectors 3–5 run in `backend/integrity_watchdog/`, a new always-on
+process (mirrors `anchor_worker`/`indexer`'s shape exactly: same
+Postgres-superuser connection, same dedicated metrics port, same
+graceful-shutdown signal handling) on a **hot tier** (everything recent,
+every cycle) plus a **rolling tier** (a persistent cursor walking all of
+history at a fixed per-cycle budget, so cost stays flat as history
+grows). `POST /integrity/verify-run/{run_id}` runs every detector
+against one run synchronously, outside the sweep loop, for an immediate
+answer. See [ADR-0015](adr/0015-tiered-continuous-verification.md).
+
+**Alerting.** A finding becomes an `alerts` row (deduplicated per
+`(alert_type, scope, subject)` while open, so a recurring problem is one
+row with a climbing `occurrence_count`, not a flood) and one
+`alert_deliveries` row per eligible owner/admin, written in the same
+transaction — the same transactional-outbox pattern `log_step` already
+uses for `steps`+`anchor_outbox` (ADR-0001). `backend/notifications/`
+sends the actual email via a pluggable backend
+(console/smtp/ses — [ADR-0018](adr/0018-pluggable-email-backends.md)).
+See [ADR-0016](adr/0016-alert-dedupe-and-delivery-outbox.md).
+
+**Identity-bound anchoring.** Steps logged with an `agent_code_hash`
+use a new Merkle leaf preimage (`leaf_hash_v2`,
+`steps.leaf_schema_version=2`) that includes the fingerprint inside the
+hashed preimage, not just as an editable column — so a database-level
+edit of that column breaks the anchored proof, the same way editing
+`output_hash` already does. v1 and v2 leaves coexist in one tree with no
+special handling; every proof anchored before this shipped verifies
+exactly as before. See
+[ADR-0017](adr/0017-leaf-schema-v2-identity-binding.md).
+
+**Session security.** The 7-day session JWT is self-contained by design
+(ADR-0010) — Phase 3's real member removal means a stale-but-unexpired
+token could otherwise outlive a revocation by up to a week. A
+Redis-cached membership-liveness check
+(`auth.py::_check_membership_still_live`, `backend/membership_cache.py`)
+closes that gap: every membership mutation invalidates the affected
+cache key immediately, so revocation is effectively instant, with the
+TTL only as a worst-case bound. See
+[ADR-0019](adr/0019-jwt-membership-liveness-check.md).
+
 ## Blockchain layer
 
 TrustChain has two contract generations live simultaneously, by design,
@@ -164,7 +239,9 @@ path but a process restart. See
 
 A single docker-compose host (`docker-compose.yml`) runs every service —
 `postgres`, `redis`, `anvil` (local dev only), `api`, `anchor-worker`,
-`indexer`, the two MCP servers, `prometheus`, `grafana`. There is no real
+`integrity-watchdog` (Phase 3 — also runs the alert-email sender loop
+in-process, deliberately not a separate container), `indexer`, the two
+MCP servers, `prometheus`, `grafana`. There is no real
 staging/production cloud target configured yet (see
 `docs/release-process.md`'s "Honest limitation" section) — deploys are a
 canary-rollout-then-bake-or-rollback script
@@ -176,8 +253,11 @@ a load balancer.
 
 Prometheus metrics (`backend/observability.py`) cover HTTP request
 rate/latency, pipeline run outcomes, anchor batch submit/failure/backlog,
-indexer lag/reconciliations, the anchor wallet's live balance, and each
-configured RPC endpoint's circuit-breaker state. Alert rules and their
+indexer lag/reconciliations, the anchor wallet's live balance, each
+configured RPC endpoint's circuit-breaker state, and (Phase 3) the
+integrity watchdog's per-detector check outcomes/sweep duration/cursor
+lag/last-success timestamp and the alert-delivery queue's depth/latency/
+outcome. Alert rules and their
 paired runbook entries live in `docker/prometheus/alerts.yml` /
 `docs/runbooks.md` — every alert's `runbook` annotation links to the
 matching runbooks.md section.

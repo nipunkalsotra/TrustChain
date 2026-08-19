@@ -129,6 +129,8 @@ async def log_step(
     step_index: int,
     run_id: str,
     trust_score: int = 0,
+    agent_code_hash: Optional[str] = None,
+    project_id: Optional[int] = None,
 ) -> tuple[str, dict]:
     """
     Returns (tx_hash, sse_event) — same 2-tuple shape as Phase 1, so none of
@@ -152,7 +154,8 @@ async def log_step(
     """
     from db.engine import get_sessionmaker
     from db.models import AnchorOutbox, Step
-    from blockchain.merkle import leaf_hash as compute_leaf_hash
+    from blockchain.merkle import leaf_hash as compute_leaf_hash_v1
+    from blockchain.merkle import leaf_hash_v2 as compute_leaf_hash_v2
     import observability
 
     # Detection only, never redaction/rejection — see pii_patterns.py's
@@ -172,7 +175,12 @@ async def log_step(
     input_hash  = "0x" + Web3.solidity_keccak(["string"], [input_text]).hex()
     output_hash = "0x" + Web3.solidity_keccak(["string"], [output_text]).hex()
 
-    leaf = compute_leaf_hash(
+    # Leaf schema v2 (Phase 3 §6.2): only used when the caller supplies its
+    # own agent fingerprint — older SDKs/callers that don't pass
+    # agent_code_hash get exactly the original v1 leaf, byte-for-byte, so
+    # nothing about pre-Phase-3 anchoring behavior changes for them.
+    leaf_schema_version = 2 if agent_code_hash else 1
+    common_kwargs = dict(
         run_id_hash=bytes(Web3.keccak(text=run_id)),
         agent_id_hash=bytes(Web3.keccak(text=agent_id)),
         action_hash=bytes(Web3.keccak(text=action)),
@@ -181,6 +189,12 @@ async def log_step(
         step_index=step_index,
         timestamp=now,
     )
+    if leaf_schema_version == 2:
+        leaf = compute_leaf_hash_v2(
+            **common_kwargs, agent_code_hash=bytes.fromhex(agent_code_hash.removeprefix("0x")),
+        )
+    else:
+        leaf = compute_leaf_hash_v1(**common_kwargs)
     leaf_hash_hex = "0x" + leaf.hex()
 
     session_factory = get_sessionmaker()
@@ -189,6 +203,7 @@ async def log_step(
             run_id=run_id, agent_id=agent_id, step_index=step_index, action=action,
             input_hash=input_hash, output_hash=output_hash, leaf_hash=leaf_hash_hex,
             timestamp=now, created_at=now,
+            agent_code_hash=agent_code_hash, leaf_schema_version=leaf_schema_version,
         )
         session.add(step)
         await session.flush()  # populates step.id without ending the transaction
@@ -198,6 +213,23 @@ async def log_step(
 
         await session.commit()  # steps + anchor_outbox commit together, or neither does
         step_id, outbox_id = step.id, outbox.id
+
+    # Detector 1 (Phase 3 §6.2) — synchronous, on the write path, so
+    # identity drift is caught in THIS request rather than waiting for a
+    # periodic sweep. Runs AFTER the commit above, and never raises: the
+    # step is anchored unconditionally regardless of the outcome here — a
+    # tampered agent's actions must still be recorded (rejecting the write
+    # would hand the attacker exactly the "unrecorded action" outcome this
+    # whole system exists to prevent). Only checked when the caller
+    # supplied both project_id and agent_code_hash — the internal 4-agent
+    # pipeline (researcher/validator/scorer/reporter) doesn't register
+    # on-chain identities per project the way SDK-instrumented third-party
+    # agents do, so it has nothing to drift-check against.
+    if project_id is not None and agent_code_hash is not None:
+        try:
+            await _check_identity_drift(project_id, agent_id, agent_code_hash, run_id, step_id, now)
+        except Exception as e:
+            logger.error("identity_drift_check_failed", run_id=run_id, agent_id=agent_id, error=str(e))
 
     tx_hash_placeholder = f"pending:{outbox_id}"
 
@@ -221,6 +253,67 @@ async def log_step(
         step_id=step_id, outbox_id=outbox_id,
     )
     return tx_hash_placeholder, sse_event
+
+
+async def _check_identity_drift(
+    project_id: int, agent_id: str, presented_code_hash: str, run_id: str, step_id: int, now: int,
+) -> None:
+    """Detector 1 (Phase 3 §6.2). A single indexed read of the `agents`
+    current-state table — no RPC, no chain call — comparing the hash the
+    caller says its agent currently has against the hash that agent was
+    actually REGISTERED with on-chain. A mismatch means the deployed
+    model/version/system_prompt changed without going through
+    register_agent()/update — a silent substitution, or a stale config
+    the caller forgot to update. Not registered at all is deliberately
+    NOT treated as drift here — an unregistered agent has nothing to
+    drift FROM; that is a separate, weaker signal this function doesn't
+    try to also cover."""
+    from sqlalchemy import select
+    from db.engine import get_sessionmaker
+    from db.models import Agent
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        stmt = select(Agent).where(Agent.project_id == project_id, Agent.agent_id == agent_id)
+        record = (await session.execute(stmt)).scalar_one_or_none()
+        if record is None:
+            return  # nothing registered to drift-check against
+
+        if record.code_hash.lower() == presented_code_hash.lower():
+            record.last_verified_at = now
+            await session.commit()
+            return
+
+        record.last_drift_at = now
+        await session.commit()
+        registered_hash = record.code_hash
+
+    import observability
+    observability.INTEGRITY_CHECKS_TOTAL.labels(detector="identity_drift", result="mismatch").inc()
+
+    from db.alerts import raise_alert
+    from db.models import Project
+
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+    org_id = project.org_id if project else None
+    if org_id is None:
+        return
+
+    await raise_alert(
+        org_id=org_id, project_id=project_id, alert_type="agent_identity_drift", severity="warning",
+        title=f"Agent '{agent_id}' logged a step under a different identity than registered",
+        summary=(
+            f"Step {step_id} in run {run_id} was logged with a code_hash that doesn't match "
+            f"what '{agent_id}' is registered as on-chain for this project."
+        ),
+        subject=f"agent:{agent_id}",
+        evidence={
+            "agentId": agent_id, "runId": run_id, "stepId": step_id,
+            "registeredHash": registered_hash, "presentedHash": presented_code_hash,
+        },
+        detector="identity_drift", now=now,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

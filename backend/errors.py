@@ -68,6 +68,39 @@ class ErrorCode(str, Enum):
     AGENT_REGISTRATION_FAILED = "agent_registration_failed"
     AGENT_VERIFICATION_FAILED = "agent_verification_failed"
 
+    # Organizations / projects (Phase 3 §4, §9.2-9.3)
+    ORG_NOT_FOUND = "org_not_found"
+    PROJECT_NOT_FOUND = "project_not_found"
+    CANNOT_DELETE_LAST_PROJECT = "cannot_delete_last_project"
+    CANNOT_DELETE_ONLY_ORG = "cannot_delete_only_org"
+    ORG_DELETED = "org_deleted"
+    PROJECT_DELETED = "project_deleted"
+
+    # Membership (Phase 3 §4.3, §5.5)
+    MEMBER_NOT_FOUND = "member_not_found"
+    INVALID_ROLE = "invalid_role"
+    CANNOT_MODIFY_OWN_ROLE = "cannot_modify_own_role"
+    CANNOT_REMOVE_LAST_OWNER = "cannot_remove_last_owner"
+    ALREADY_A_MEMBER = "already_a_member"
+    MEMBERSHIP_REVOKED = "membership_revoked"
+
+    # Invitations (Phase 3 §5)
+    INVITATION_NOT_FOUND = "invitation_not_found"
+    INVITATION_EXPIRED = "invitation_expired"
+    INVITATION_ALREADY_ACCEPTED = "invitation_already_accepted"
+    INVITATION_REVOKED = "invitation_revoked"
+    INVITATION_EMAIL_MISMATCH = "invitation_email_mismatch"
+    TOO_MANY_PENDING_INVITATIONS = "too_many_pending_invitations"
+
+    # Alerts (Phase 3 §7)
+    ALERT_NOT_FOUND = "alert_not_found"
+    ALERT_ALREADY_RESOLVED = "alert_already_resolved"
+    ALERT_NOT_RESOLVABLE = "alert_not_resolvable"
+
+    # Integrity (Phase 3 §6)
+    INTEGRITY_CHECK_FAILED = "integrity_check_failed"
+    RUN_NOT_VERIFIABLE = "run_not_verifiable"
+
     # Catch-all for genuinely unexpected failures — a client can't act
     # differently based on WHICH endpoint hit this, so unlike everything
     # above it stays one generic code rather than one per call site.

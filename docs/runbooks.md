@@ -10,7 +10,9 @@ call, not whoever wrote the code: assume you're reading this at 2am with
 no other context.
 
 Dashboards: Grafana at `:3002` (local dev — `docker compose up grafana`),
-dashboard "TrustChain". Metrics: `docker/prometheus/prometheus.yml`'s
+dashboards "TrustChain" (core service health) and "TrustChain — Integrity
+& Alerting" (Phase 3 — watchdog sweep/cursor state, alert-raising and
+-delivery, membership/invitation activity). Metrics: `docker/prometheus/prometheus.yml`'s
 scrape targets, defined in `backend/observability.py`. Logs: structured
 JSON via `structlog` (`backend/logging_config.py`) — every line carries
 `request_id`, and pipeline-related lines also carry `run_id`; grep/filter
@@ -342,6 +344,162 @@ endpoints) increases by more than 10 in a 15-minute window. Severity
    `indexer_iteration_failed` rates to gauge real user-facing impact.
 3. This is usually the RPC provider's own degradation, not a TrustChain
    bug — check the provider's status page first.
+
+## TrustChain Integrity Mismatch
+
+**Fires when:** `integrity_checks_total{result="mismatch"}` increases at
+all in a 5-minute window — no `for:` delay, pages immediately. Severity
+`critical`. This is the actual "did TrustChain's audit trail stop
+matching what it anchored" alarm (Phase 3 §6) — a real tamper finding
+from one of the integrity watchdog's detectors
+(`backend/integrity_watchdog/detectors/`), not a liveness/performance
+signal like most of the alerts above.
+
+1. Check `GET /alerts?severity=critical` (or `trustchain alerts list
+   --severity critical`) for the specific alert row — every firing of
+   this rule should correspond to exactly one, with full evidence
+   (expected vs. actual hash, step/batch id, tx hash, block number where
+   applicable) in its `evidence` field. **Do not treat the Prometheus
+   alert alone as actionable** — the `alerts` row is what a human
+   actually investigates from.
+2. `detector` label on the metric tells you which one fired:
+   `step_rows` (a step's stored `leaf_hash` no longer matches its own
+   content — someone edited a row directly), `merkle_roots_rebuild` (the
+   batch no longer rebuilds to its recorded root — a more sophisticated
+   edit that also touched `leaf_hash`), or `merkle_roots_onchain` (the
+   database's own `merkle_root` disagrees with what
+   `AgentAuditLogV2.getBatch()` returns on-chain — the strongest
+   signal; this one means either full Postgres compromise or a genuine
+   on-chain anomaly, not just an application bug).
+3. Confirm scope: is this ONE step/batch (contained — possibly a bug in
+   a specific write path, or a targeted tamper attempt) or MANY across
+   different projects/orgs in the same window (suggests broader database
+   compromise — treat as a security incident, not a data-quality one;
+   consider "Pausing contracts in an emergency" above if on-chain writes
+   are also in question).
+4. For a `merkle_roots_onchain` mismatch specifically: verify independently
+   with `cast call` against the real `AgentAuditLogV2` contract's
+   `getBatch(anchorId)` — do not trust the watchdog's own report of what
+   the chain said without a second, manual read, since a compromised
+   watchdog process is exactly the failure mode `TrustChainWatchdogSilent`
+   below exists to catch, but a compromised watchdog that keeps running
+   while lying about individual findings is a different, worse case this
+   manual check guards against.
+5. This is a genuine security incident, not routine ops — involve
+   whoever owns incident response before taking any destructive action
+   (e.g. don't `resolve` the alert until root cause is understood; a
+   resolved alert frees its dedupe key, and a premature resolve just
+   means the SAME problem re-alerts as if new on the next sweep instead
+   of preserving `occurrence_count` history).
+
+## TrustChain Watchdog Silent
+
+**Fires when:** `time() - max(watchdog_last_success_timestamp) > 600` —
+no detector has completed a successful cycle in 10+ minutes. Severity
+`critical`. This is the "who watches the watchmen" rule (Phase 3 §6.8's
+stated residual risk): a suppressed or crashed watchdog raises zero
+alerts, which is indistinguishable from "nothing is wrong" by every
+other metric in this file.
+
+1. Check whether the `integrity-watchdog` container/process is running
+   at all (`docker compose ps integrity-watchdog`) — most common cause
+   is simply that it crashed or was never started.
+2. If it's running but not progressing: check its logs for
+   `integrity_watchdog_cycle_failed` (an exception inside `run_cycle`,
+   `backend/integrity_watchdog/main.py`) — a single detector's exception
+   is caught per-cycle, so a persistent failure here means something
+   structural (e.g. a bad DB migration state, or `watchdog_cursor`
+   corrupted) rather than a transient blip.
+3. Check `pg_stat_activity` for a stuck advisory lock
+   (`backend/integrity_watchdog/lock.py`,
+   `config.watchdog_advisory_lock_key`) — a crashed instance that didn't
+   cleanly close its connection can, in rare cases, leave the lock held
+   until Postgres notices the connection is dead; a replacement instance
+   will otherwise sit in `integrity_watchdog_waiting_for_lock` forever.
+4. Restart the service once the underlying cause is fixed
+   (`docker compose restart integrity-watchdog`) — no state to reconcile
+   beyond what `watchdog_cursor` already tracks; a restart just resumes
+   the rolling tier from its last persisted position.
+
+## TrustChain Full Sweep Stale
+
+**Fires when:** `watchdog_full_sweep_age_seconds > 86400` for 10+
+minutes. Severity `warning`. Coverage is still happening (the rolling
+tier hasn't stopped, see `TrustChainWatchdogSilent` for that failure
+mode) — it's just taking longer than the informational target
+(`config.watchdog_full_sweep_target_seconds`, default 6h) to complete
+one full pass over all history.
+
+1. Not urgent by itself — this means detection LATENCY for older,
+   previously-unswept history has degraded, not that anything was
+   missed for data already covered by a completed pass.
+2. Check `GET /integrity/status` for `stepsVerified`/`batchesVerified`
+   growth relative to history size — if step/batch volume has grown
+   substantially, this is expected: `watchdog_rolling_steps_per_cycle`/
+   `watchdog_rolling_batches_per_cycle` (the fixed per-cycle budget,
+   Phase 3 §6.7/ADR-0015) intentionally does NOT scale with history size,
+   so a full pass takes proportionally longer as the system succeeds and
+   accumulates more data.
+3. If genuinely falling behind and faster coverage matters more than the
+   per-cycle cost tradeoff, raise `watchdog_rolling_steps_per_cycle`/
+   `watchdog_rolling_batches_per_cycle` (and/or lower
+   `watchdog_poll_interval_seconds`) — this trades more DB/RPC load per
+   cycle for a shorter full-pass duration.
+
+## TrustChain Alert Delivery Backlog
+
+**Fires when:** `alert_delivery_queue_depth > 100` for 10+ minutes.
+Severity `warning`. Pending/claimed `alert_deliveries` rows are piling
+up faster than `notifications/sender.py`'s drain loop is clearing them.
+
+1. Check `integrity-watchdog`'s logs (the sender loop runs in-process
+   there, see `integrity_watchdog/main.py`) for
+   `integrity_watchdog_sender_iteration_failed` — an exception in
+   `notifications/sender.py::run_once` would stall the whole drain loop,
+   not just one delivery.
+2. Check whether `TrustChainAlertDeliveryFailing` (below) is ALSO
+   firing — if so, the backlog is a symptom of the send failures, not an
+   independent problem; fix that first.
+3. If neither: this may just be a genuine burst (e.g. the first full
+   watchdog sweep after rollout, or a real incident generating many
+   alerts at once — see Phase 3 plan §16's rollout warning about the
+   first sweep). Confirm the queue is actually DRAINING over time
+   (`alert_delivery_queue_depth` trending down), not stuck — a draining-
+   but-large backlog will clear on its own; a flat one will not.
+
+## TrustChain Alert Delivery Failing
+
+**Fires when:** `rate(alert_deliveries_total{status="failed"}[15m]) >
+0.1` for 10+ minutes. Severity `critical` — deliberately higher than
+the backlog rule above, because a failure to deliver an alert means
+owners/admins are NOT being told about whatever the underlying alert
+actually was, on top of whatever that alert itself already warranted.
+
+1. Check `config.email_backend` (`console`/`smtp`/`ses`/`memory`) and
+   that backend's specific prerequisites:
+   - `smtp`: `smtp_host`/`smtp_username`/`smtp_password` reachable and
+     correct (`notifications/backends/smtp.py`).
+   - `ses`: IAM role/credentials valid, sending identity still verified,
+     NOT still sandbox-restricted to only verified recipient addresses
+     (`notifications/backends/ses.py`'s own docstring — this is a real,
+     easy-to-hit cause: a domain that was verified once can still reject
+     sends to unverified recipients until SES production access is
+     granted).
+2. Check `alert_deliveries.last_error` for the specific failed rows
+   (`SELECT last_error FROM alert_deliveries WHERE status IN
+   ('failed','dead_letter') ORDER BY id DESC LIMIT 20`) — the exact
+   provider error (auth failure, rate limit, bounced/rejected recipient)
+   determines the fix.
+3. Deliveries that exhausted `alert_delivery_max_attempts` are
+   `dead_letter`, not `failed`/retrying — those need manual intervention
+   (fix the underlying cause, then either wait for the NEXT occurrence
+   of that alert to generate a fresh delivery, or re-queue by hand:
+   `UPDATE alert_deliveries SET status='pending', attempts=0,
+   next_attempt_at=<now> WHERE id = ...`).
+4. This is the one alert-on-alerting failure — if the underlying cause
+   can't be fixed quickly, manually check `GET /alerts` for what's been
+   missed and notify the affected org(s) through a side channel in the
+   meantime.
 
 ---
 

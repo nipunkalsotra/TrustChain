@@ -83,6 +83,12 @@ class MerkleProof:
     tx_hash: Optional[str]
     anchor_status: str
     anchor_id: Optional[int] = None
+    # Phase 3 §6.2/§9.7 — which leaf preimage produced `leaf`, and (for
+    # schema 2) the identity fingerprint bound into it. 1 for every step
+    # anchored before Phase 3 identity binding shipped, or logged by an
+    # SDK that predates it.
+    leaf_schema_version: int = 1
+    agent_code_hash: Optional[str] = None
 
 
 @dataclass
@@ -127,6 +133,16 @@ class TrustChain:
         self._queue: queue.Queue[Optional[_QueuedLog]] = queue.Queue(maxsize=queue_max_size)
         self._run_ids: dict[str, str] = {}
         self._run_ids_lock = threading.Lock()
+        # Phase 3 §6.2/§10.1: agent_id -> code_hash, populated by
+        # register_agent()/declare_agent(). log() attaches the cached hash
+        # to every step for that agent_id, which is what lets the backend
+        # run its synchronous identity-drift check (agents/base.py::
+        # _check_identity_drift) with zero extra round trips. An agent_id
+        # never registered through THIS instance has no cached hash and
+        # simply gets no drift check on its steps — the same Phase 2
+        # behavior as before this existed.
+        self._agent_hashes: dict[str, str] = {}
+        self._agent_hashes_lock = threading.Lock()
         self._worker = threading.Thread(target=self._run_worker, daemon=True, name="trustchain-sdk-log-worker")
         self._worker.start()
 
@@ -181,13 +197,43 @@ class TrustChain:
         """Synchronous — registration is rare (once per agent config, not
         once per call), so there's no non-blocking mode for it. Returns
         the on-chain tx hash. Fails open per `on_error` like everything
-        else here."""
+        else here.
+
+        Caches code_hash for agent_id on success (Phase 3 §6.2) — every
+        subsequent log()/audited() call for this agent_id attaches it
+        automatically. Cached even on a FAILED call is deliberately NOT
+        done: a cached hash the backend never actually saw registered
+        would make every step's drift check compare against a real
+        on-chain hash while a WRONG hash sits in this cache, guaranteeing
+        false-positive drift alerts rather than the true "not registered,
+        no check happens" state."""
         code_hash = _code_hash(agent_id, model, version, system_prompt)
         try:
             response = self._client.register_agent(agent_id, code_hash, model, version)
-            return response["tx_hash"]
         except Exception as e:
             return self._handle_error(e, default="")
+        with self._agent_hashes_lock:
+            self._agent_hashes[agent_id] = code_hash
+        return response["tx_hash"]
+
+    def declare_agent(self, agent_id: str, model: str, version: str, system_prompt: str) -> str:
+        """Idempotent registration (Phase 3 §10.1) — registers ONLY if
+        this exact {agent_id, model, version, system_prompt} combination
+        isn't already what's cached, otherwise no-ops and returns "".
+        Meant for a startup call that runs on every boot: an app that
+        calls this every time it starts (vs. register_agent(), meant for
+        an explicit, deliberate registration step) won't spam
+        AgentUpdated events — and therefore won't spam
+        agent_identity_changed alerts — just because it restarted with an
+        unchanged config. NOTE: this only checks the LOCAL cache, not the
+        server's registered hash — call verify_agent() first if you need
+        to know whether the server's state already matches before
+        deciding whether to call this at all."""
+        code_hash = _code_hash(agent_id, model, version, system_prompt)
+        with self._agent_hashes_lock:
+            if self._agent_hashes.get(agent_id) == code_hash:
+                return ""
+        return self.register_agent(agent_id, model, version, system_prompt)
 
     def verify_agent(self, agent_id: str, model: str, version: str, system_prompt: str) -> Optional[VerifyResult]:
         code_hash = _code_hash(agent_id, model, version, system_prompt)
@@ -224,10 +270,12 @@ class TrustChain:
         import uuid
 
         receipt = StepReceipt(local_id=uuid.uuid4().hex)
+        with self._agent_hashes_lock:
+            agent_code_hash = self._agent_hashes.get(agent_id)
         kwargs = {
             "run_id": self._current_run_id(agent_id),
             "agent_id": agent_id, "action": action, "input": input, "output": output,
-            "trust_score": trust_score,
+            "trust_score": trust_score, "agent_code_hash": agent_code_hash,
         }
 
         if wait:
@@ -293,9 +341,26 @@ class TrustChain:
                 step_id=response["stepId"], run_id=response["runId"], leaf=response["leaf"],
                 proof=response["proof"], root=response["root"], tx_hash=response.get("txHash"),
                 anchor_status=response["anchorStatus"], anchor_id=response.get("anchorId"),
+                leaf_schema_version=response.get("leafSchemaVersion", 1),
+                agent_code_hash=response.get("agentCodeHash"),
             )
         except Exception as e:
             return self._handle_error(e, default=None)
+
+    # ── Alerts ───────────────────────────────────────────────────────
+
+    def alerts(self, status: Optional[str] = None, severity: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """Phase 3 §10.1 — read access to your org's alerts, so a team
+        can pipe TrustChain findings into their own on-call tooling.
+        Needs an API key with the `alerts:read` scope (see POST
+        /api-keys) — a key without it gets a TrustChainError (or, with
+        on_error="warn", an empty list) via the same fail-open path as
+        everything else here."""
+        try:
+            response = self._client.list_alerts(status=status, severity=severity, limit=limit)
+            return response["alerts"]
+        except Exception as e:
+            return self._handle_error(e, default=[])
 
     def verify_proof(self, proof: MerkleProof) -> bool:
         """LOCAL verification only — recomputes the root from leaf+proof

@@ -79,7 +79,18 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ── Users ─────────────────────────────────────────────────────────────────
 
-async def create_user(email: str, name: str, password: str, created_at: int) -> dict:
+async def create_user(
+    email: str, name: str, password: str, created_at: int,
+    org_name: Optional[str] = None, project_name: Optional[str] = None,
+    invitation: Optional[dict] = None,
+) -> dict:
+    """invitation, when given, is {"org_id", "role", "invited_by"} from an
+    already-validated Invitation row (see invitations.accept_invitation)
+    — this is what routes signup through join_org_via_invitation instead
+    of provision_personal_org (Phase 3 §5.3): a brand-new user accepting
+    an invite joins someone else's org and must not also get an empty
+    personal one of their own. org_name/project_name are ignored when
+    invitation is given, for the same reason."""
     session_factory = get_sessionmaker()
     async with session_factory() as session:
         user = User(email=email, name=name, password_hash=hash_password(password), created_at=created_at)
@@ -92,8 +103,14 @@ async def create_user(email: str, name: str, password: str, created_at: int) -> 
 
         # Same transaction as the user row — a crash here must not leave a
         # user with no project, since every downstream principal resolution
-        # assumes one always exists. See tenancy.provision_personal_org.
-        project = await tenancy.provision_personal_org(session, user.id, name, created_at)
+        # assumes one always exists. See tenancy.provision_personal_org /
+        # tenancy.join_org_via_invitation.
+        if invitation is not None:
+            project = await tenancy.join_org_via_invitation(
+                session, user.id, invitation["org_id"], invitation["role"], invitation["invited_by"], created_at,
+            )
+        else:
+            project = await tenancy.provision_personal_org(session, user.id, name, created_at, org_name, project_name)
         await session.commit()
 
     return {"email": email, "name": name, "userId": user.id, "projectId": project.id, "orgId": project.org_id}

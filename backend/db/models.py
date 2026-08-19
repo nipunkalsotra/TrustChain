@@ -25,7 +25,7 @@ itself (mitigated by ordinary Postgres backups, not by chain replay); losing
 
 from typing import Optional
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Index, Integer, JSON, SmallInteger, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -68,6 +68,11 @@ class Organization(Base):
     token_budget:   Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     tokens_spent:   Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at:     Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Soft delete (Phase 3 §4.4): hard deletion would orphan anchored steps
+    # whose Merkle proofs are still independently verifiable on-chain —
+    # destroying the off-chain half of a published proof is not a thing a
+    # DELETE endpoint should do. Every list/read path filters this NULL.
+    deleted_at:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class Project(Base):
@@ -84,6 +89,7 @@ class Project(Base):
     name:         Mapped[str] = mapped_column(String(200), nullable=False)
     environment:  Mapped[str] = mapped_column(String(20), nullable=False, default="live")  # test | live
     created_at:   Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deleted_at:   Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)  # see Organization.deleted_at
 
 
 class Membership(Base):
@@ -94,11 +100,18 @@ class Membership(Base):
     still open, tracked as a known gap rather than silently assumed done)."""
 
     __tablename__ = "memberships"
+    __table_args__ = (
+        CheckConstraint("role IN ('owner','admin','member','viewer')", name="ck_memberships_role"),
+    )
 
     user_id:    Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), primary_key=True)
     org_id:     Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), primary_key=True)
-    role:       Mapped[str] = mapped_column(String(20), nullable=False, default="owner")  # owner|admin|member
+    role:       Mapped[str] = mapped_column(String(20), nullable=False, default="owner")  # owner|admin|member|viewer
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Provenance (Phase 3 §4.5): NULL for the founding owner (nobody
+    # invited them) and for pre-Phase-3 rows backfilled by migration.
+    invited_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class ApiKey(Base):
@@ -292,6 +305,87 @@ class Step(Base):
         Integer, ForeignKey("anchor_batches.id"), nullable=True, index=True
     )
     created_at:      Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Identity binding (Phase 3 §6.2 — leaf schema v2): the SDK's own
+    # fingerprint of the agent that produced this step, carried into the
+    # Merkle leaf preimage for v2 rows so a database-level edit of THIS
+    # column can never make a step appear to have been produced by a
+    # different, unregistered identity without also breaking the anchored
+    # hash. NULL for steps logged by an SDK that predates this field —
+    # those stay leaf_schema_version=1 and verify under the original
+    # (pre-identity-binding) scheme forever; nothing about existing
+    # anchored proofs changes retroactively. See blockchain/merkle.py.
+    agent_code_hash: Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    leaf_schema_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+
+
+class StepHistory(Base):
+    """
+    Append-only forensic record of any UPDATE that touches a `steps` row
+    — populated ONLY by the `steps_audit_trigger` Postgres trigger
+    (migration b9a8a1970b3c), never by application code. `steps` rows
+    are meant to be immutable after creation, so a row existing here at
+    all is itself already a strong signal something is wrong,
+    independent of what the diff says. Complements (not replaces)
+    integrity_watchdog/detectors/step_rows.py's leaf-hash mismatch check
+    — that detector proves THAT a row no longer matches its own hash;
+    this table records WHICH columns changed, their old/new hash values,
+    and the DB role/client that made the change, surfaced in the alert's
+    evidence by integrity_watchdog/main.py::_raise_step_row_alerts.
+
+    See this table's own migration docstring for what db_role/
+    db_client_addr can and can't prove about WHO made a change.
+
+    step_id is deliberately NOT a ForeignKey to steps.id, and project_id
+    is denormalized here (resolved and stored by the trigger at write
+    time) rather than resolved via a join through steps -> runs — both
+    for the same reason: this record must survive the referenced step
+    later being DELETED entirely (an attacker covering their tracks,
+    exactly what test_deleted_step_is_detected simulates), not be
+    blocked by a FK, and not become invisible to RLS once the join it
+    would depend on no longer resolves.
+    """
+
+    __tablename__ = "steps_history"
+
+    id:                  Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    step_id:             Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    project_id:          Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    changed_at:          Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    changed_columns:     Mapped[str] = mapped_column(Text, nullable=False)  # JSON array of column names
+    old_input_hash:       Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    new_input_hash:       Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    old_output_hash:      Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    new_output_hash:      Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    old_leaf_hash:        Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    new_leaf_hash:        Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    old_agent_code_hash:  Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    new_agent_code_hash:  Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    db_role:              Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    db_client_addr:       Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    db_application_name:  Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+class DbOperator(Base):
+    """
+    Maps an individually-issued Postgres role (e.g. 'trustchain_op_nipun',
+    created by scripts/db_operator.py, never by application code) to a
+    real human's display name — the piece ADR-0020 ("database audit
+    logging and attribution") identified as actually missing: steps_
+    history.db_role already captures session_user correctly, but that
+    column only distinguishes individual PEOPLE if they each connect
+    under their own role rather than sharing one. Pure ops/DBA metadata,
+    not tenant or application data — trustchain_api has no grants on this
+    table at all (migration 010d34f64a31 explicitly revokes the default
+    privileges every new table otherwise gets).
+    """
+
+    __tablename__ = "db_operators"
+
+    role_name:    Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at:   Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by:   Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    revoked_at:   Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class AnchorOutbox(Base):
@@ -426,6 +520,14 @@ class Agent(Base):
     registered_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     is_active:     Mapped[bool] = mapped_column(nullable=False, default=True)
     updated_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Populated by the integrity watchdog's detector 1/2 (Phase 3 §6.2-6.3)
+    # and by POST /steps' synchronous drift check — GET /agents/{id}/integrity
+    # reads these directly rather than aggregating rm_agent_events on every
+    # request. last_drift_at is intentionally sticky (never cleared
+    # automatically) — "this agent has drifted before" stays visible even
+    # after the immediate cause is fixed, until someone reviews the alert.
+    last_verified_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_drift_at:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class IndexerCursor(Base):
@@ -442,3 +544,185 @@ class IndexerCursor(Base):
     last_block:    Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     last_block_hash: Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
     updated_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Phase 3 — organizations, roles & continuous integrity monitoring
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Invitation(Base):
+    """
+    A bearer credential granting membership in an org, treated with the
+    same discipline as ApiKey.key_hash / RefreshToken.token_hash above:
+    only the SHA-256 hash is stored, the raw token exists exactly once (in
+    the invitation email), single-use (accepted_at set atomically via a
+    conditional UPDATE, see db/invitations.py), expiring, and revocable.
+
+    `role` is never 'owner' — ownership is transferred (see
+    Membership/db/orgs.py::transfer_ownership), not granted from an
+    invitation, so "how many owners does this org have" is never a
+    function of who happened to accept what.
+    """
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','member','viewer')", name="ck_invitations_role"),
+        # At most one PENDING invitation per (org, email) — re-inviting
+        # resends rather than creating a duplicate row a UI would have to
+        # dedupe itself. A partial index (not a plain UniqueConstraint,
+        # which can't express "only when both these columns are NULL")
+        # is the only way to encode this in Postgres.
+        Index(
+            "uq_invitations_pending", "org_id", "email",
+            unique=True, postgresql_where=text("accepted_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    id:            Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    org_id:        Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    email:         Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    role:          Mapped[str] = mapped_column(String(20), nullable=False)
+    token_hash:    Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    invited_by:    Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+    accepted_at:   Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    accepted_by:   Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    revoked_at:    Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    revoked_by:    Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    reminder_sent_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+
+class Alert(Base):
+    """
+    A raised integrity/security finding. `dedupe_key` (sha256 of
+    alert_type:project_id:subject) plus the partial unique index in
+    migration g7h8i9j0k1l2 (WHERE status='open') is what keeps a
+    persistent problem as ONE row whose occurrence_count climbs, instead
+    of the rolling watchdog sweep re-raising it every cycle — see Phase 3
+    plan §7.2. Written in the SAME transaction as its alert_deliveries
+    rows (integrity_watchdog/raise_alert.py) for the same reason
+    log_step writes steps+anchor_outbox together (ADR-0001): a crash must
+    never be able to leave a recorded alert nobody was ever queued to be
+    told about.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        CheckConstraint("severity IN ('critical','warning','info')", name="ck_alerts_severity"),
+        CheckConstraint("status IN ('open','acknowledged','resolved')", name="ck_alerts_status"),
+        # At most one OPEN alert per dedupe_key — this is what makes the
+        # watchdog's rolling sweep re-raising the same finding every cycle
+        # increment occurrence_count on one row instead of flooding the
+        # table (and the inbox) with duplicates. A resolved alert frees
+        # the key so a genuine recurrence raises a fresh one (Phase 3 §7.2).
+        Index("uq_alerts_open_dedupe", "dedupe_key", unique=True, postgresql_where=text("status = 'open'")),
+        Index("ix_alerts_org_status", "org_id", "status", "severity"),
+    )
+
+    id:               Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    org_id:           Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    project_id:       Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    alert_type:       Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    severity:         Mapped[str] = mapped_column(String(10), nullable=False)  # critical | warning | info
+    status:           Mapped[str] = mapped_column(String(20), nullable=False, default="open")  # open|acknowledged|resolved
+    title:            Mapped[str] = mapped_column(String(200), nullable=False)
+    summary:          Mapped[str] = mapped_column(Text, nullable=False)
+    subject:          Mapped[str] = mapped_column(String(200), nullable=False)  # 'step:8421', 'agent:support-bot'
+    dedupe_key:       Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    evidence_json:    Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    detector:         Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_seen_at:    Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_seen_at:     Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    acknowledged_at:  Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    acknowledged_by:  Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    resolved_at:      Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    resolved_by:      Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    resolution_note:  Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_emailed_at:  Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at:       Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class AlertDelivery(Base):
+    """
+    Durable intent to deliver one alert to one recipient over one channel
+    — the transactional-outbox pattern (ADR-0001) reused rather than
+    reinvented for email. notifications/sender.py claims rows with
+    FOR UPDATE SKIP LOCKED exactly like anchor_worker claims
+    anchor_outbox rows.
+    """
+
+    __tablename__ = "alert_deliveries"
+
+    id:              Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    alert_id:        Mapped[int] = mapped_column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    channel:         Mapped[str] = mapped_column(String(20), nullable=False, default="email")
+    recipient:       Mapped[str] = mapped_column(String(320), nullable=False)
+    user_id:         Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    status:          Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    # pending | claimed | sent | failed | dead_letter
+    attempts:        Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    claimed_by:      Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    claimed_at:      Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_error:      Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    sent_at:         Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at:      Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class NotificationPreference(Base):
+    """Per-user, per-org email preferences. Absence of a row means
+    defaults apply (all True except digest-only and info) — a brand-new
+    member is correctly opted into critical alerts from the moment they
+    join, with no backfill needed."""
+
+    __tablename__ = "notification_preferences"
+
+    user_id:           Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), primary_key=True)
+    org_id:            Mapped[int] = mapped_column(Integer, ForeignKey("organizations.id"), primary_key=True)
+    email_critical:    Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    email_warning:     Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    email_info:        Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    email_digest_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at:        Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # When this user last received a digest email in THIS org — NULL
+    # means never. notifications/digest.py checks this against
+    # config.alert_digest_interval_seconds to decide who's due; see that
+    # module for why this lives per (user, org) rather than globally (a
+    # user digest-subscribed to two orgs gets each on its own cadence,
+    # not coupled).
+    last_digest_sent_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+
+class WatchdogCursor(Base):
+    """One row per detector — where the ROLLING tier's sweep last left
+    off (see integrity_watchdog/cursor.py), so restart doesn't re-scan
+    from the beginning and a full pass over history has a measurable
+    duration (`wrapped_at` timestamps consecutive full passes)."""
+
+    __tablename__ = "watchdog_cursor"
+
+    detector:         Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_id:          Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    wrapped_at:       Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_run_at:      Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at:       Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class BatchVerification(Base):
+    """Caches the result of detector 4(c) — comparing an anchor_batches
+    row's merkle_root against what AgentAuditLogV2.getBatch() actually
+    returns on-chain — so a batch verified once is not re-read from the
+    chain on every sweep. An anchored batch's on-chain root is immutable;
+    there is nothing to gain from asking again, only RPC cost."""
+
+    __tablename__ = "batch_verifications"
+
+    batch_id:                 Mapped[int] = mapped_column(Integer, ForeignKey("anchor_batches.id"), primary_key=True)
+    onchain_root_verified_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    onchain_root:              Mapped[Optional[str]] = mapped_column(String(66), nullable=True)
+    last_rebuilt_at:           Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_result:               Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # ok|mismatch|missing_steps

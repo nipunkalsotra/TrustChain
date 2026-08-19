@@ -193,6 +193,44 @@ services:
       anvil:
         condition: service_healthy
 
+  # Phase 3 — continuous integrity monitoring (integrity_watchdog/main.py)
+  # + the alert-email sender loop (notifications/sender.py), run in-process
+  # together rather than as two containers — see integrity_watchdog/main.py's
+  # own module docstring for why. Connects as the `trustchain` superuser,
+  # same as anchor-worker/indexer above and for the same reason: sweeping
+  # every project's steps/batches for tamper evidence is legitimately
+  # cross-tenant work RLS is not meant to restrict (ADR-0006).
+  integrity-watchdog:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "integrity_watchdog.main"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@postgres:5432/trustchain
+      MONAD_RPC_URL: http://anvil:8545
+      # console by default even in the compose stack — see backend/.env.example
+      # for how to point this at smtp/ses/brevo for a real deployment;
+      # nothing here should silently start sending real email in local dev.
+      #
+      # TEMPORARILY overridden to brevo to verify real delivery for real
+      # (Phase 3 plan §16 rollout step — see backend/.env's BREVO_API_KEY
+      # and notifications/backends/brevo.py) — revert this line back to
+      # "console" once that's confirmed. smtp was tried first here but
+      # this sandbox's outbound port 587 proved unreliable — see
+      # notifications/backends/smtp.py's docstring.
+      EMAIL_BACKEND: "brevo"
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
+    ports:
+      - "9103:9103"   # Prometheus /metrics — see backend/observability.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+
   indexer:
     build:
       context: ./backend

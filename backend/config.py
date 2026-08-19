@@ -370,6 +370,88 @@ class Settings(BaseSettings):
     anchor_worker_metrics_port: int = Field(default=9101, ge=1, le=65535)
     indexer_metrics_port: int = Field(default=9102, ge=1, le=65535)
 
+    # ── Phase 3: continuous integrity watchdog (integrity_watchdog/) ───────
+    # Tiered scanning (plan §6.7): a HOT tier re-checks everything from the
+    # last `watchdog_hot_window_seconds` on every cycle (small, catches
+    # fresh tampering fast); a ROLLING tier walks all of history at a fixed
+    # per-cycle budget, wrapping around — so per-cycle cost stays flat as
+    # history grows instead of the sweep getting slower forever.
+    watchdog_enabled: bool = Field(default=True)
+    watchdog_poll_interval_seconds: float = Field(default=60.0, gt=0)
+    watchdog_hot_window_seconds: int = Field(default=7200, ge=0)
+    watchdog_rolling_steps_per_cycle: int = Field(default=5000, ge=1)
+    watchdog_rolling_batches_per_cycle: int = Field(default=200, ge=1)
+    # Informational target only (surfaced via GET /integrity/status) — not
+    # itself enforced; how long a full wrap actually takes is a function of
+    # history size and the per-cycle budgets above.
+    watchdog_full_sweep_target_seconds: int = Field(default=21600, ge=1)
+    # Detector 4(c) — comparing a batch's stored root against
+    # AgentAuditLogV2.getBatch() on-chain — is the only detector that
+    # touches the network. Toggle exists so a deployment with no reachable
+    # RPC (or during initial rollout, plan §16) can still run the free
+    # CPU-only detectors (3, 4a, 4b, 5) without every cycle failing on RPC.
+    watchdog_onchain_root_check_enabled: bool = Field(default=True)
+    watchdog_metrics_port: int = Field(default=9103, ge=1, le=65535)
+    # Postgres advisory lock key — a distinct constant from
+    # anchor_worker/nonce_lock.py's lock (that one is the sole-nonce-
+    # authority lock; this one is "only one watchdog instance actively
+    # sweeps at a time," an unrelated concern that happens to use the same
+    # primitive) so the two processes can never accidentally block on the
+    # same lock key.
+    watchdog_advisory_lock_key: int = Field(default=0x7C4A17)
+
+    # ── Phase 3: alerting (db/alerts.py, notifications/) ────────────────────
+    alert_email_enabled: bool = Field(default=True)
+    # How often the SAME open alert re-sends email as it keeps recurring
+    # (occurrence_count climbing) — without this, a persistent problem
+    # would re-email on every watchdog cycle and train everyone to ignore
+    # TrustChain mail within a day (plan §7.2/§16's rollout warning).
+    alert_email_throttle_seconds: int = Field(default=21600, ge=1)
+    alert_digest_interval_seconds: int = Field(default=86400, ge=1)
+    alert_delivery_max_attempts: int = Field(default=5, ge=1)
+    alert_delivery_backoff_base_seconds: float = Field(default=10.0, gt=0)
+    alert_delivery_backoff_max_seconds: float = Field(default=3600.0, gt=0)
+
+    # ── Phase 3: email backend (mirrors signer_backend, ADR-0008) ───────────
+    # console: dev default, renders to stdout, needs no credentials.
+    # smtp: generic SMTP+STARTTLS (works with a Gmail app password early on).
+    #       Real-world caveat found running this stack in a sandboxed dev
+    #       environment: outbound port 587 there was genuinely flaky
+    #       (intermittent DNS failures and connect timeouts even to a
+    #       provider whose server was actually up) in a way port 443
+    #       traffic never was — a network path that tolerates HTTPS but
+    #       not raw SMTP is common enough in locked-down environments
+    #       that `brevo` below exists as a same-free-tier way around it.
+    # ses: production choice on the EC2 deploy target — no SMTP credentials
+    #      on the box, an IAM instance role is enough, better deliverability.
+    # brevo: Brevo's transactional email REST API (HTTPS, not SMTP) — same
+    #        free tier as their SMTP relay (300/day), reached over :443.
+    # memory: test-only, captures sent messages for assertions.
+    email_backend: str = Field(default="console")
+    email_from: str = Field(default="alerts@trustchain.local")
+    email_from_name: str = Field(default="TrustChain")
+    smtp_host: str = Field(default="")
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str = Field(default="")
+    smtp_password: str = Field(default="")  # never logged — see notifications/backends/smtp.py
+    smtp_use_tls: bool = Field(default=True)
+    ses_region: str = Field(default="")
+    ses_configuration_set: str = Field(default="")
+    brevo_api_key: str = Field(default="")  # never logged — see notifications/backends/brevo.py
+    # Overridable so tests/test_email_delivery.py can point this at a
+    # real local HTTP server instead of the internet — same reasoning as
+    # smtp_host being overridden to 127.0.0.1 for real_smtp_server.
+    brevo_api_url: str = Field(default="https://api.brevo.com/v3/smtp/email")
+
+    # ── Phase 3: invitations (db/invitations.py) ────────────────────────────
+    invitation_ttl_seconds: int = Field(default=604800, ge=1)  # 7 days
+    max_pending_invitations_per_org: int = Field(default=50, ge=1)
+    invitation_rate_limit_capacity: float = Field(default=20.0, gt=0)
+    invitation_rate_limit_refill_per_second: float = Field(default=20.0 / 3600, gt=0)
+
+    # ── Phase 3: membership revocation cache (membership_cache.py) ─────────
+    membership_cache_ttl_seconds: int = Field(default=60, ge=1)
+
     @field_validator("database_url")
     @classmethod
     def _require_asyncpg_driver(cls, v: str) -> str:

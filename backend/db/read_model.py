@@ -140,6 +140,13 @@ async def get_step_proof(step_id: int, project_id: int) -> Optional[dict]:
         "anchorStatus": batch.status,
         "rawInputHash": step.input_hash,
         "rawOutputHash": step.output_hash,
+        # Phase 3 §6.2/§9.7 — which leaf preimage produced this step's
+        # hash, and (for v2 rows) the identity fingerprint bound into it.
+        # An independent verifier needs both to reproduce the leaf: v1
+        # rows use blockchain/merkle.py::leaf_hash, v2 rows use
+        # leaf_hash_v2 with this exact agentCodeHash as its extra field.
+        "leafSchemaVersion": step.leaf_schema_version,
+        "agentCodeHash": step.agent_code_hash,
     }
 
 

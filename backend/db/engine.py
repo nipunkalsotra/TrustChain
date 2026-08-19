@@ -125,7 +125,7 @@ async def truncate_all_tables() -> None:
         await conn.execute(
             text(
                 "TRUNCATE TABLE users, organizations, projects, memberships, api_keys, "
-                "idempotency_keys, audit_events, refresh_tokens, runs, steps, anchor_outbox, "
-                "anchor_batches, rm_scores, rm_agent_events, agents, indexer_cursor RESTART IDENTITY CASCADE"
+                "idempotency_keys, audit_events, refresh_tokens, runs, steps, steps_history, db_operators, "
+                "anchor_outbox, anchor_batches, rm_scores, rm_agent_events, agents, indexer_cursor RESTART IDENTITY CASCADE"
             )
         )
