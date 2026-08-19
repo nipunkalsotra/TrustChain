@@ -14,6 +14,6 @@ export {
 } from "./errors.js";
 export { TrustChain } from "./instrumentation.js";
 export type {
-  TrustChainOptions, OnError, StepReceipt, VerifyResult, MerkleProofResult,
+  TrustChainOptions, OnError, StepReceipt, VerifyResult, MerkleProofResult, VerifyContentResult, AlertRecord,
 } from "./instrumentation.js";
 export { hashPair, verifyProof, hexToBytes, bytesToHex, keccak256Hex } from "./merkle.js";

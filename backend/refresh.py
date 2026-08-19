@@ -126,6 +126,24 @@ async def rotate_refresh_token(raw_refresh_token: str) -> dict:
     return {"accessToken": access_token, "refreshToken": new_raw_refresh, "expiresIn": ACCESS_TTL_SECONDS}
 
 
+async def revoke_all_for_user(user_id: int) -> None:
+    """Phase 4 G2: a successful password reset must invalidate every
+    refresh-token family for this user, not just one — unlike logout
+    (revoke_family_for_token), which only knows about the single family
+    the caller's own refresh token belongs to, a reset is initiated with
+    no refresh token at all (the caller may not even be logged in) and
+    needs to kill every session, including ones on other devices."""
+    now = int(time.time())
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        await session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        await session.commit()
+
+
 async def revoke_family_for_token(raw_refresh_token: str) -> None:
     """Explicit logout — revokes the whole family the given refresh token
     belongs to, not just that one token, so 'log out' actually invalidates

@@ -402,6 +402,37 @@ def test_health(client_with_fake_bridge):
     assert r.json()["status"] == "ok"
 
 
+def test_health_reports_not_configured_not_a_503_when_private_key_unset(client):
+    """Phase 4 G7: PRIVATE_KEY unset (this suite's own normal state — no
+    real testnet key is ever configured for tests) is a documented,
+    expected condition, not an operational failure — must be a 200 with
+    status="not_configured", not the 503 BRIDGE_UNAVAILABLE this endpoint
+    used to return for it (indistinguishable from an actual RPC/auth
+    failure, which is still a real 503 — see the endpoint's own
+    docstring)."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "not_configured"
+    assert "PRIVATE_KEY" in r.json()["reason"]
+
+
+def test_health_still_503s_on_a_genuine_bridge_failure(monkeypatch):
+    """A real construction failure (RPC unreachable, bad key, contract
+    load failure) — NOT the "unset" case above — must still 503."""
+    import main
+
+    def _boom():
+        raise ConnectionError("Cannot connect to RPC: [\"http://nowhere.invalid\"]")
+
+    monkeypatch.setattr(main, "get_bridge", _boom)
+
+    from fastapi.testclient import TestClient
+    with TestClient(main.app) as c:
+        r = c.get("/health")
+    assert r.status_code == 503
+    assert r.json()["error_code"] == "bridge_unavailable"
+
+
 def test_internal_errors_do_not_leak_exception_details(client, monkeypatch):
     """F12 (Phase 2 plan's fix list): an unexpected failure must return a
     generic message, not str(e) — which could contain SQL text, internal

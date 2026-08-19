@@ -36,8 +36,10 @@ import run_events
 import alert_events
 from db import idempotency, read_model, tenancy
 from db import alerts as alerts_db
+from db import email_verification as email_verification_db
 from db import invitations as invitations_db
 from db import orgs as orgs_db
+from db import password_reset as password_reset_db
 from errors import ApiError, ErrorCode
 from config import get_settings
 from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
@@ -396,6 +398,14 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 class TokenPairResponse(BaseModel):
     access_token:  str
     refresh_token: str
@@ -477,6 +487,25 @@ async def signup(body: SignupRequest, request: Request):
             logger.warning("invitation_race_lost_after_signup", invitation_id=invitation["invitation_id"])
         observability.INVITATIONS_TOTAL.labels(action="accepted").inc()
 
+    # Phase 4 G1 — every new account starts unverified EXCEPT one signing
+    # up via a valid invitation (db.create_user already set
+    # email_verified=True for that case — see its own docstring for why).
+    # Send the verification email inline, same best-effort discipline as
+    # the invitation email above (a failed send here doesn't lose data,
+    # the token row already exists, and POST /auth/resend-verification is
+    # the retry path). Must never fail signup itself.
+    if invitation is None:
+        from notifications.verification import queue_verification_email
+
+        verification_settings = get_settings()
+        verification = await email_verification_db.create_verification_token(
+            user["userId"], int(time.time()), verification_settings.email_verification_ttl_seconds,
+        )
+        await queue_verification_email(
+            user_id=user["userId"], email=user["email"], name=user["name"],
+            raw_token=verification["rawToken"], ttl_seconds=verification_settings.email_verification_ttl_seconds,
+        )
+
     token = auth.create_token(
         email=user["email"], name=user["name"],
         project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],
@@ -542,6 +571,114 @@ async def refresh_token_pair(body: RefreshRequest):
 @router.post("/auth/logout")
 async def logout(body: RefreshRequest):
     await refresh.revoke_family_for_token(body.refresh_token)
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /auth/resend-verification, POST /auth/verify-email/{token}
+#
+#  Phase 4 G1 — see permissions.py's REQUIRES_VERIFIED_EMAIL for what an
+#  unverified account is blocked from doing until it goes through this.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/auth/resend-verification")
+async def resend_verification(request: Request, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "resend-verification", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    user_row = await email_verification_db.get_user_for_resend(current_user.user_id)
+    if user_row is None:
+        # The JWT decoded fine but the user row is gone — shouldn't happen
+        # outside a hand-crafted token or a race with account deletion;
+        # fail the same way a truly-invalid credential would rather than
+        # a 500 for something that isn't a server bug.
+        raise ApiError(401, "invalid or expired token", ErrorCode.INVALID_TOKEN)
+    if user_row["emailVerified"]:
+        # Idempotent no-op, not an error — a stale "resend" click after
+        # already verifying (e.g. via a different tab) shouldn't surface
+        # as a failure to the caller.
+        return {"ok": True, "alreadyVerified": True}
+
+    from notifications.verification import queue_verification_email
+
+    verification = await email_verification_db.create_verification_token(
+        current_user.user_id, int(time.time()), settings.email_verification_ttl_seconds,
+    )
+    await queue_verification_email(
+        user_id=current_user.user_id, email=user_row["email"], name=user_row["name"],
+        raw_token=verification["rawToken"], ttl_seconds=settings.email_verification_ttl_seconds,
+    )
+    return {"ok": True, "alreadyVerified": False}
+
+
+@router.post("/auth/verify-email/{token}")
+async def verify_email(token: str, request: Request):
+    """Unauthenticated by design, same reasoning as GET /invitations/{token}
+    — the link is meant to work from wherever the recipient opens their
+    email, not only from the browser tab they signed up in."""
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "verify-email", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    user_id = await email_verification_db.consume_token(token, int(time.time()))
+    if user_id is None:
+        raise ApiError(400, "verification link is invalid, expired, or already used", ErrorCode.VERIFICATION_TOKEN_INVALID)
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POST /auth/forgot-password, POST /auth/reset-password/{token}
+#
+#  Phase 4 G2. The forgot-password response is IDENTICAL whether or not
+#  the account exists (Phase 4 plan §3 step 3) — db.password_reset's
+#  create_reset_token_if_exists, not this handler, is where "does this
+#  account exist" is ever branched on, so that property can't be broken
+#  by a future edit to this endpoint alone.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordRequest, request: Request):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "forgot-password", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    reset = await password_reset_db.create_reset_token_if_exists(
+        body.email, int(time.time()), settings.password_reset_ttl_seconds,
+    )
+    if reset is not None:
+        from notifications.password_reset import queue_password_reset_email
+
+        await queue_password_reset_email(
+            user_id=reset["userId"], email=reset["email"], name=reset["name"],
+            raw_token=reset["rawToken"], ttl_seconds=settings.password_reset_ttl_seconds,
+        )
+    # Same {"ok": true} either way — see the section docstring above.
+    return {"ok": True}
+
+
+@router.post("/auth/reset-password/{token}")
+async def reset_password_endpoint(token: str, body: ResetPasswordRequest, request: Request):
+    settings = get_settings()
+    await rate_limit.enforce_ip_rate_limit(
+        request, "reset-password", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
+    )
+    if settings.check_pwned_passwords:
+        if await auth_pwned.is_password_pwned(body.new_password, settings.pwned_passwords_timeout_seconds):
+            raise ApiError(
+                400,
+                "this password has appeared in a known data breach — please choose a different one",
+                ErrorCode.PASSWORD_PWNED,
+            )
+
+    user_id = await password_reset_db.reset_password(token, body.new_password, int(time.time()))
+    if user_id is None:
+        raise ApiError(400, "reset link is invalid, expired, or already used", ErrorCode.RESET_TOKEN_INVALID)
+
+    # Every existing session dies with the old password — see
+    # db/password_reset.py's module docstring for why this lives here
+    # rather than inside reset_password itself.
+    await refresh.revoke_all_for_user(user_id)
     return {"ok": True}
 
 
@@ -1094,7 +1231,37 @@ async def chain_status(request: Request):
 
 @app.get("/health")
 async def health():
-    bridge = get_bridge_or_503()
+    """Phase 4 G7: PRIVATE_KEY simply not being set (the normal state for
+    CI, for any environment that only runs V2, and for local dev unless a
+    real testnet key was deliberately added) is NOT the same condition as
+    the V1 bridge failing to connect/authenticate with a key it DOES have
+    — the first is an expected, documented state; the second is a real
+    operational problem. Both used to collapse into the identical 503
+    BRIDGE_UNAVAILABLE, which trains whoever's watching this endpoint to
+    treat 503-from-/health as routine noise — exactly the failure mode
+    that makes a REAL bridge outage easy to miss.
+
+    Distinguished by catching get_bridge() directly (not via
+    get_bridge_or_503, which already collapses every failure into one
+    503) and checking for blockchain.client.BlockchainBridge's own exact
+    "PRIVATE_KEY not set in .env" ValueError — everything else construction
+    can raise (RPC unreachable, bad key format, contract load failure)
+    still gets the real 503 below, unchanged. Calling get_bridge() (not
+    constructing BlockchainBridge directly) is also what keeps
+    tests/conftest.py's client_with_fake_bridge fixture (which
+    monkeypatches main.get_bridge itself) working unaffected — that path
+    never raises at all, so it never reaches either branch here."""
+    try:
+        bridge = get_bridge()
+    except ValueError as e:
+        if str(e) == "PRIVATE_KEY not set in .env":
+            return {"status": "not_configured", "reason": str(e)}
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise ApiError(503, "V1 blockchain bridge unavailable — see server logs for details", ErrorCode.BRIDGE_UNAVAILABLE)
+    except Exception as e:
+        logger.error("v1_bridge_unavailable", error=str(e))
+        raise ApiError(503, "V1 blockchain bridge unavailable — see server logs for details", ErrorCode.BRIDGE_UNAVAILABLE)
+
     try:
         chain_id = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
     except Exception as e:
@@ -1519,8 +1686,16 @@ async def get_me(current_user: auth.CurrentUser = Depends(auth.get_current_user)
             "role": org["role"], "joinedAt": org["createdAt"],
             "projects": [{"id": p["id"], "name": p["name"], "environment": p["environment"]} for p in projects],
         })
+    # Phase 4 A2's checkpoint reads this — "emailVerified" is the one
+    # field on the user object that isn't already in the JWT payload
+    # CurrentUser was built from (verifying doesn't mint a new token).
+    user_row = await email_verification_db.get_user_for_resend(current_user.user_id)
+    email_verified = user_row["emailVerified"] if user_row is not None else False
     return {
-        "user": {"id": current_user.user_id, "name": current_user.name, "email": current_user.email},
+        "user": {
+            "id": current_user.user_id, "name": current_user.name, "email": current_user.email,
+            "emailVerified": email_verified,
+        },
         "active": {"orgId": current_user.org_id, "projectId": current_user.project_id,
                    "role": await permissions.get_role(current_user.user_id, current_user.org_id)},
         "memberships": memberships,

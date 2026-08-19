@@ -219,6 +219,20 @@ export class TrustChainClient {
     return this.request("GET", `/steps/${stepId}/proof`);
   }
 
+  /** POST /integrity/verify-content — Phase 4 G3. Most callers want
+   * TrustChain.verifyContent (a typed VerifyContentResult) rather than
+   * this directly; this is the raw JSON-in/JSON-out call it wraps. Never
+   * sends or receives the step's actual stored content, only a hash
+   * comparison against candidateText you already have — see backend/
+   * main.py's POST /integrity/verify-content docstring. */
+  async verifyContent(stepId: number, field: "input" | "output", candidateText: string): Promise<{
+    stepId: number; field: string; computedHash: string; matchesCurrent: boolean; matchesOriginal: boolean | null;
+  }> {
+    return this.request("POST", "/integrity/verify-content", {
+      json: { stepId, field, candidateText },
+    });
+  }
+
   /** Read access to your org's alerts (human session OR a project API
    * key with the alerts:read scope — see backend/main.py's
    * _authorize_alert_read). */

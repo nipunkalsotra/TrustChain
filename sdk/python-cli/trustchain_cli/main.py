@@ -307,6 +307,27 @@ def cmd_integrity_verify_run(args: argparse.Namespace) -> None:
     _print_json(_authed_request(args, "POST", f"/integrity/verify-run/{args.run_id}", json={}))
 
 
+def cmd_integrity_verify_content(args: argparse.Namespace) -> None:
+    """Phase 4 G3 — the CLI-reachable form of POST /integrity/verify-content.
+    Candidate text comes from --file or stdin, never a bare positional
+    argument: real agent input/output is multi-line and full of shell
+    metacharacters (quotes, backticks, $-expansions) that would not
+    survive being pasted directly into a command line intact."""
+    if args.file:
+        with open(args.file, encoding="utf-8") as f:
+            candidate_text = f.read()
+    else:
+        candidate_text = sys.stdin.read()
+    if not candidate_text:
+        print("error: no candidate text given — pass --file PATH or pipe it via stdin", file=sys.stderr)
+        sys.exit(1)
+
+    _print_json(_authed_request(
+        args, "POST", "/integrity/verify-content",
+        json={"stepId": args.step_id, "field": args.field, "candidateText": candidate_text},
+    ))
+
+
 # ── agents verify/sync --manifest — the CI integrity gate (plan §11) ──
 
 def _load_manifest(path: str) -> dict:
@@ -569,6 +590,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_integrity_verify_run = p_integrity.add_parser("verify-run", help="Synchronously verify one run")
     p_integrity_verify_run.add_argument("run_id")
     p_integrity_verify_run.set_defaults(func=cmd_integrity_verify_run)
+    p_integrity_verify_content = p_integrity.add_parser(
+        "verify-content",
+        help="Confirm/refute a candidate text against a step's stored hash (Phase 4 G3)",
+    )
+    p_integrity_verify_content.add_argument("step_id", type=int)
+    p_integrity_verify_content.add_argument("field", choices=["input", "output"])
+    p_integrity_verify_content.add_argument(
+        "--file", default=None, help="Read candidate text from this file (default: read from stdin)",
+    )
+    p_integrity_verify_content.set_defaults(func=cmd_integrity_verify_content)
 
     p_dev = sub.add_parser("dev", help="Local docker-compose dev stack helpers").add_subparsers(
         dest="dev_command", required=True

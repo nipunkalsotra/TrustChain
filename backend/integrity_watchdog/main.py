@@ -75,9 +75,17 @@ async def _forensic_evidence(session, step_id: int) -> dict:
     error) for anything older, or for a step whose leaf_hash was also
     rewritten consistently by the same UPDATE that still changed some
     OTHER column the trigger tracks. Most-recent row wins if there are
-    several (a step could in principle be tampered with more than once)."""
+    several (a step could in principle be tampered with more than once)
+    — ordered by (changed_at, id) DESC, not changed_at alone:
+    changed_at is second-granularity (int(time.time())), so two edits to
+    the SAME step inside one second (a routine UPDATE followed quickly by
+    a real tamper, or vice versa — found by a real test race, not
+    theoretical) tie on changed_at, and an ORDER BY with no secondary key
+    lets Postgres return either one non-deterministically. id is
+    autoincrementing, so it's always a true insertion-order tiebreaker."""
     row = (await session.execute(
-        select(StepHistory).where(StepHistory.step_id == step_id).order_by(desc(StepHistory.changed_at)).limit(1)
+        select(StepHistory).where(StepHistory.step_id == step_id)
+        .order_by(desc(StepHistory.changed_at), desc(StepHistory.id)).limit(1)
     )).scalar_one_or_none()
     if row is None:
         return {}
@@ -179,11 +187,29 @@ async def sweep_merkle_roots(session, batches: list[AnchorBatch], check_onchain:
         if missing:
             counts["missing"] += 1
             observability.INTEGRITY_CHECKS_TOTAL.labels(detector="merkle_roots_missing", result="missing").inc()
+            # Phase 4: attribute WHO deleted each missing step, the same
+            # way _raise_step_row_alerts already does for an EDITED row
+            # (_forensic_evidence's DELETE-sentinel case, migration
+            # 010d34f64a31, exists specifically for this — it just wasn't
+            # wired into this detector). Found by a real end-to-end run
+            # (scripts/e2e_demo.py's Stage 8): a step deleted after being
+            # anchored raised a step_missing alert with NO attribution at
+            # all, silently defeating the entire "who tampered with what"
+            # value proposition for exactly the most destructive tamper
+            # case — deletion, not just editing.
+            deletion_forensics = {}
+            for missing_step_id in missing:
+                evidence = await _forensic_evidence(session, missing_step_id)
+                if evidence:
+                    deletion_forensics[str(missing_step_id)] = evidence
             await _raise_batch_alerts(
                 session, batch, "step_missing",
                 f"Batch {batch.id} is missing {len(missing)} anchored step(s)",
                 f"Batch {batch.id}'s leaf_order references step(s) that no longer exist in the steps table.",
-                {"missingStepIds": missing, "expectedCount": len(batch.leaf_order), "foundCount": len(steps_by_id)},
+                {
+                    "missingStepIds": missing, "expectedCount": len(batch.leaf_order), "foundCount": len(steps_by_id),
+                    **({"deletionForensics": deletion_forensics} if deletion_forensics else {}),
+                },
             )
         elif rebuilt_root.lower() != batch.merkle_root.lower():
             counts["rootMismatch"] += 1

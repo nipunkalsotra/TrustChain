@@ -11,7 +11,7 @@ from trustchain_sdk.exceptions import (
     TrustChainError,
     ValidationError,
 )
-from trustchain_sdk.instrumentation import MerkleProof, StepReceipt, TrustChain, VerifyResult
+from trustchain_sdk.instrumentation import AlertRecord, MerkleProof, StepReceipt, TrustChain, VerifyContentResult, VerifyResult
 
 __version__ = "0.1.0"
 
@@ -19,7 +19,9 @@ __all__ = [
     "TrustChain",
     "StepReceipt",
     "VerifyResult",
+    "VerifyContentResult",
     "MerkleProof",
+    "AlertRecord",
     "TrustChainClient",
     "AsyncTrustChainClient",
     "TrustChainError",

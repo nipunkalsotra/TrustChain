@@ -452,6 +452,12 @@ class Settings(BaseSettings):
     # ── Phase 3: membership revocation cache (membership_cache.py) ─────────
     membership_cache_ttl_seconds: int = Field(default=60, ge=1)
 
+    # ── Phase 4: email verification (db/email_verification.py) ─────────────
+    email_verification_ttl_seconds: int = Field(default=86400, ge=1)  # 24 hours — shorter-lived than an invitation (7 days): proving you control your OWN inbox right now, not a one-time admin action someone else might act on later
+
+    # ── Phase 4: password reset (db/password_reset.py) ─────────────────────
+    password_reset_ttl_seconds: int = Field(default=3600, ge=1)  # 1 hour — a live account-takeover credential if intercepted, so short-lived even by this file's own standards
+
     @field_validator("database_url")
     @classmethod
     def _require_asyncpg_driver(cls, v: str) -> str:

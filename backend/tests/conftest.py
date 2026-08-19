@@ -330,16 +330,34 @@ def seed_project(name: str = "test project") -> int:
     return asyncio.run(_seed())
 
 
-def seed_user_and_token(email: str = "test@example.com", name: str = "Test User") -> dict:
+def seed_user_and_token(email: str = "test@example.com", name: str = "Test User", email_verified: bool = True) -> dict:
     """Creates a real user (with its auto-provisioned org/project, see
     db.tenancy.provision_personal_org) and a matching JWT — for tests that
     call project-scoped endpoints through the `client` fixture and need a
-    real `Authorization: Bearer <token>` header, not just a project_id."""
+    real `Authorization: Bearer <token>` header, not just a project_id.
+
+    email_verified defaults True (Phase 4 G1's default is False for a
+    real signup, but the overwhelming majority of this suite's existing
+    callers need "a normal working member/admin/owner", not specifically
+    an unverified one — defaulting True here keeps every pre-Phase-4 test
+    exercising permissions.REQUIRES_VERIFIED_EMAIL-gated endpoints
+    (member invites, API key creation) passing without each of them
+    individually knowing this gate exists. Pass email_verified=False for
+    the narrow tests that deliberately exercise the gate itself."""
     import auth
     import db
 
     async def _seed():
         user = await db.create_user(email=email, name=name, password="testpassword123", created_at=1_700_000_000)
+        if email_verified:
+            from sqlalchemy import update
+
+            from db.engine import get_sessionmaker
+            from db.models import User
+
+            async with get_sessionmaker()() as session:
+                await session.execute(update(User).where(User.id == user["userId"]).values(email_verified=True))
+                await session.commit()
         token = auth.create_token(
             email=user["email"], name=user["name"],
             project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],

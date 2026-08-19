@@ -15,6 +15,7 @@ import uuid
 import httpx
 import pytest
 
+from conftest import verified_signup
 from trustchain_sdk import TrustChain
 from trustchain_sdk.merkle import hash_pair, verify_proof as verify_proof_locally
 
@@ -44,13 +45,7 @@ requires_anvil = pytest.mark.skipif(not _anvil_is_up(), reason=f"no Anvil reacha
 @pytest.fixture()
 def api_key() -> str:
     email = f"sdk_instr_test_{uuid.uuid4().hex}@example.com"
-    signup = httpx.post(
-        f"{BASE_URL}/auth/signup",
-        json={"name": "instrumentation test", "email": email, "password": "sdk-instr-test-password-123"},
-        timeout=10.0,
-    )
-    assert signup.status_code == 200, signup.text
-    token = signup.json()["token"]
+    token = verified_signup(BASE_URL, "instrumentation test", email, "sdk-instr-test-password-123")
 
     created = httpx.post(
         f"{BASE_URL}/api-keys",

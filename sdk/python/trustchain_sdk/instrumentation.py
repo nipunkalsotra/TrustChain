@@ -28,6 +28,7 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -74,6 +75,20 @@ class VerifyResult:
 
 
 @dataclass
+class VerifyContentResult:
+    """Typed result of TrustChain.verify_content — see backend/main.py's
+    POST /integrity/verify-content docstring for the full reasoning.
+    `matches_original` is None (not False) when there's no edit history
+    to compare against at all — distinct from "compared, and it didn't
+    match"."""
+    step_id: int
+    field: str
+    computed_hash: str
+    matches_current: bool
+    matches_original: Optional[bool]
+
+
+@dataclass
 class MerkleProof:
     step_id: int
     run_id: str
@@ -89,6 +104,85 @@ class MerkleProof:
     # SDK that predates it.
     leaf_schema_version: int = 1
     agent_code_hash: Optional[str] = None
+
+
+class AlertRecord(Mapping):
+    """One alert as returned by TrustChain.alerts() (Phase 4 G4). Behaves
+    exactly like the raw dict GET /alerts already returned — `alert["id"]`,
+    `alert.get("severity")`, `dict(alert)`, `**alert` all still work
+    unchanged, via collections.abc.Mapping — so this is purely additive;
+    no existing caller doing plain dict access breaks. On top of that, it
+    exposes named accessors for the forensic-evidence fields
+    integrity_watchdog/main.py's `_forensic_evidence` nests inside the
+    raw `evidence` sub-dict, so a caller doesn't need to know that
+    nesting or those exact camelCase key names to act on tamper
+    attribution.
+
+    Every accessor returns None when the field isn't present — most
+    alert_types carry no forensic evidence at all (it's specific to
+    step_row_tampered), and even for that type it's only populated for
+    edits made after the steps_audit_trigger migrations
+    (b9a8a1970b3c/010d34f64a31) existed. A missing field is a normal,
+    expected case to handle, not an error."""
+
+    def __init__(self, raw: dict):
+        self._raw = raw
+
+    def __getitem__(self, key):
+        return self._raw[key]
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __len__(self):
+        return len(self._raw)
+
+    def __repr__(self) -> str:
+        return f"AlertRecord({self._raw!r})"
+
+    @property
+    def evidence(self) -> dict:
+        """The full raw evidence blob — always available even for a
+        forensic field this class doesn't have a named accessor for yet
+        (a new evidence key added on the backend shows up here
+        immediately, without needing an SDK release first)."""
+        return self._raw.get("evidence") or {}
+
+    @property
+    def is_deletion(self) -> bool:
+        """True if this evidence describes a DELETEd step row rather than
+        an edited one — integrity_watchdog's deletion-sentinel case has a
+        different evidence shape (no old/new hash pairs to diff against,
+        since the row is simply gone; "whatHappened" is the marker key
+        that case sets and the edit case never does)."""
+        return "whatHappened" in self.evidence
+
+    @property
+    def edited_by_operator(self) -> Optional[str]:
+        """The human operator's display name, if the edit/delete was made
+        through an individually-issued db_operator credential rather than
+        the shared superuser role — see db_operator.py / ADR-0020."""
+        return self.evidence.get("editedByOperator")
+
+    @property
+    def edited_by_db_role(self) -> Optional[str]:
+        return self.evidence.get("editedByDbRole")
+
+    @property
+    def old_output_hash(self) -> Optional[str]:
+        return self.evidence.get("oldOutputHash")
+
+    @property
+    def new_output_hash(self) -> Optional[str]:
+        return self.evidence.get("newOutputHash")
+
+    @property
+    def old_input_hash(self) -> Optional[str]:
+        return self.evidence.get("oldInputHash")
+
+    @property
+    def new_input_hash(self) -> Optional[str]:
+        return self.evidence.get("newInputHash")
 
 
 @dataclass
@@ -349,18 +443,49 @@ class TrustChain:
 
     # ── Alerts ───────────────────────────────────────────────────────
 
-    def alerts(self, status: Optional[str] = None, severity: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def alerts(self, status: Optional[str] = None, severity: Optional[str] = None, limit: int = 50) -> list[AlertRecord]:
         """Phase 3 §10.1 — read access to your org's alerts, so a team
         can pipe TrustChain findings into their own on-call tooling.
         Needs an API key with the `alerts:read` scope (see POST
         /api-keys) — a key without it gets a TrustChainError (or, with
         on_error="warn", an empty list) via the same fail-open path as
-        everything else here."""
+        everything else here.
+
+        Returns AlertRecord objects (Phase 4 G4), not plain dicts — each
+        one is still fully dict-like (subscriptable, .get(), iterable),
+        so existing code doing `alert["id"]` keeps working unchanged; it
+        additionally exposes typed accessors (.edited_by_operator,
+        .old_output_hash, .is_deletion, ...) for the tamper-attribution
+        fields GET /alerts's evidence blob carries — see AlertRecord's
+        own docstring."""
         try:
             response = self._client.list_alerts(status=status, severity=severity, limit=limit)
-            return response["alerts"]
+            return [AlertRecord(a) for a in response["alerts"]]
         except Exception as e:
             return self._handle_error(e, default=[])
+
+    # ── Content verification (Phase 4 G3) ───────────────────────────────
+
+    def verify_content(self, step_id: int, field: str, candidate_text: str) -> Optional[VerifyContentResult]:
+        """Confirms or refutes a candidate piece of text against a step's
+        stored hash — the SDK-reachable form of what was previously only
+        available via a hand-written call to POST /integrity/verify-content
+        (Phase 4 G3). TrustChain never stores or returns your agent's
+        actual input/output text; `candidate_text` must come from your own
+        systems (application logs, an observability tool, wherever your
+        agent framework actually logs transcripts).
+
+        field must be "input" or "output". Returns None (not an exception,
+        unless on_error="raise") on any failure, same fail-open contract as
+        get_proof."""
+        try:
+            response = self._client.verify_content(step_id, field, candidate_text)
+            return VerifyContentResult(
+                step_id=response["stepId"], field=response["field"], computed_hash=response["computedHash"],
+                matches_current=response["matchesCurrent"], matches_original=response["matchesOriginal"],
+            )
+        except Exception as e:
+            return self._handle_error(e, default=None)
 
     def verify_proof(self, proof: MerkleProof) -> bool:
         """LOCAL verification only — recomputes the root from leaf+proof

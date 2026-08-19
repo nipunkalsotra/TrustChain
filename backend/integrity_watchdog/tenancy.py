@@ -17,7 +17,7 @@ neither of them consented to share).
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Project, Run, Step
+from db.models import Project, Run, Step, StepHistory
 
 
 async def group_steps_by_org(session: AsyncSession, step_ids: list[int]) -> dict[int, dict]:
@@ -25,7 +25,20 @@ async def group_steps_by_org(session: AsyncSession, step_ids: list[int]) -> dict
     for the given step ids — a plain join from steps to runs to projects,
     executed with the watchdog's own cross-tenant DB role (see this
     module's own process running as `trustchain`, not `trustchain_api` —
-    RLS doesn't apply to it, by design, the same as anchor-worker/indexer)."""
+    RLS doesn't apply to it, by design, the same as anchor-worker/indexer).
+
+    Falls back to steps_history.project_id (denormalized specifically to
+    survive the referenced step being DELETED entirely — see StepHistory's
+    own docstring) for any step_id the primary join can't resolve. This
+    matters more than it looks: sweep_merkle_roots' "missing" detector
+    calls this with step_ids that no longer have a `steps` row AT ALL —
+    the primary join, which depends on that exact row existing, silently
+    resolves to nothing for them. Before this fallback existed, a step
+    DELETED outright (arguably the single most damaging tamper case —
+    actively erasing the evidence, not just editing it) could never be
+    attributed to any org: the detector's own counters correctly
+    incremented, but zero alerts were ever actually raised for anyone.
+    Found by a real end-to-end deletion test, not by inspection."""
     if not step_ids:
         return {}
     stmt = (
@@ -37,8 +50,28 @@ async def group_steps_by_org(session: AsyncSession, step_ids: list[int]) -> dict
     rows = (await session.execute(stmt)).all()
 
     grouped: dict[int, dict] = {}
+    resolved_ids: set[int] = set()
     for step_id, org_id, project_id in rows:
         bucket = grouped.setdefault(org_id, {"projectIds": set(), "stepIds": []})
         bucket["projectIds"].add(project_id)
         bucket["stepIds"].append(step_id)
+        resolved_ids.add(step_id)
+
+    unresolved = [sid for sid in step_ids if sid not in resolved_ids]
+    if unresolved:
+        history_stmt = (
+            select(StepHistory.step_id, Project.org_id, Project.id.label("project_id"))
+            .join(Project, Project.id == StepHistory.project_id)
+            .where(StepHistory.step_id.in_(unresolved), StepHistory.project_id.isnot(None))
+        )
+        history_rows = (await session.execute(history_stmt)).all()
+        seen_from_history: set[int] = set()
+        for step_id, org_id, project_id in history_rows:
+            if step_id in seen_from_history:
+                continue  # a step can have several steps_history rows (edited, then deleted) — count it once
+            seen_from_history.add(step_id)
+            bucket = grouped.setdefault(org_id, {"projectIds": set(), "stepIds": []})
+            bucket["projectIds"].add(project_id)
+            bucket["stepIds"].append(step_id)
+
     return grouped
