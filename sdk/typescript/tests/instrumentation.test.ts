@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { TrustChain, hashPair, verifyProof } from "../src/index.js";
+import { verifiedSignup } from "./testHelpers.js";
 
 const BASE_URL = "http://localhost:8000";
 const ANVIL_RPC = "http://localhost:8545";
@@ -46,14 +47,7 @@ async function anvilIsUp(): Promise<boolean> {
 
 async function freshApiKey(): Promise<string> {
   const email = `sdk_ts_instr_${randomUUID()}@example.com`;
-  const signupRes = await fetch(`${BASE_URL}/auth/signup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "TS instrumentation test", email, password: "sdk-ts-instr-password-123" }),
-  });
-  const signupBody = await signupRes.text();
-  assert.equal(signupRes.status, 200, signupBody);
-  const { token } = JSON.parse(signupBody) as { token: string };
+  const token = await verifiedSignup(BASE_URL, "TS instrumentation test", email, "sdk-ts-instr-password-123");
 
   const createdRes = await fetch(`${BASE_URL}/api-keys`, {
     method: "POST",

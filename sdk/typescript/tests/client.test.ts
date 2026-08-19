@@ -22,6 +22,7 @@ import {
   TrustChainClient,
   ValidationError,
 } from "../src/index.js";
+import { verifiedSignup } from "./testHelpers.js";
 
 const BASE_URL = "http://localhost:8000";
 
@@ -43,14 +44,7 @@ async function freshApiKey(): Promise<string> {
   // exactly once instead, and only construct a failure message from it
   // when actually failing.
   const email = `sdk_ts_test_${randomUUID()}@example.com`;
-  const signupRes = await fetch(`${BASE_URL}/auth/signup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "TS SDK integration test", email, password: "sdk-ts-test-password-123" }),
-  });
-  const signupBody = await signupRes.text();
-  assert.equal(signupRes.status, 200, signupBody);
-  const { token } = JSON.parse(signupBody) as { token: string };
+  const token = await verifiedSignup(BASE_URL, "TS SDK integration test", email, "sdk-ts-test-password-123");
 
   const createdRes = await fetch(`${BASE_URL}/api-keys`, {
     method: "POST",
