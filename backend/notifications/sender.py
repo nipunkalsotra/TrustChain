@@ -85,7 +85,17 @@ async def _mark(session: AsyncSession, delivery_id: int, **values) -> None:
     if unknown:
         raise ValueError(f"_mark: not in the allowed column set: {sorted(unknown)}")
     cols = ", ".join(f"{k} = :{k}" for k in values)
-    await session.execute(text(f"UPDATE alert_deliveries SET {cols} WHERE id = :id"), {"id": delivery_id, **values})
+    # nosec B608 — bandit can't see the `unknown` check two lines above:
+    # every `k` here is drawn from `values`, and `values`' keys were just
+    # verified to be a subset of the fixed _MARK_ALLOWED_COLUMNS literal
+    # set (raises ValueError otherwise). Never attacker- or caller-
+    # controlled column names — the actual VALUES are still fully
+    # parameter-bound (`:id`, **values), only column identifiers are
+    # interpolated, and those are whitelisted, not user input.
+    await session.execute(
+        text(f"UPDATE alert_deliveries SET {cols} WHERE id = :id"),  # nosec B608
+        {"id": delivery_id, **values},
+    )
     await session.commit()
 
 
