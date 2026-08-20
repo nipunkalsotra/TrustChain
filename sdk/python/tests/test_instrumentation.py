@@ -15,7 +15,7 @@ import uuid
 import httpx
 import pytest
 
-from conftest import verified_signup
+from conftest import tamper_step_output_hash, verified_signup
 from trustchain_sdk import TrustChain
 from trustchain_sdk.merkle import hash_pair, verify_proof as verify_proof_locally
 
@@ -246,3 +246,60 @@ def test_get_proof_after_real_anchoring_verifies_locally_and_onchain(api_key):
         forged = dataclasses.replace(proof, leaf="0x" + "00" * 32)
         assert tc.verify_proof(forged) is False
         assert tc.verify_proof_onchain(forged, rpc_url=ANVIL_RPC, audit_log_address=addresses["AgentAuditLogV2"]) is False
+
+
+# ── verify_content() (Phase 4 G3) ─────────────────────────────────────────
+# Closes a real gap: the endpoint itself (backend/tests/test_verify_content.py)
+# and the raw HTTP call (scripts/e2e_demo.py) were both proven, but the SDK
+# method a real consumer would actually call had never been exercised by
+# anything before these three tests.
+
+def test_verify_content_matches_current_hash_with_no_tampering(api_key):
+    with TrustChain(api_key, base_url=BASE_URL, on_error="raise") as tc:
+        receipt = tc.log_and_wait(
+            agent_id="verify-content-agent", action="answer_query",
+            input="what is my refund", output="the refund is $50",
+        )
+        assert receipt.step_id is not None
+
+        result = tc.verify_content(receipt.step_id, field="output", candidate_text="the refund is $50")
+        assert result is not None
+        assert result.matches_current is True
+        assert result.matches_original is None  # nothing has ever been changed
+
+
+def test_verify_content_wrong_candidate_matches_neither(api_key):
+    with TrustChain(api_key, base_url=BASE_URL, on_error="raise") as tc:
+        receipt = tc.log_and_wait(
+            agent_id="verify-content-agent", action="answer_query",
+            input="what is my refund", output="the refund is $50",
+        )
+        assert receipt.step_id is not None
+
+        result = tc.verify_content(receipt.step_id, field="output", candidate_text="something else entirely")
+        assert result is not None
+        assert result.matches_current is False
+
+
+def test_verify_content_after_tampering_matches_original_not_current(api_key):
+    """The scenario this method exists for: after a step_row_tampered
+    alert, the owner supplies the text their OWN systems recorded and
+    confirms it against what the hash was before the edit — without
+    TrustChain ever having stored that text itself (see docs/adr/0020)."""
+    with TrustChain(api_key, base_url=BASE_URL, on_error="raise") as tc:
+        receipt = tc.log_and_wait(
+            agent_id="verify-content-agent", action="answer_query",
+            input="what is my refund", output="the refund is $50",
+        )
+        assert receipt.step_id is not None
+
+        tamper_step_output_hash(receipt.step_id)
+
+        true_original = tc.verify_content(receipt.step_id, field="output", candidate_text="the refund is $50")
+        assert true_original is not None
+        assert true_original.matches_current is False   # the row was tampered — no longer matches
+        assert true_original.matches_original is True    # but DID match what the hash was before the edit
+
+        wrong_guess = tc.verify_content(receipt.step_id, field="output", candidate_text="the refund is $5000")
+        assert wrong_guess is not None
+        assert wrong_guess.matches_original is False

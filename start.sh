@@ -200,6 +200,22 @@ if [ "$NEEDS_DEPLOY" -eq 1 ]; then
         || { echo -e "       ${RED}✗ deploy failed — see .logs/deploy_v2.log${NC}"; exit 1; }
     python3 "$BACKEND/scripts/write_v2_addresses.py" --chain-id 31337
     echo -e "       ${DIM}addresses written to backend/contracts/addresses_v2.json${NC}"
+
+    # Postgres has a persistent volume; Anvil does not (see comment above).
+    # indexer_cursor rows survive a fresh Anvil pointing at whatever block
+    # height the PREVIOUS Anvil generation last reached — often higher than
+    # this brand-new chain's current tip. indexer/poll.py::poll_once then
+    # computes start_block > latest_block forever and returns 0 every single
+    # cycle with NO log line either way (it only logs when handled > 0) —
+    # completely silent, indistinguishable from genuinely idle. Found the
+    # hard way: a freshly-registered agent never appeared in GET /agents no
+    # matter how long you waited, with an indexer process that looked
+    # perfectly healthy (running, connected, zero errors). NEEDS_DEPLOY=1
+    # is exactly "this Anvil is a new generation" — the right, and only,
+    # signal to also clear the cursor table so the indexer starts over from
+    # block 0 against it. Safe to run even when the table's already empty.
+    docker compose exec -T postgres psql -U trustchain -d trustchain -c "TRUNCATE TABLE indexer_cursor;" > /dev/null 2>&1
+    echo -e "       ${DIM}indexer_cursor reset for the new chain${NC}"
 else
     echo -e "  ${GREEN}✓ V2 contracts already deployed on this Anvil${NC} ${DIM}(addresses_v2.json unchanged)${NC}"
 fi

@@ -250,59 +250,66 @@ services:
       anvil:
         condition: service_healthy
 
-  prometheus:
-    image: prom/prometheus:v2.55.1
+  # Observability — a single Grafana Alloy shipper forwards the same 4
+  # Prometheus scrape targets + the same per-container Docker logs to
+  # Grafana Cloud (Mimir + Loki) instead of a self-hosted
+  # prometheus/loki/promtail/grafana quartet storing them locally.
+  # Visualization now happens in Grafana Cloud's own hosted UI — nothing
+  # local to run for that, which is what actually drops the RAM (a local
+  # Grafana alone was ~211 MiB of the old quartet's ~514 MiB).
+  # Real measured cost of the old quartet: grafana ~211 MiB, prometheus
+  # ~92 MiB, loki ~104 MiB, promtail ~107 MiB (~514 MiB total) — replaced
+  # by this one alloy container, measured at ~98 MiB (`docker stats`,
+  # confirmed alongside real end-to-end proof of delivery: Alloy's own
+  # self-metrics at :12345/metrics showed
+  # prometheus_remote_storage_samples_total=1200 / samples_failed_total=0
+  # and loki_write_sent_bytes_total>0 / dropped_bytes_total=0 after
+  # bringing the profile up against this repo's real Grafana Cloud
+  # stack — not just "the container started without crashing"). That's
+  # ~416 MiB (~81%) off what opting into observability now costs.
+  #
+  # Config lives in docker/alloy/config.alloy (committed — no secrets in
+  # it). Credentials come from backend/.env's GRAFANA_CLOUD_* vars via
+  # env_file below, read by Alloy itself at startup via sys.env(...).
+  #
+  # Still carries `profiles: ["observability"]` — a bare `docker compose
+  # up -d` (and ./start.sh) skips it by default, same as the quartet did;
+  # local dev doesn't need cloud metrics/logs either. Opt in with:
+  #   docker compose --profile observability up -d
+  # which now brings up 10 containers instead of the old 13.
+  #
+  # docker/prometheus/, docker/loki/, docker/promtail/, and docker/grafana/
+  # are unreferenced now but deliberately left in place rather than
+  # deleted — same convention this repo already applies to superseded V1
+  # contracts (see CLAUDE.md). docker/prometheus/alerts.yml's rules ARE
+  # still live, though — scripts/push_alert_rules.py loaded all 19 rules
+  # (5 groups) into Grafana Cloud's Mimir Ruler API verbatim (Mimir's
+  # ruler accepts the same rule-group YAML shape Prometheus does), and a
+  # real GET back against the ruler API confirmed all 5 groups present.
+  # Re-run that script by hand after editing alerts.yml — nothing keeps
+  # it in sync automatically, since there's no local Prometheus to source
+  # a live diff from anymore. Alertmanager routing (contact point +
+  # default policy → kalsotranipun@gmail.com) is configured and
+  # confirmed working — a real Test send returned "Test notification
+  # sent successfully" from the Cloud UI.
+  alloy:
+    image: grafana/alloy:v1.5.1
+    profiles: ["observability"]
+    env_file:
+      - ./backend/.env
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
     volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./docker/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "9090:9090"
+      - "12345:12345"   # Alloy's own UI (component graph, live debugging)
     depends_on:
       - api
       - anchor-worker
       - indexer
 
-  loki:
-    image: grafana/loki:2.9.8
-    command: -config.file=/etc/loki/loki-config.yml
-    volumes:
-      - ./docker/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
-      - trustchain_loki_data:/loki
-    ports:
-      - "3100:3100"
-
-  promtail:
-    image: grafana/promtail:2.9.8
-    command: -config.file=/etc/promtail/promtail-config.yml
-    volumes:
-      - ./docker/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
-      # Read-only access to every container's own log files + the Docker
-      # socket (for docker_sd_configs' container auto-discovery/labeling)
-      # — this is what lets promtail ship every OTHER service's stdout
-      # without a per-service scrape config to maintain.
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      - loki
-
-  grafana:
-    image: grafana/grafana:11.3.1
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
-    volumes:
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports:
-      # Host 3002, not 3001 — main.py's CORS allowlist documents 3001 as
-      # the Next.js dev server's alt port; avoid colliding with it for
-      # anyone running frontend dev alongside this compose file.
-      - "3002:3000"
-    depends_on:
-      - prometheus
-      - loki
-
 volumes:
   trustchain_postgres_data:
-  trustchain_loki_data:

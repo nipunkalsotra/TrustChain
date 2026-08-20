@@ -1,0 +1,92 @@
+// docker/alloy/config.alloy — replaces the local prometheus/loki/promtail
+// trio (grafana too, since visualization now happens in Grafana Cloud's
+// own hosted UI instead of a local container) with a single shipper that
+// forwards the same metrics/logs to Grafana Cloud instead of storing them
+// locally. See docker-compose.yml's `alloy` service and CLAUDE.md's RAM
+// section for the measured before/after.
+//
+// Credentials come from env vars (backend/.env, gitignored) via
+// sys.env(...) — this file itself IS committed, so nothing secret can
+// live in it directly. See backend/.env's "Grafana Cloud" section for
+// where GRAFANA_CLOUD_* is set.
+
+// ── Metrics: same 4 targets docker/prometheus/prometheus.yml scraped ────────
+prometheus.scrape "trustchain_api" {
+  targets = [{"__address__" = "api:8000"}]
+  metrics_path = "/metrics"
+  job_name = "trustchain-api"
+  forward_to = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+prometheus.scrape "trustchain_anchor_worker" {
+  targets = [{"__address__" = "anchor-worker:9101"}]
+  job_name = "trustchain-anchor-worker"
+  forward_to = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+prometheus.scrape "trustchain_indexer" {
+  targets = [{"__address__" = "indexer:9102"}]
+  job_name = "trustchain-indexer"
+  forward_to = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+prometheus.scrape "trustchain_watchdog" {
+  targets = [{"__address__" = "integrity-watchdog:9103"}]
+  job_name = "trustchain-watchdog"
+  forward_to = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+prometheus.remote_write "grafanacloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USER")
+      password = sys.env("GRAFANA_CLOUD_PROMETHEUS_API_KEY")
+    }
+  }
+}
+
+// ── Logs: same docker_sd_configs + project/service relabeling that ──────────
+// docker/promtail/promtail-config.yml used — scoped to only this compose
+// project's containers (a shared Docker host running unrelated projects
+// previously made Loki reject whole batches over stale timestamps from an
+// unrelated container's weeks-old backlog — see promtail-config.yml's own
+// comment on this, same reasoning applies here).
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "trustchain"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.write "grafanacloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_LOKI_API_KEY")
+    }
+  }
+}

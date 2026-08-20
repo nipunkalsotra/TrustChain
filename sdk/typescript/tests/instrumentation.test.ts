@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { TrustChain, hashPair, verifyProof } from "../src/index.js";
-import { verifiedSignup } from "./testHelpers.js";
+import { tamperStepOutputHash, verifiedSignup } from "./testHelpers.js";
 
 const BASE_URL = "http://localhost:8000";
 const ANVIL_RPC = "http://localhost:8545";
@@ -243,3 +243,60 @@ test(
     assert.equal(forgedOnchain, false);
   },
 );
+
+// ── verifyContent() (Phase 4 G3) ────────────────────────────────────────
+// Closes a real gap: the endpoint itself (backend/tests/test_verify_content.py)
+// and the raw HTTP call (scripts/e2e_demo.py) were both proven, but the SDK
+// method a real consumer would actually call had never been exercised by
+// anything before these three tests — same gap the Python SDK had.
+
+test("verifyContent matches the current hash with no tampering", { skip: !up }, async () => {
+  const tc = new TrustChain(await freshApiKey(), { baseUrl: BASE_URL, onError: "raise" });
+  const receipt = await tc.logAndWait({
+    agentId: "verify-content-agent", action: "answer_query",
+    input: "what is my refund", output: "the refund is $50",
+  });
+  assert.notEqual(receipt.stepId, undefined);
+
+  const result = await tc.verifyContent(receipt.stepId!, "output", "the refund is $50");
+  assert.notEqual(result, undefined);
+  assert.equal(result!.matchesCurrent, true);
+  assert.equal(result!.matchesOriginal, null); // nothing has ever been changed
+});
+
+test("verifyContent matches neither on a wrong candidate", { skip: !up }, async () => {
+  const tc = new TrustChain(await freshApiKey(), { baseUrl: BASE_URL, onError: "raise" });
+  const receipt = await tc.logAndWait({
+    agentId: "verify-content-agent", action: "answer_query",
+    input: "what is my refund", output: "the refund is $50",
+  });
+  assert.notEqual(receipt.stepId, undefined);
+
+  const result = await tc.verifyContent(receipt.stepId!, "output", "something else entirely");
+  assert.notEqual(result, undefined);
+  assert.equal(result!.matchesCurrent, false);
+});
+
+test("verifyContent after tampering matches the original, not the current hash", { skip: !up }, async () => {
+  // The scenario this method exists for: after a step_row_tampered alert,
+  // the owner supplies the text their OWN systems recorded and confirms
+  // it against what the hash was before the edit — without TrustChain
+  // ever having stored that text itself (see docs/adr/0020).
+  const tc = new TrustChain(await freshApiKey(), { baseUrl: BASE_URL, onError: "raise" });
+  const receipt = await tc.logAndWait({
+    agentId: "verify-content-agent", action: "answer_query",
+    input: "what is my refund", output: "the refund is $50",
+  });
+  assert.notEqual(receipt.stepId, undefined);
+
+  await tamperStepOutputHash(receipt.stepId!);
+
+  const trueOriginal = await tc.verifyContent(receipt.stepId!, "output", "the refund is $50");
+  assert.notEqual(trueOriginal, undefined);
+  assert.equal(trueOriginal!.matchesCurrent, false); // the row was tampered — no longer matches
+  assert.equal(trueOriginal!.matchesOriginal, true); // but DID match what the hash was before the edit
+
+  const wrongGuess = await tc.verifyContent(receipt.stepId!, "output", "the refund is $5000");
+  assert.notEqual(wrongGuess, undefined);
+  assert.equal(wrongGuess!.matchesOriginal, false);
+});

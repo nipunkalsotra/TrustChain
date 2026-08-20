@@ -25,10 +25,14 @@ log output (the default backend, written to .logs/fastapi.log by
 db.email_verification/db.password_reset a second time to mint a
 DIFFERENT token than the one actually mailed. If your backend is
 configured with EMAIL_BACKEND=brevo (real inbox delivery, as
-docs/e2e-walkthrough.md's manual walkthrough uses), pass
---log-file /dev/null and read the tokens out of your own inbox by hand
-instead — this script will print exactly where it's stuck and wait for
-you to supply one via stdin.
+docs/e2e-walkthrough.md's manual walkthrough uses), pass BOTH
+--log-file /dev/null and --watchdog-log-file /dev/null: the script then
+pauses at each of the 3 points needing your own inbox — 2 prompts ask
+you to paste the real token (or the full link) you read out of a real
+email, 1 (the tamper-alert stage, which needs no secret, only "did
+delivery happen") asks a plain yes/no — and continues once you answer,
+rather than trying and failing to tail a console log that will never
+have anything in it.
 """
 
 from __future__ import annotations
@@ -85,9 +89,40 @@ def _assert(condition: bool, message: str) -> None:
 
 
 # ── Token extraction from the console email backend's real log output ──
+#
+# Correctness note (found and fixed after this docstring had claimed it
+# for a while without it actually being true): the module docstring above
+# promises that passing --log-file /dev/null falls back to prompting on
+# stdin for a real EMAIL_BACKEND=brevo/smtp run. That fallback did not
+# actually exist in this file until now — pointing --log-file at
+# /dev/null against a real backend just made _poll_new_console_send_line
+# time out and raise DemoFailure, the same as any other log file with no
+# matching line in it. Fixed by having every token-extraction call site
+# check for the /dev/null sentinel FIRST and prompt directly instead of
+# ever touching the log-polling path in that mode.
+
+_DEV_NULL = Path("/dev/null")
+
 
 def _log_offset(log_file: Path) -> int:
     return log_file.stat().st_size if log_file.exists() else 0
+
+
+def _prompt_for_token(what: str, to_email: str) -> str:
+    """The actual --log-file /dev/null fallback the module docstring
+    promises: check your own inbox (real delivery — EMAIL_BACKEND=brevo/
+    smtp, not console) and paste the token by hand. Only ever reached
+    when log_file IS /dev/null (an explicit, deliberate opt-in), never as
+    a silent fallback after a console-log timeout — a script blocking on
+    stdin unexpectedly, deep into an otherwise-unattended run, would be
+    far more confusing than the DemoFailure it would otherwise raise."""
+    print(f"\n  ⏸ stuck: need the real {what} sent to {to_email}")
+    print(f"    Check that inbox now and paste the token (or the full link — either works): ", end="", flush=True)
+    raw = sys.stdin.readline().strip()
+    _assert(bool(raw), f"no {what} provided on stdin")
+    m = re.search(rf"({_TOKEN_CHARS})\s*$", raw)  # accepts a bare token OR a full .../<token> link
+    _assert(m is not None, f"couldn't find a token-shaped string in what was pasted for {what}: {raw[:300]!r}")
+    return m.group(1)
 
 
 def _poll_new_console_send_line(log_file: Path, to_email: str, since_pos: int, timeout: float) -> tuple[str, int]:
@@ -124,7 +159,7 @@ def _poll_new_console_send_line(log_file: Path, to_email: str, since_pos: int, t
 _TOKEN_CHARS = r"[A-Za-z0-9_-]+"  # secrets.token_urlsafe()'s exact output charset — never padding, never a slash
 
 
-def _extract_labeled_token(log_file: Path, to_email: str, label: str, since_pos: int, timeout: float = 20.0) -> tuple[str, int]:
+def _extract_labeled_token(log_file: Path, to_email: str, label: str, since_pos: int, timeout: float = 90.0) -> tuple[str, int]:
     """For the verify-email/reset-password templates, whose body
     contains a literal "{label}: <token>" line (notifications/
     templates.py's render_verification_email/render_password_reset_email).
@@ -133,19 +168,29 @@ def _extract_labeled_token(log_file: Path, to_email: str, label: str, since_pos:
     is a Python repr() of the email body (see _poll_new_console_send_line's
     docstring), so the real "\\n" right after the token became the two
     literal characters backslash+n, which `\\S+` would greedily swallow
-    (backslash isn't whitespace) and hand back as part of the "token"."""
+    (backslash isn't whitespace) and hand back as part of the "token".
+
+    log_file == /dev/null (the module docstring's documented signal for
+    "I'm on a real EMAIL_BACKEND, not console") skips log-polling
+    entirely and prompts on stdin instead — see _prompt_for_token."""
+    if log_file == _DEV_NULL:
+        return _prompt_for_token(label, to_email), since_pos
     line, new_pos = _poll_new_console_send_line(log_file, to_email, since_pos, timeout)
     m = re.search(rf"{re.escape(label)}: ({_TOKEN_CHARS})", line)
     _assert(m is not None, f"found the email to {to_email} but no {label!r} in it: {line[:300]}")
     return m.group(1), new_pos
 
 
-def _extract_invite_token(log_file: Path, to_email: str, since_pos: int, timeout: float = 20.0) -> tuple[str, int]:
+def _extract_invite_token(log_file: Path, to_email: str, since_pos: int, timeout: float = 90.0) -> tuple[str, int]:
     """The invitation template (render_invitation_email) has no
     "Label: token" line — the raw token is only the last path segment of
     the "Accept: <link>" URL. secrets.token_urlsafe()'s output charset is
     exactly [A-Za-z0-9_-], so matching that charset after "/invite/" is
-    precise regardless of what surrounds it in the repr'd body."""
+    precise regardless of what surrounds it in the repr'd body.
+
+    Same /dev/null stdin fallback as _extract_labeled_token above."""
+    if log_file == _DEV_NULL:
+        return _prompt_for_token("invitation link", to_email), since_pos
     line, new_pos = _poll_new_console_send_line(log_file, to_email, since_pos, timeout)
     m = re.search(rf"/invite/({_TOKEN_CHARS})", line)
     _assert(m is not None, f"found the invitation email to {to_email} but no /invite/<token> link in it: {line[:300]}")
@@ -521,7 +566,17 @@ def _confirm_both_recipients_emailed(
     by design, not concurrent). A alert can be visible via the API well
     before its email is actually sent; checking the log exactly once
     right after _poll_for_alert returns is a real race, not a hypothetical
-    one — caught by an actual flaky run of this exact script."""
+    one — caught by an actual flaky run of this exact script.
+
+    log_file == /dev/null (real EMAIL_BACKEND, no console log to tail):
+    unlike the token-extraction helpers above, this confirmation needs no
+    secret — just "did both addresses actually get an email" — so the
+    /dev/null fallback is a plain stdin y/n prompt rather than pasting
+    anything back in."""
+    if log_file == _DEV_NULL:
+        print("\n  ⏸ stuck: can't tail a console log in real-backend mode")
+        print(f"    Check both {owner_email} and {admin_email} for the tamper-alert email — got both? [y/N]: ", end="", flush=True)
+        return sys.stdin.readline().strip().lower() in ("y", "yes")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if log_file.exists():

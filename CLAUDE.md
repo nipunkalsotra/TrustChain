@@ -24,9 +24,42 @@ deliberate and already reasoned through.
 ### Local dev stack
 ```bash
 ./start.sh                          # plain-process local dev (backend + frontend + MCP servers, no Docker)
-docker compose up --build           # full stack: postgres, redis, anvil, api, anchor-worker, indexer, MCP servers, prometheus, grafana
+docker compose up --build           # the 9 services that make the product work: postgres, redis, anvil, api, anchor-worker, indexer, integrity-watchdog, MCP servers
+docker compose --profile observability up --build   # same 9, plus alloy (10 total)
 docker compose up -d --build api anchor-worker indexer   # rebuild just the backend services
 ```
+Observability used to be a self-hosted prometheus/grafana/loki/promtail
+quartet (~514 MiB, ~34% of the full stack's idle RAM); it's now a single
+`alloy` service (`docker/alloy/config.alloy`, `grafana/alloy` image)
+that scrapes the same 4 metrics targets and tails the same per-container
+logs, then forwards both to Grafana Cloud instead of storing them
+locally — visualization happens in Grafana Cloud's own hosted UI, not a
+local Grafana. Measured at ~98 MiB (`docker stats`), a ~416 MiB (~81%)
+drop versus the old quartet, confirmed via Alloy's own self-metrics
+(`prometheus_remote_storage_samples_failed_total=0`,
+`loki_write_dropped_bytes_total=0` at `:12345/metrics`, checked from
+inside the container's network namespace since Alloy's UI binds to
+127.0.0.1 only) after a real push to this repo's actual Grafana Cloud
+stack — not just "the container started". Credentials
+(`GRAFANA_CLOUD_PROMETHEUS_*`/`GRAFANA_CLOUD_LOKI_*` in `backend/.env`,
+gitignored) are two separately-scoped Access Policy tokens
+(`metrics:write` / `logs:write`) read by Alloy via `sys.env(...)` at its
+own startup — `config.alloy` itself is committed and carries no
+secrets. Still `profiles: ["observability"]`, still opt-in via
+`--profile observability` — routine local dev doesn't need cloud
+metrics/logs either. `docker/prometheus/`, `docker/loki/`,
+`docker/promtail/`, `docker/grafana/` are unreferenced now but
+deliberately left in place (same convention as the kept V1 contracts).
+`docker/prometheus/alerts.yml`'s 19 rules (5 groups) ARE live, though —
+`scripts/push_alert_rules.py` loads them into Grafana Cloud's Mimir
+Ruler API verbatim (Mimir accepts the same rule-group YAML Prometheus
+does), confirmed via a real `GET` back against the ruler API, not just
+the POST status codes. Re-run that script by hand after editing
+alerts.yml. Still outstanding: Grafana Cloud's Alertmanager has no
+contact point/route configured yet, so these rules evaluate and show as
+firing in the UI but won't actually notify anyone until that's set up
+(Alerting → Contact points, in the Grafana Cloud UI — an account-side
+click-through step, not something scriptable from here).
 Anvil has no persistent volume — a full `--build` (even of an unrelated
 service, due to BuildKit provenance attestations changing every image's
 digest and cascading a recreate through the compose dependency graph)
@@ -38,8 +71,23 @@ cd contracts
 PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   forge script script/DeployV2.s.sol --rpc-url http://localhost:8545 --broadcast
 python3 backend/scripts/write_v2_addresses.py --chain-id 31337
+docker compose exec -T postgres psql -U trustchain -d trustchain -c "TRUNCATE TABLE indexer_cursor;"
 docker compose restart api anchor-worker indexer   # addresses_v2.json is bind-mounted, not baked into the image — restart is enough, no rebuild needed
 ```
+The `TRUNCATE` step is not optional — `indexer_cursor` lives in Postgres,
+which (unlike Anvil) DOES persist, so it keeps pointing at whatever block
+height the previous Anvil generation last reached. Against a brand-new,
+lower chain, `indexer/poll.py::poll_once` computes `start_block >
+latest_block` forever and returns 0 every cycle — with **no log line
+either way** (it only logs `indexer_polled` when it actually handled
+something), so a stuck indexer looks identical to a healthy idle one:
+process running, DB/RPC connections established, zero errors, just
+silently never indexing anything new ever again. Found by a real
+freshly-registered agent never appearing in `GET /agents` no matter how
+long the wait, and confirmed by directly inspecting `indexer_cursor` vs
+the actual chain tip. `./start.sh` does this automatically now (same
+`NEEDS_DEPLOY` check that redeploys the contracts) — this manual drill
+didn't, and needed the same fix.
 That private key is Anvil's well-known default account #0 — the same
 one `docker-compose.yml` forces for the `anchor-worker`/`api` services'
 V2 connection and `backend/tests/conftest.py`'s `ANVIL_KEY` uses for
@@ -60,14 +108,24 @@ real accumulated data, or to exercise
 `tests/test_chaos.py::test_chaos_postgres_outage_ready_degrades_and_recovers`,
 which needs the stable, externally-managed instance and skips itself
 against a self-provisioned one — see that file's own comment), stop
-`anchor-worker`/`indexer` first — `isolated_db`'s autouse fixture
-truncates the tenant tables before and after every test, and a live
-anchor-worker still polling that same database creates real lock
-contention/deadlocks against the truncate, not just logical noise:
+`anchor-worker`/`indexer`/**`integrity-watchdog`** first — `isolated_db`'s
+autouse fixture truncates the tenant tables before and after every test,
+and any of these three still polling that same database creates real
+lock contention/deadlocks against the truncate, not just logical noise.
+`integrity-watchdog` is easy to miss here (confirmed the hard way: a full
+suite run with it still up got a real `DeadlockDetectedError` on
+`TRUNCATE ... users, ...` in `tests/test_multi_tenancy.py`, gone the
+moment `integrity-watchdog` was stopped and the same 11 tests re-run
+clean) — it polls Postgres on its own cycle exactly like the other two,
+it's just easy to forget since it isn't a docker-compose service under
+`./start.sh`'s plain-process path (that script launches it as bullet
+[6/7], a raw PID, not a container):
 ```bash
-docker compose stop anchor-worker indexer
+docker compose stop anchor-worker indexer   # if running via docker compose
+# or, under ./start.sh's plain-process path, kill their PIDs directly —
+# anchor-worker, indexer, AND integrity-watchdog
 # ...DATABASE_URL=... REDIS_URL=... pytest...
-docker compose start anchor-worker indexer
+docker compose start anchor-worker indexer   # or relaunch the killed processes
 ```
 
 ### Backend (`backend/`, Python 3.12+, venv at repo root)
@@ -223,7 +281,7 @@ tenant drill-down goes through structured logs instead
   a codebase that predates them; don't "fix" a job's blocking-ness
   without being asked.
 
-## Session handoff notes (as of 2026-08-19)
+## Session handoff notes (as of 2026-08-20)
 
 Point-in-time status for picking this work back up in a new session —
 prune/replace this section once it's stale rather than letting it
@@ -232,7 +290,59 @@ NOT reliably persist across sessions** (confirmed twice now, in two
 different sessions) — don't treat it as a durable cross-session record;
 this Markdown section is the actual durable one.
 
-### Phase 4 — complete, on branch `phase4`
+### This session (2026-08-20): closed Phase 4's 3 known caveats, found and
+fixed a major previously-unknown bug, migrated observability to Grafana
+Cloud
+
+Picked up after Phase 4 was merged (PR #30) to close out its own
+handoff caveats before Phase 5 (frontend) starts:
+
+- **TypeScript SDK's real-backend test suite**: 31/31 passing (Phase
+  4's handoff had explicitly flagged this as not run yet).
+- **`trustchain-cli`'s test suite**: 21/21 passing — required fixing a
+  real bug first (`_fresh_user_credentials()`/`_fresh_api_key()` never
+  got the Phase 4 email-verification-gate fix the other two SDKs'
+  fixtures received, so 13/16 tests were failing on `403
+  email_not_verified` before the fix), then adding coverage that was
+  genuinely missing (`verify-content` and `verify-run` command tests).
+- **`scripts/e2e_demo.py`'s docstring-promised `/dev/null` stdin
+  fallback**: actually implemented (it didn't exist before — the
+  docstring was aspirational) and verified with a full unattended run:
+  **"ALL STAGES PASSED"**, all 8 stages, fresh signup through tenant
+  isolation, against a real torn-down-and-rebuilt stack.
+- **A second major, previously-unknown bug, found only by actually
+  running things**: `indexer_cursor` lives in Postgres, which (unlike
+  Anvil) persists across `--build`/reset cycles. After any Anvil reset,
+  the cursor keeps pointing at the old chain's block height;
+  `indexer/poll.py::poll_once`'s `start_block > latest_block` early
+  return means the indexer silently never indexes anything again —
+  **no log line either way**, indistinguishable from a healthy idle
+  indexer by any log or metric. Found via a real confirmed on-chain
+  `AgentRegistered` tx that never appeared in `GET /agents`. Fixed in
+  both `start.sh` (automatic) and the manual redeploy drill documented
+  above.
+- **Observability migrated from a self-hosted quartet to Grafana
+  Cloud**: see the "Local dev stack" section above — `alloy` service,
+  ~98 MiB measured vs. the old ~514 MiB, and `scripts/push_alert_rules.py`
+  loaded all 19 alert rules into Grafana Cloud's Ruler API. Both
+  verified against the real Cloud stack (self-metrics showing 0 failed
+  samples/dropped bytes; a real `GET` confirming all 5 rule groups
+  present) — not just "it started."
+- **Alertmanager routing — closed.** A `TrustChain-email` contact point
+  (email → `kalsotranipun@gmail.com`) and a default notification policy
+  routing to it already existed in the Cloud UI by the time this was
+  checked (verified via Claude in Chrome driving the actual Grafana UI —
+  `/alerting/notifications` showed the contact point, `/alerting/routes`
+  showed the Default policy's "Delivered to TrustChain-email"). Ran the
+  contact point's own **Test** button for real confirmation beyond just
+  reading the config: Grafana returned "Test notification sent
+  successfully". The contact point's "delivery attempts" counter still
+  read 0 afterward — that counter only tracks real alert-triggered
+  sends, not manual tests, a UI distinction rather than a failure
+  signal. This closes every gap flagged since Phase 4 — backend is done,
+  clear to start Phase 5 (frontend).
+
+### Phase 4 — complete, merged via PR #30
 
 Every step of the Phase 4 plan (email verification, password reset,
 SDK/CLI `verify_content()` + typed alert forensics, a real demo agent,

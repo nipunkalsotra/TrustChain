@@ -7,8 +7,13 @@ Run:
     pytest tests/test_cli.py -v
 """
 
+import asyncio
+import json
+import os
+import sys
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -18,6 +23,66 @@ from trustchain_cli.main import build_parser
 
 BASE_URL = "http://localhost:8000"
 ANVIL_RPC = "http://localhost:8545"
+
+# Reaches into backend/ directly for the verification step — same
+# deliberate, narrow exception to this suite's real-HTTP-only philosophy
+# as sdk/python/tests/conftest.py::verified_signup and
+# sdk/typescript/tests/testHelpers.ts::verifiedSignup, mirrored here
+# because this suite never got the equivalent Phase 4 G1 fix those two
+# did: every _fresh_user_credentials()/_fresh_api_key() call site 403'd
+# with email_not_verified against the real Phase-4-patched backend (13 of
+# 16 tests in this file) until this was added.
+_BACKEND_DIR = Path(__file__).resolve().parents[3] / "backend"
+_BACKEND_PATH = str(_BACKEND_DIR)
+if _BACKEND_PATH not in sys.path:
+    sys.path.insert(0, _BACKEND_PATH)
+
+from dotenv import dotenv_values  # noqa: E402
+
+for _key, _value in dotenv_values(_BACKEND_DIR / ".env").items():
+    if _value is not None:
+        os.environ.setdefault(_key, _value)
+
+
+def _mark_verified(email: str) -> None:
+    asyncio.run(_mark_verified_async(email))
+
+
+async def _mark_verified_async(email: str) -> None:
+    import asyncpg
+    from config import get_settings
+
+    dsn = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute("UPDATE users SET email_verified = true WHERE email = $1", email)
+    finally:
+        await conn.close()
+
+
+def _tamper_step_output_hash(step_id: int) -> None:
+    """Same raw-SQL tamper as sdk/python/tests/conftest.py::
+    tamper_step_output_hash and sdk/typescript/tests/testHelpers.ts::
+    tamperStepOutputHash — needed here for the identical reason: the
+    'after tampering' path of `trustchain integrity verify-content` only
+    has anything real to prove once a step has actually been edited
+    post-hoc, and there is no legitimate HTTP endpoint that does that
+    (by design — see docs/adr/0020)."""
+    asyncio.run(_tamper_step_output_hash_async(step_id))
+
+
+async def _tamper_step_output_hash_async(step_id: int) -> None:
+    import asyncpg
+    from config import get_settings
+
+    dsn = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(
+            "UPDATE steps SET output_hash = '0x' || repeat('f', 64) WHERE id = $1", step_id,
+        )
+    finally:
+        await conn.close()
 
 
 def _stack_is_up() -> bool:
@@ -64,6 +129,7 @@ def _fresh_user_credentials() -> tuple[str, str]:
         timeout=10.0,
     )
     assert signup.status_code == 200, signup.text
+    _mark_verified(email)
     return email, password
 
 
@@ -75,6 +141,7 @@ def _fresh_api_key(scopes: list[str]) -> str:
         timeout=10.0,
     )
     assert signup.status_code == 200, signup.text
+    _mark_verified(email)
     token = signup.json()["token"]
     created = httpx.post(
         f"{BASE_URL}/api-keys",
@@ -331,6 +398,103 @@ def test_verify_command_unknown_run_exits_nonzero(capsys):
     key = _fresh_api_key(["runs:read"])
     with pytest.raises(SystemExit):
         _run(["--api-key", key, "verify", "run_does_not_exist"])
+
+
+# ── integrity verify-content (Phase 4 G3) ─────────────────────────────────
+# Closes a real gap: the endpoint itself (backend/tests/test_verify_content.py)
+# and the raw HTTP call (scripts/e2e_demo.py) were both proven, but the
+# CLI-reachable form (cmd_integrity_verify_content) had never been
+# exercised by anything before these three tests — same gap both SDKs had.
+
+def _logged_step(agent_id_prefix: str, output: str) -> int:
+    """Real content, logged via the SDK (not the CLI itself — verifying
+    the CLI command's own behavior doesn't require the step to have been
+    CREATED via the CLI too)."""
+    from trustchain_sdk import TrustChain
+
+    key = _fresh_api_key(["runs:read", "runs:write", "logs:write"])
+    tc = TrustChain(key, base_url=BASE_URL, on_error="raise")
+    agent_id = f"{agent_id_prefix}_{uuid.uuid4().hex[:8]}"
+    receipt = tc.log_and_wait(agent_id=agent_id, action="answer_query", input="what is my refund", output=output)
+    assert receipt.step_id is not None
+    return key, receipt.step_id
+
+
+def test_verify_content_command_matches_current_hash_with_no_tampering(capsys, monkeypatch):
+    import io
+
+    key, step_id = _logged_step("cli_vc_agent", "the refund is $50")
+    monkeypatch.setattr("sys.stdin", io.StringIO("the refund is $50"))
+
+    _run(["--api-key", key, "integrity", "verify-content", str(step_id), "output"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["matchesCurrent"] is True
+    assert result["matchesOriginal"] is None  # nothing has ever been changed
+
+
+def test_verify_content_command_wrong_candidate_matches_neither(capsys, monkeypatch):
+    import io
+
+    key, step_id = _logged_step("cli_vc_agent", "the refund is $50")
+    monkeypatch.setattr("sys.stdin", io.StringIO("something else entirely"))
+
+    _run(["--api-key", key, "integrity", "verify-content", str(step_id), "output"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["matchesCurrent"] is False
+
+
+def test_verify_content_command_after_tampering_matches_original_not_current(capsys, monkeypatch):
+    """The scenario this command exists for: after a step_row_tampered
+    alert, the owner supplies the text their OWN systems recorded and
+    confirms it against what the hash was before the edit — without
+    TrustChain ever having stored that text itself (see docs/adr/0020)."""
+    import io
+
+    key, step_id = _logged_step("cli_vc_agent", "the refund is $50")
+    _tamper_step_output_hash(step_id)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("the refund is $50"))
+    _run(["--api-key", key, "integrity", "verify-content", str(step_id), "output"])
+    true_original = json.loads(capsys.readouterr().out)
+    assert true_original["matchesCurrent"] is False   # the row was tampered — no longer matches
+    assert true_original["matchesOriginal"] is True   # but DID match what the hash was before the edit
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("the refund is $5000"))
+    _run(["--api-key", key, "integrity", "verify-content", str(step_id), "output"])
+    wrong_guess = json.loads(capsys.readouterr().out)
+    assert wrong_guess["matchesOriginal"] is False
+
+
+# ── integrity verify-run ────────────────────────────────────────────────
+# `trustchain integrity verify-run` (cmd_integrity_verify_run) had no
+# dedicated test either — noticed while writing the verify-content tests
+# above, not acted on until now. Synchronous per-run check (distinct from
+# `verify`, which reads the already-materialized /audit-log view) — see
+# POST /integrity/verify-run/{run_id}'s own docstring.
+
+def test_verify_run_command_reports_all_verified_for_a_clean_run(capsys):
+    from trustchain_sdk import TrustChain
+
+    key = _fresh_api_key(["runs:read", "runs:write", "logs:write"])
+    tc = TrustChain(key, base_url=BASE_URL, on_error="raise")
+    agent_id = f"cli_vr_agent_{uuid.uuid4().hex[:8]}"
+    run_id = tc._current_run_id(agent_id)
+    receipt = tc.log_and_wait(agent_id=agent_id, action="answer", input="q", output="a")
+    assert receipt.step_id is not None
+
+    _run(["--api-key", key, "integrity", "verify-run", run_id])
+    result = json.loads(capsys.readouterr().out)
+    assert result["runId"] == run_id
+    assert result["allVerified"] is True
+    assert len(result["steps"]) == 1
+    assert result["steps"][0]["verified"] is True
+    assert result["steps"][0]["reason"] is None
+
+
+def test_verify_run_command_unknown_run_exits_nonzero():
+    key = _fresh_api_key(["runs:read"])
+    with pytest.raises(SystemExit):
+        _run(["--api-key", key, "integrity", "verify-run", "run_does_not_exist"])
 
 
 # ── dev ───────────────────────────────────────────────────────────────────
