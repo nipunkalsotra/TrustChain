@@ -290,7 +290,92 @@ NOT reliably persist across sessions** (confirmed twice now, in two
 different sessions) — don't treat it as a durable cross-session record;
 this Markdown section is the actual durable one.
 
-### This session (2026-08-20): closed Phase 4's 3 known caveats, found and
+### Later same day (2026-08-20): Phase 5 pre-flight — Brevo enabled for
+real, Grafana Cloud credentials actually wired in, three stale processes
+found and killed
+
+Picked up on the explicit ask "before I start with frontend, set up
+Grafana Cloud and Brevo (or anything else that needs it)." Found real
+gaps in both, despite the "Observability migrated to Grafana Cloud"
+section directly below claiming this was already done — that section
+describes real work (the alert rules ARE live in Mimir, the contact
+point IS configured), but the six `GRAFANA_CLOUD_*` credentials
+themselves were never actually persisted into `backend/.env`, so
+`alloy` had nothing to authenticate with. Root cause is unconfirmed
+(likely: an earlier session generated/used tokens inline for one-off
+verification calls without writing them to the file) — worth being
+aware this specific gap can recur if credentials are minted again
+without also being saved.
+
+- **Brevo**: `BREVO_API_KEY`/`EMAIL_FROM`/`BREVO_API_URL` were already
+  present in `.env`, but `EMAIL_BACKEND` was still `console` (no real
+  email was sending) AND `EMAIL_FROM` (`shreshthashreshtha28@gmail.com`)
+  was not a verified Brevo sender — only `kalsotranipun@gmail.com` was
+  (confirmed on Brevo's own Senders page). Fixed both: `EMAIL_BACKEND=
+  brevo`, `EMAIL_FROM=kalsotranipun@gmail.com` (the `email_from_name`
+  default of "TrustChain" already combines correctly, matching the
+  verified sender's display name). Verified for real, not just
+  configured: a fresh signup against a locally-restarted backend logged
+  `POST https://api.brevo.com/v3/smtp/email "HTTP/1.1 201 Created"`.
+- **Grafana Cloud**: created two least-privilege access policies in the
+  `luckybus1510` org matching what `.env.example` already documented as
+  the intended design (separately-scoped, not one shared token) —
+  `trustchain-prometheus-write` (`metrics:write` only) and
+  `trustchain-loki-write` (`logs:write` only) — generated one token
+  each, and wrote all 6 `GRAFANA_CLOUD_*` values into `backend/.env`.
+  Grafana Cloud's own UI made this harder than it should have been: the
+  "Create token" reveal screen never actually rendered in a way
+  Chrome-automation tooling could read (several attempts silently
+  succeeded server-side with no visible confirmation — cleaned up 3
+  stray unretrievable tokens afterward), so the actual secret values
+  were captured by patching `window.fetch` in the page and reading the
+  real API response body directly, not by reading the UI. Verified for
+  real: brought up `docker compose --profile observability`, and
+  `alloy`'s own self-metrics (`:12345/metrics`, read via a throwaway
+  `curlimages/curl` container sharing alloy's network namespace, same
+  method the prior Grafana Cloud session used) showed
+  `prometheus_remote_storage_samples_total=100` /
+  `samples_failed_total=0` and `loki_write_sent_bytes_total=71342` /
+  `loki_write_dropped_bytes_total=0` — real samples/logs actually
+  landing in Grafana Cloud, not just "the container started."
+- **Found and killed 3 stale leftover processes from the *previous*
+  session's `./start.sh` run** (`indexer.main`, `anchor_worker.main`,
+  `integrity_watchdog.main` — all started within the same second on
+  2026-08-19, none ever cleaned up): they were squatting on ports
+  9101/9102, which is exactly why the real Docker `anchor-worker`/
+  `indexer` containers couldn't bind and start after the Anvil reset
+  below. This is the "Recurring pattern" section's stray-process
+  problem happening again, concretely — worth a `ps aux | grep -E
+  "python3 -m (indexer|anchor_worker|integrity_watchdog)"` sanity check
+  at the start of any session before assuming a container port-bind
+  failure is a real bug.
+- **Anvil reset again**: verifying the observability profile required
+  `--build`, which (per this file's own documented trap, immediately
+  below) recreated Anvil and reset it to block 0. Ran the full documented
+  redeploy drill (`DeployV2.s.sol` broadcast, `write_v2_addresses.py`,
+  `TRUNCATE indexer_cursor`) — confirmed working since it's the same
+  drill this file already describes.
+- **Still broken, NOT fixed this session (real, narrow finding)**: the
+  Docker `anchor-worker` container crash-loops on a cold start even
+  after the stray-process/port conflict above was cleared —
+  `anchor_worker/nonce_lock.py`'s Postgres advisory-lock acquisition
+  (the very first DB touch at process startup) has no retry/backoff
+  around the *connection* itself, only around "lock not yet held" — so
+  a transient DNS resolution blip during container startup (confirmed
+  the network/DNS itself was fine independently — `getent hosts
+  postgres` and a direct `eth_blockNumber` call to `anvil` both
+  succeeded from a throwaway container on the same network) crashes the
+  whole process instead of retrying. `indexer` doesn't hit this same
+  race. Out of scope for this session (would mean editing
+  `nonce_lock.py`, not something asked for) — flagging for whoever picks
+  up backend robustness work next.
+- **Frontend pre-flight checked and clean**: `frontend/lib/api.ts`'s
+  `NEXT_PUBLIC_API_URL` already defaults to `http://localhost:8000`
+  (no `.env.local` needed for local dev), and `main.py`'s CORS
+  allowlist already covers `localhost:3000`/`3001` — nothing else
+  needed there before Phase 5 starts.
+
+### Earlier same day (2026-08-20): closed Phase 4's 3 known caveats, found and
 fixed a major previously-unknown bug, migrated observability to Grafana
 Cloud
 
