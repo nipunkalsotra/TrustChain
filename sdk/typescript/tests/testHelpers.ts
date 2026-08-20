@@ -84,3 +84,22 @@ async function markVerified(email: string): Promise<void> {
     await client.end();
   }
 }
+
+/**
+ * Directly overwrites a step's stored output_hash — the same raw-SQL
+ * tamper backend/tests/test_verify_content.py and the Python SDK's own
+ * conftest.py::tamper_step_output_hash use to exercise the "after
+ * tampering" path for TrustChain.verifyContent. Same deliberate, narrow
+ * exception to this suite's real-HTTP-only philosophy as
+ * verifiedSignup() above, not a new pattern — there is no legitimate
+ * HTTP endpoint that does this by design (docs/adr/0020).
+ */
+export async function tamperStepOutputHash(stepId: number): Promise<void> {
+  const client = new pg.Client({ connectionString: connectionString() });
+  await client.connect();
+  try {
+    await client.query("UPDATE steps SET output_hash = '0x' || repeat('f', 64) WHERE id = $1", [stepId]);
+  } finally {
+    await client.end();
+  }
+}

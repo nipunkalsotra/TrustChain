@@ -102,3 +102,30 @@ async def _mark_verified(email: str) -> None:
         await conn.execute("UPDATE users SET email_verified = true WHERE email = $1", email)
     finally:
         await conn.close()
+
+
+def tamper_step_output_hash(step_id: int) -> None:
+    """Directly overwrites a step's stored output_hash — the same raw-SQL
+    tamper backend/tests/test_verify_content.py uses to exercise the
+    "after tampering" path, needed here for the identical reason
+    verified_signup() reaches into the DB: TrustChain.verify_content's
+    matches_original field only has anything real to prove once a step
+    has actually been edited post-hoc, and there is no legitimate HTTP
+    endpoint that does that (by design — see docs/adr/0020). Same
+    deliberate, narrow exception to this suite's real-HTTP-only
+    philosophy as verified_signup(), not a new pattern."""
+    asyncio.run(_tamper_output_hash(step_id))
+
+
+async def _tamper_output_hash(step_id: int) -> None:
+    import asyncpg
+    from config import get_settings
+
+    dsn = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(
+            "UPDATE steps SET output_hash = '0x' || repeat('f', 64) WHERE id = $1", step_id,
+        )
+    finally:
+        await conn.close()
