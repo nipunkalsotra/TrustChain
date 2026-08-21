@@ -28,7 +28,7 @@
     "js-yaml": "^4.1.0"
   },
   "peerDependencies": {
-    "@langchain/core": "^1.2.7",
+    "@langchain/core": "^1.2.8",
     "viem": "^2.55.16"
   },
   "peerDependenciesMeta": {
@@ -36,7 +36,7 @@
     "viem": { "optional": true }
   },
   "devDependencies": {
-    "@langchain/core": "^1.2.7",
+    "@langchain/core": "^1.2.8",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.23.1",
