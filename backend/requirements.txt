@@ -24,7 +24,7 @@ langgraph==1.2.11
 
 # FastApi Backend
 fastapi==0.141.1
-uvicorn==0.52.1
+uvicorn==0.52.3
 
 # MCP Servers
 fastmcp==3.4.7
