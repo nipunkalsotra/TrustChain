@@ -2,7 +2,7 @@
 web3==7.16.0
 
 # core -packages
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 PyJWT==2.13.0
 pydantic-settings==2.15.0
 structlog==26.1.0
