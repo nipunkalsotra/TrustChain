@@ -33,7 +33,7 @@ tavily-python==0.7.27
 
 # Observability (P2.6) — metrics, tracing, error reporting
 prometheus-client==0.26.0
-sentry-sdk==2.68.0
+sentry-sdk==2.68.1
 opentelemetry-api==1.44.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-grpc==1.44.0
