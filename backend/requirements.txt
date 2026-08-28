@@ -29,7 +29,7 @@ uvicorn==0.52.1
 # MCP Servers
 fastmcp==3.4.7
 langchain-mcp-adapters==0.3.2
-tavily-python==0.7.27
+tavily-python==0.8.0
 
 # Observability (P2.6) — metrics, tracing, error reporting
 prometheus-client==0.26.0
