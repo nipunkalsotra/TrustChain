@@ -1,0 +1,953 @@
+/*
+ * Landing-page styling.
+ *
+ * Scoped entirely under `.tc-landing` because the rest of this app ships a
+ * green-on-black terminal theme in globals.css. The landing page is a
+ * different design language and must not leak into (or inherit from) the
+ * product UI. Every rule here is either under `.tc-landing` or a
+ * `.tc-`-prefixed class used only by it.
+ *
+ * Spec §1: "All important UI text remains real HTML/CSS above or beside
+ * WebGL. Do not render critical text into textures." Everything the visitor
+ * reads is here, selectable, and in the accessibility tree.
+ */
+
+.tc-landing {
+  --tc-bg: #03060e;
+  --tc-bg-soft: #070c18;
+  --tc-ink: #eaf2ff;
+  --tc-ink-dim: #b6c8e0;
+  --tc-muted: #7e93b2;
+  --tc-faint: #4d5f7a;
+  --tc-cyan: #3ec6ff;
+  --tc-cyan-soft: #8ad8ff;
+  --tc-blue: #1668ff;
+  --tc-line: rgba(122, 176, 255, 0.16);
+  --tc-line-strong: rgba(122, 176, 255, 0.34);
+  --tc-glass: rgba(8, 15, 28, 0.62);
+  --tc-glass-strong: rgba(9, 17, 32, 0.86);
+
+  --tc-radius: 14px;
+  --tc-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  position: relative;
+  z-index: 1;
+  color: var(--tc-ink);
+  font-family: var(--tc-font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+  background: transparent;
+  /* The canvas paints the background; the DOM must let it through. */
+  letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The page body needs the canvas colour behind it, since the landing route
+   replaces the app shell's own background. */
+body:has(.tc-landing) {
+  background: #03060e;
+}
+
+.tc-landing ::selection {
+  background: rgba(62, 198, 255, 0.28);
+  color: #fff;
+}
+
+/* ── Layout primitives ───────────────────────────────────────────────────── */
+
+.tc-shell {
+  max-width: 1220px;
+  margin: 0 auto;
+  padding: 0 clamp(20px, 4vw, 56px);
+}
+
+.tc-section {
+  position: relative;
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  padding: clamp(80px, 12vh, 160px) 0;
+}
+
+/* Copy sits to one side so the 3D world beside it is never covered. Alternating
+   sides is what stops seven full-height sections reading as one long column. */
+.tc-section__copy {
+  max-width: 560px;
+  position: relative;
+  z-index: 2;
+}
+
+.tc-section--right .tc-section__copy {
+  margin-left: auto;
+}
+
+.tc-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--tc-cyan);
+  margin-bottom: 22px;
+}
+
+.tc-eyebrow::before {
+  content: "";
+  width: 22px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--tc-cyan));
+}
+
+.tc-h2 {
+  font-size: clamp(30px, 4.1vw, 52px);
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  margin: 0 0 22px;
+  text-wrap: balance;
+}
+
+.tc-lead {
+  font-size: clamp(15px, 1.15vw, 17px);
+  line-height: 1.68;
+  color: var(--tc-ink-dim);
+  margin: 0 0 28px;
+  text-wrap: pretty;
+}
+
+.tc-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.tc-points li {
+  position: relative;
+  padding-left: 26px;
+  font-size: 14.5px;
+  line-height: 1.62;
+  color: var(--tc-muted);
+}
+
+.tc-points li::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--tc-cyan);
+  box-shadow: 0 0 10px rgba(62, 198, 255, 0.8);
+}
+
+/* Entrance: sections reveal on their own scroll progress via a data attribute
+   the observer sets, so nothing animates until it is actually approached. */
+.tc-reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition:
+    opacity 0.85s var(--tc-ease),
+    transform 0.85s var(--tc-ease);
+}
+
+.tc-reveal[data-shown="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+.tc-reveal[data-delay="1"] { transition-delay: 0.08s; }
+.tc-reveal[data-delay="2"] { transition-delay: 0.16s; }
+.tc-reveal[data-delay="3"] { transition-delay: 0.24s; }
+.tc-reveal[data-delay="4"] { transition-delay: 0.32s; }
+
+/* ── Navbar ──────────────────────────────────────────────────────────────── */
+
+.tc-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px clamp(16px, 3vw, 34px);
+  pointer-events: none;
+}
+
+.tc-nav > * {
+  pointer-events: auto;
+}
+
+/* Brand is hidden until the logo has flown here from the monolith. */
+.tc-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.94);
+  transition:
+    opacity 0.5s var(--tc-ease),
+    transform 0.5s var(--tc-ease);
+}
+
+.tc-brand[data-visible="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+.tc-brand__mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  filter: drop-shadow(0 0 10px rgba(62, 198, 255, 0.55));
+}
+
+.tc-brand__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+
+.tc-brand__name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.tc-brand__sub {
+  font-size: 8.5px;
+  letter-spacing: 0.26em;
+  color: var(--tc-cyan);
+  margin-top: 3px;
+  font-weight: 600;
+}
+
+/* Compact icon-first capsule (spec §8.1). */
+.tc-capsule {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--tc-line);
+  background: var(--tc-glass);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  transition:
+    border-color 0.45s var(--tc-ease),
+    box-shadow 0.45s var(--tc-ease),
+    background 0.45s var(--tc-ease);
+}
+
+/* Expansion sequence, spec §8.1: border/glow wakes -> capsule stretches ->
+   icons separate -> text resolves -> active item highlight appears. Each stage
+   is a different property with a different delay, which is what makes it read
+   as a sequence rather than one scale transition. */
+.tc-capsule[data-expanded="true"] {
+  border-color: var(--tc-line-strong);
+  box-shadow:
+    0 0 0 1px rgba(62, 198, 255, 0.10),
+    0 12px 40px rgba(0, 0, 0, 0.5),
+    0 0 34px rgba(62, 198, 255, 0.14);
+  background: var(--tc-glass-strong);
+}
+
+.tc-capsule__item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tc-muted);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    gap 0.4s var(--tc-ease) 0.06s,
+    padding 0.4s var(--tc-ease) 0.06s,
+    color 0.3s var(--tc-ease),
+    background 0.3s var(--tc-ease);
+}
+
+.tc-capsule[data-expanded="true"] .tc-capsule__item {
+  gap: 8px;
+  padding: 8px 14px;
+}
+
+.tc-capsule__item:hover,
+.tc-capsule__item:focus-visible {
+  color: var(--tc-ink);
+}
+
+.tc-capsule__item[data-active="true"] {
+  color: var(--tc-ink);
+  background: rgba(62, 198, 255, 0.12);
+}
+
+.tc-capsule__icon {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.tc-capsule__label {
+  display: inline-block;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translateX(-4px);
+  transition:
+    max-width 0.45s var(--tc-ease) 0.12s,
+    opacity 0.3s var(--tc-ease) 0.2s,
+    transform 0.45s var(--tc-ease) 0.12s;
+}
+
+.tc-capsule[data-expanded="true"] .tc-capsule__label {
+  max-width: 120px;
+  opacity: 1;
+  transform: none;
+}
+
+.tc-nav__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition:
+    opacity 0.5s var(--tc-ease) 0.1s,
+    transform 0.5s var(--tc-ease) 0.1s;
+}
+
+.tc-nav__actions[data-visible="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+
+.tc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 20px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    transform 0.35s var(--tc-ease),
+    box-shadow 0.35s var(--tc-ease),
+    border-color 0.35s var(--tc-ease),
+    background 0.35s var(--tc-ease);
+}
+
+.tc-btn:active {
+  transform: translateY(1px);
+}
+
+.tc-btn--primary {
+  color: #041020;
+  background: linear-gradient(180deg, #6ed3ff, #2b9ae8);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.35) inset,
+    0 10px 30px rgba(31, 138, 220, 0.32);
+}
+
+.tc-btn--primary:hover {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.45) inset,
+    0 14px 40px rgba(31, 138, 220, 0.46);
+  transform: translateY(-1px);
+}
+
+.tc-btn--ghost {
+  color: var(--tc-ink-dim);
+  border-color: var(--tc-line);
+  background: rgba(10, 18, 32, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.tc-btn--ghost:hover {
+  color: var(--tc-ink);
+  border-color: var(--tc-line-strong);
+  transform: translateY(-1px);
+}
+
+.tc-btn--small {
+  padding: 8px 15px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+/* ── Hero ────────────────────────────────────────────────────────────────── */
+
+.tc-hero {
+  position: relative;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: clamp(24px, 4vh, 46px);
+}
+
+.tc-hero__inner {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+/* The whole hero UI is hidden until the opening has actually resolved
+   (spec §6.8). Not opacity-only: it must not be focusable or read by a screen
+   reader while the cinematic is still playing. */
+.tc-hero__ui {
+  max-width: 640px;
+}
+
+.tc-hero__title {
+  font-size: clamp(40px, 6.4vw, 84px);
+  line-height: 0.98;
+  letter-spacing: -0.042em;
+  font-weight: 600;
+  margin: 0 0 22px;
+}
+
+.tc-hero__title span {
+  display: block;
+}
+
+.tc-hero__accent {
+  background: linear-gradient(96deg, #7fd8ff 0%, #4aa8ff 46%, #eaf2ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.tc-hero__lines {
+  margin: 0 0 30px;
+  color: var(--tc-ink-dim);
+  font-size: clamp(14px, 1.15vw, 16.5px);
+  line-height: 1.7;
+}
+
+.tc-hero__lines span {
+  display: block;
+}
+
+.tc-hero__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Reveal choreography — spec §6.8: "Use blur-to-sharp, mask reveals, light
+   sweeps, restrained perspective and upward movement. Do not use a cheap
+   typewriter effect. CTA buttons can emerge from below with slight
+   rotateX/perspective before settling." */
+.tc-rise {
+  opacity: 0;
+  filter: blur(9px);
+  transform: translateY(26px);
+  transition:
+    opacity 0.9s var(--tc-ease),
+    filter 0.9s var(--tc-ease),
+    transform 0.9s var(--tc-ease);
+}
+
+.tc-rise[data-shown="true"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: none;
+}
+
+.tc-rise--cta {
+  perspective: 700px;
+  transform: translateY(30px) rotateX(-16deg);
+  transform-origin: 50% 100%;
+}
+
+.tc-rise--d1 { transition-delay: 0.06s; }
+.tc-rise--d2 { transition-delay: 0.14s; }
+.tc-rise--d3 { transition-delay: 0.24s; }
+.tc-rise--d4 { transition-delay: 0.34s; }
+
+/* ── Four glowing feature controls (spec §9) ─────────────────────────────── */
+
+.tc-features {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: clamp(28px, 5vh, 52px);
+}
+
+.tc-feature {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 16px 18px;
+  border-radius: var(--tc-radius);
+  border: 1px solid var(--tc-line);
+  background: var(--tc-glass);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 0.5s var(--tc-ease),
+    border-color 0.5s var(--tc-ease),
+    box-shadow 0.5s var(--tc-ease);
+}
+
+/* Cursor-following highlight (spec §9). The gradient centre is driven by two
+   custom properties the component writes on pointermove — no re-render. */
+.tc-feature::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  background: radial-gradient(
+    220px circle at var(--mx, 50%) var(--my, 50%),
+    rgba(62, 198, 255, 0.20),
+    transparent 62%
+  );
+  opacity: 0;
+  transition: opacity 0.4s var(--tc-ease);
+}
+
+/* Internal scan line (spec §9: "subtle internal particles/scan line"). */
+.tc-feature::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  z-index: -1;
+  background: linear-gradient(90deg, transparent, rgba(62, 198, 255, 0.55), transparent);
+  transform: translateY(0);
+  animation: tc-scan 5.5s linear infinite;
+  opacity: 0.6;
+}
+
+.tc-feature:hover,
+.tc-feature:focus-visible {
+  transform: translateY(-3px);
+  border-color: var(--tc-line-strong);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.5),
+    0 0 30px rgba(62, 198, 255, 0.13);
+}
+
+.tc-feature:hover::before,
+.tc-feature:focus-visible::before {
+  opacity: 1;
+}
+
+@keyframes tc-scan {
+  0% { transform: translateY(0); opacity: 0; }
+  12% { opacity: 0.6; }
+  88% { opacity: 0.6; }
+  100% { transform: translateY(78px); opacity: 0; }
+}
+
+.tc-feature__icon {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  color: var(--tc-cyan);
+  filter: drop-shadow(0 0 8px rgba(62, 198, 255, 0.5));
+  transition: transform 0.5s var(--tc-ease);
+}
+
+.tc-feature:hover .tc-feature__icon {
+  transform: scale(1.09) rotate(-4deg);
+}
+
+.tc-feature__label {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+.tc-feature__caption {
+  font-size: 11.5px;
+  color: var(--tc-muted);
+  display: block;
+  margin-top: 3px;
+}
+
+/* ── Opening affordance (spec §5) ────────────────────────────────────────── */
+
+.tc-affordance {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 0.7s var(--tc-ease);
+}
+
+.tc-affordance__scroll {
+  font-size: 10px;
+  letter-spacing: 0.32em;
+  color: rgba(214, 232, 255, 0.5);
+  transition: opacity 0.6s var(--tc-ease);
+}
+
+.tc-affordance__arrow {
+  width: 1px;
+  height: 26px;
+  background: linear-gradient(180deg, rgba(62, 198, 255, 0.7), transparent);
+  animation: tc-drift 2.4s var(--tc-ease) infinite;
+}
+
+@keyframes tc-drift {
+  0% { transform: translateY(-6px); opacity: 0; }
+  40% { opacity: 1; }
+  100% { transform: translateY(8px); opacity: 0; }
+}
+
+.tc-affordance__quick {
+  font-size: 9.5px;
+  letter-spacing: 0.24em;
+  color: rgba(160, 186, 216, 0.34);
+}
+
+.tc-affordance__quick kbd {
+  font: inherit;
+  padding: 2px 5px;
+  border: 1px solid rgba(122, 176, 255, 0.22);
+  border-radius: 4px;
+  color: rgba(190, 214, 240, 0.6);
+}
+
+/* ── Security grid ───────────────────────────────────────────────────────── */
+
+.tc-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 30px;
+}
+
+.tc-card {
+  padding: 20px 20px 22px;
+  border-radius: var(--tc-radius);
+  border: 1px solid var(--tc-line);
+  background: var(--tc-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition:
+    border-color 0.45s var(--tc-ease),
+    transform 0.45s var(--tc-ease);
+}
+
+.tc-card:hover {
+  border-color: var(--tc-line-strong);
+  transform: translateY(-2px);
+}
+
+.tc-card__title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--tc-cyan);
+  margin: 0 0 9px;
+  letter-spacing: -0.01em;
+}
+
+.tc-card__body {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--tc-muted);
+  margin: 0;
+}
+
+/* ── Pipeline stage list (Product section) ───────────────────────────────── */
+
+.tc-stages {
+  display: grid;
+  gap: 2px;
+  margin-top: 28px;
+  border-top: 1px solid var(--tc-line);
+}
+
+.tc-stage {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 16px;
+  padding: 17px 4px;
+  border-bottom: 1px solid var(--tc-line);
+  transition: background 0.4s var(--tc-ease);
+}
+
+.tc-stage:hover {
+  background: rgba(62, 198, 255, 0.045);
+}
+
+.tc-stage__index {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tc-cyan);
+  letter-spacing: 0.08em;
+  padding-top: 2px;
+}
+
+.tc-stage__name {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 5px;
+}
+
+.tc-stage__body {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--tc-muted);
+  margin: 0;
+}
+
+/* ── Final CTA ───────────────────────────────────────────────────────────── */
+
+.tc-final {
+  text-align: center;
+  padding: clamp(90px, 16vh, 180px) 0 clamp(60px, 10vh, 110px);
+}
+
+.tc-final__headline {
+  font-size: clamp(30px, 4.6vw, 58px);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  font-weight: 600;
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+
+.tc-final__lead {
+  font-size: clamp(15px, 1.3vw, 19px);
+  color: var(--tc-ink-dim);
+  margin: 0 0 32px;
+}
+
+.tc-final__ctas {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.tc-final__note {
+  margin-top: 40px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--tc-faint);
+}
+
+/* ── Coming Soon pages (spec §14.1 / §14.2) ──────────────────────────────── */
+
+.tc-soon {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  text-align: center;
+  padding: 40px 24px;
+  background: #03060e;
+  color: var(--tc-ink);
+}
+
+.tc-soon__title {
+  font-size: clamp(26px, 4vw, 42px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+
+.tc-soon__sub {
+  color: var(--tc-muted);
+  font-size: 15px;
+  margin: 0;
+  max-width: 440px;
+  line-height: 1.6;
+}
+
+/* ── Responsive (spec §18) ───────────────────────────────────────────────── */
+
+@media (max-width: 1080px) {
+  .tc-features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Below this width the copy column spans the viewport, so the 3D world can
+     no longer be offset clear of it. Spec §18: "Mobile prioritizes
+     readability." A soft scrim keeps the approved section copy legible over
+     whatever the scene is doing behind it, without hiding the scene. */
+  .tc-section__copy,
+  .tc-hero__ui {
+    position: relative;
+  }
+
+  .tc-section__copy::before,
+  .tc-hero__ui::before {
+    content: "";
+    position: absolute;
+    inset: -28px -24px;
+    z-index: -1;
+    border-radius: 24px;
+    background: radial-gradient(
+      120% 100% at 30% 40%,
+      rgba(3, 6, 14, 0.9) 0%,
+      rgba(3, 6, 14, 0.72) 45%,
+      transparent 100%
+    );
+  }
+}
+
+@media (max-width: 860px) {
+  .tc-section {
+    min-height: auto;
+    padding: clamp(64px, 10vh, 110px) 0;
+  }
+
+  .tc-section--right .tc-section__copy {
+    margin-left: 0;
+  }
+
+  .tc-section__copy {
+    max-width: none;
+  }
+
+  .tc-grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  /* Spec §8.1: "On mobile/touch, do not rely on hover. Use visible labels or
+     an explicit compact menu control." The capsule is permanently expanded and
+     wraps, rather than depending on a hover that cannot happen. */
+  .tc-capsule__label {
+    max-width: 120px !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .tc-capsule__item {
+    gap: 8px !important;
+    padding: 8px 11px !important;
+  }
+
+  .tc-nav {
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  /* The nav wraps to two rows at this width, so the hero needs to start below
+     it — otherwise the headline renders behind the nav capsule. */
+  .tc-hero {
+    padding-top: 132px;
+    justify-content: center;
+  }
+
+  .tc-capsule {
+    order: 3;
+    width: 100%;
+    /* An even 4-column grid rather than space-between: with labels always
+       visible on touch (no hover to expand), free-flowing flex items simply
+       overflowed the viewport and clipped "Pricing" off the right edge at
+       390px. */
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    border-radius: 14px;
+  }
+
+  .tc-capsule__item {
+    justify-content: center;
+    gap: 6px !important;
+    padding: 9px 4px !important;
+    font-size: 12.5px;
+    min-width: 0;
+  }
+
+  .tc-capsule__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tc-capsule__icon {
+    width: 15px;
+    height: 15px;
+  }
+
+  .tc-affordance__quick {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .tc-features {
+    grid-template-columns: 1fr;
+  }
+
+  /* At the narrowest sizes even the grid is tight — drop the icons and keep
+     the labels, which are what the visitor actually navigates by. */
+  .tc-capsule__icon {
+    display: none;
+  }
+
+  .tc-capsule__item {
+    font-size: 12px;
+    padding: 10px 2px !important;
+  }
+
+  .tc-feature__caption {
+    display: none;
+  }
+}
+
+/* ── Reduced motion (spec §18) ───────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-landing *,
+  .tc-landing *::before,
+  .tc-landing *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .tc-reveal,
+  .tc-rise {
+    opacity: 1 !important;
+    filter: none !important;
+    transform: none !important;
+  }
+}

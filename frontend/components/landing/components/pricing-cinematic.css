@@ -1,0 +1,149 @@
+/*
+ * The 2.8-second Pricing placeholder cinematic (spec §14.2).
+ *
+ * Every animation is `forwards` and none loop: this settles and then holds.
+ * A looping placeholder animation is the thing that turns a polished beat into
+ * a distraction on a page the visitor is only passing through.
+ */
+
+.tc-pricing {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: 40px 24px;
+  background: radial-gradient(120% 90% at 50% 42%, #0a1526 0%, #03060e 62%);
+  text-align: center;
+}
+
+.tc-pricing__stage {
+  width: min(280px, 52vw);
+  aspect-ratio: 1;
+}
+
+.tc-pricing__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* Copy holds back until the mark has formed, then rises. */
+.tc-pricing__copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  opacity: 0;
+  transform: translateY(16px);
+  animation: tc-p-copy 0.9s cubic-bezier(0.22, 1, 0.36, 1) 1.75s forwards;
+}
+
+.tc-pricing__eyebrow {
+  text-align: center;
+}
+
+@keyframes tc-p-copy {
+  to { opacity: 1; transform: none; }
+}
+
+/* ── Shield draws on ─────────────────────────────────────────────────────── */
+
+.tc-p-shield {
+  stroke-dasharray: 620;
+  stroke-dashoffset: 620;
+  animation: tc-p-draw 1.15s cubic-bezier(0.65, 0, 0.35, 1) 0.12s forwards;
+}
+
+.tc-p-diamond {
+  stroke-dasharray: 200;
+  stroke-dashoffset: 200;
+  animation: tc-p-draw 0.7s cubic-bezier(0.65, 0, 0.35, 1) 0.85s forwards;
+}
+
+@keyframes tc-p-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* ── Core ignites, near-instant attack (same language as the hero) ───────── */
+
+.tc-p-core {
+  transform-origin: 120px 120px;
+  transform: scale(0);
+  animation: tc-p-ignite 0.5s cubic-bezier(0.16, 1, 0.3, 1) 1.35s forwards;
+}
+
+@keyframes tc-p-ignite {
+  0% { transform: scale(0); }
+  35% { transform: scale(2.1); }
+  100% { transform: scale(1); }
+}
+
+.tc-p-glow {
+  opacity: 0;
+  transform-origin: 120px 120px;
+  transform: scale(0.4);
+  animation: tc-p-bloom 1.5s cubic-bezier(0.16, 1, 0.3, 1) 1.35s forwards;
+}
+
+@keyframes tc-p-bloom {
+  0% { opacity: 0; transform: scale(0.4); }
+  22% { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 0.42; transform: scale(1); }
+}
+
+/* ── Verification ring expands once and fades ───────────────────────────── */
+
+.tc-p-ring {
+  opacity: 0;
+  transform-origin: 120px 120px;
+  animation: tc-p-wave 1.3s cubic-bezier(0.22, 1, 0.36, 1) 1.45s forwards;
+}
+
+@keyframes tc-p-wave {
+  0% { opacity: 0.9; transform: scale(0.35); }
+  100% { opacity: 0; transform: scale(2.5); }
+}
+
+/* ── Chain links converge and lock, sequentially ────────────────────────── */
+
+.tc-p-link {
+  transform-origin: 120px 120px;
+  opacity: 0;
+}
+
+.tc-p-link--0 { animation: tc-p-lock 0.85s cubic-bezier(0.22, 1, 0.36, 1) 1.55s forwards; }
+.tc-p-link--1 { animation: tc-p-lock 0.85s cubic-bezier(0.22, 1, 0.36, 1) 1.68s forwards; }
+.tc-p-link--2 { animation: tc-p-lock 0.85s cubic-bezier(0.22, 1, 0.36, 1) 1.81s forwards; }
+.tc-p-link--3 { animation: tc-p-lock 0.85s cubic-bezier(0.22, 1, 0.36, 1) 1.94s forwards; }
+
+.tc-p-link--0 ellipse { transform: rotate(0deg); transform-origin: 120px 120px; }
+.tc-p-link--1 ellipse { transform: rotate(45deg); transform-origin: 120px 120px; }
+.tc-p-link--2 ellipse { transform: rotate(90deg); transform-origin: 120px 120px; }
+.tc-p-link--3 ellipse { transform: rotate(135deg); transform-origin: 120px 120px; }
+
+@keyframes tc-p-lock {
+  0% { opacity: 0; transform: scale(3.4); }
+  70% { opacity: 0.85; transform: scale(0.94); }
+  100% { opacity: 0.4; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-p-shield,
+  .tc-p-diamond {
+    stroke-dashoffset: 0 !important;
+    animation: none !important;
+  }
+  .tc-p-core,
+  .tc-p-glow,
+  .tc-p-link,
+  .tc-pricing__copy {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .tc-p-glow { opacity: 0.42 !important; }
+  .tc-p-link { opacity: 0.4 !important; }
+  .tc-p-ring { display: none; }
+}

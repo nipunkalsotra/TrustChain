@@ -19,8 +19,14 @@ const NAV_ITEMS = [
     { href: "/verify", label: "VERIFY", icon: "◆" },
 ]
 
+// Marketing surface: public, and deliberately rendered WITHOUT the product
+// chrome (nav, ticker, scanline, grid). The landing page ships its own
+// cinematic navbar and its own visual language — wrapping it in the app shell
+// would double the navigation and drop the terminal theme on top of it.
+const MARKETING_PATHS = ["/", "/coming-soon", "/pricing"]
+
 // Pages that don't require login
-const PUBLIC_PATHS = ["/auth"]
+const PUBLIC_PATHS = ["/auth", ...MARKETING_PATHS]
 
 export default function ClientShell({ children }: { children: React.ReactNode }) {
     const router = useRouter()
@@ -31,12 +37,19 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     const [ready, setReady] = useState(false)
 
     // ── Chain status — polls the real backend, no simulated ticking ────────
+    // Skipped entirely on the marketing routes. They render without the navbar
+    // this value feeds, so polling there was a request every 5s that nothing
+    // could ever display — and on the public landing page it meant every
+    // anonymous visitor's browser hammering the API with connection-refused
+    // retries whenever the backend isn't running.
+    const isMarketing = MARKETING_PATHS.includes(pathname)
     useEffect(() => {
+        if (isMarketing) return
         const poll = () => getChainStatus().then(setChain).catch(() => setChain(null))
         poll()
         const t = setInterval(poll, 5000)
         return () => clearInterval(t)
-    }, [])
+    }, [isMarketing])
 
     // ── Auth guard ────────────────────────────────────────────────────────
     // Tried the useSyncExternalStore rewrite this rule nudges toward — it
@@ -46,6 +59,7 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     // Reading getSession() fresh inside a plain effect (below) doesn't have
     // that window — verified in a real browser — so this stays as-is.
     useEffect(() => {
+        if (isMarketing) return
         const s = getSession()
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setLocalSession(s)
@@ -53,13 +67,19 @@ export default function ClientShell({ children }: { children: React.ReactNode })
             router.replace("/auth")
         }
         setReady(true)
-    }, [pathname])
+    }, [pathname, isMarketing])
 
     const logout = () => {
         clearSession()
         setLocalSession(null)
         router.replace("/auth")
     }
+
+    // Marketing routes render immediately and bare. Checked BEFORE the `ready`
+    // gate on purpose: the landing page is public, so making a visitor wait a
+    // commit for an auth check that cannot affect them would blank the first
+    // paint of the hero for no reason.
+    if (isMarketing) return <>{children}</>
 
     // Don't render until auth check is done (prevents flash)
     if (!ready) return null
