@@ -27,7 +27,7 @@ fastapi==0.141.1
 uvicorn==0.52.1
 
 # MCP Servers
-fastmcp==3.4.7
+fastmcp==4.0.0
 langchain-mcp-adapters==0.3.2
 tavily-python==0.7.27
 
