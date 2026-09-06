@@ -17,6 +17,19 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned, not "stable" — an unpinned "stable" default drifted to a
+          # newer Foundry release between whenever contracts/.gas-snapshot was
+          # last regenerated and 2026-09-03, producing gas numbers that no
+          # longer matched the committed snapshot on a PR that never touched
+          # contracts/ at all (CI run 33726774238, "Check gas snapshot for
+          # regressions" step). Confirmed locally: forge 1.7.1 is the only
+          # version verified to reproduce the committed .gas-snapshot with a
+          # clean `forge snapshot --check` exit 0 alongside a clean
+          # `forge test` (151/151) — pinning here removes that whole class of
+          # false-positive CI failure. Bump deliberately (and regenerate
+          # .gas-snapshot alongside) when there's a reason to, not silently.
+          version: 1.7.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
@@ -243,6 +256,10 @@ jobs:
         working-directory: backend
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned — see the "Foundry project" job's own "Install Foundry"
+          # step near the top of this file for why.
+          version: 1.7.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
@@ -524,6 +541,10 @@ jobs:
           submodules: recursive
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned — see the "Foundry project" job's own "Install Foundry"
+          # step near the top of this file for why.
+          version: 1.7.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
