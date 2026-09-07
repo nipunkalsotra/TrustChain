@@ -290,6 +290,85 @@ NOT reliably persist across sessions** (confirmed twice now, in two
 different sessions) — don't treat it as a durable cross-session record;
 this Markdown section is the actual durable one.
 
+### Phase 5 (2026-08-21): cinematic landing page built from
+`TrustChain_Cinematic_Landing_Page_FINAL_IMPLEMENTATION_PROMPT.pdf` (v3)
+
+The old `app/page.tsx` marketing page is replaced by a scroll-driven WebGL
+landing page under `frontend/components/landing/`. Nothing else in the app's
+routing, auth or API layer changed except `components/ui/ClientShell.tsx` (see
+below). New deps: three, @react-three/{fiber,drei,rapier,postprocessing}, gsap,
+lenis.
+
+Structure worth knowing before touching it:
+- `config/content.ts` is the ONLY place landing copy lives; the spec's approved
+  Product/Immutable/Merkle/On-Chain/Public/Security text is verbatim there, and
+  the four pipeline labels (Researcher/Validator/Scorer/Reporter) are a content
+  lock — they match the real LangGraph node names.
+- `config/motion.ts` holds the opening's beat table as normalized ranges; the
+  3D reads `beatProgress(t, "punch")` rather than magic scroll numbers, so
+  retiming the cinematic is a one-file edit.
+- `state/landingStore.ts` splits per-frame values (a plain mutable `frame`
+  object, never in React) from low-frequency UI flags (an immutable snapshot
+  behind `useSyncExternalStore`). Nothing on the hot path re-renders.
+- Everything in the scene is a pure function of `frame.introProgress`. That is
+  what makes scrubbing backwards, a paused scroll and ENTER/ESC's 420ms
+  fast-forward all produce correct state with no separate "skip" code path.
+
+**Four real bugs found only by running it in a browser**, all fixed:
+1. **`<shaderMaterial uniforms={obj}>` does not adopt `obj`** — the material
+   ends up with its own uniforms object, so per-frame mutation of the one you
+   created is a silent no-op. Every custom shader on the page was frozen at its
+   initial values: the monolith never ignited, the energy wave never expanded,
+   the rocks never charged. There is no error and no warning; it reads like a
+   maths bug in the shader. Fixed via `three/useMutable.ts::liveUniforms`,
+   which routes writes through a material ref — use it for any new shader here.
+2. **`smoothstep(edge0, edge1, x)` with `edge0 >= edge1` is UNDEFINED in GLSL
+   ES** and produced nothing on this driver. 11 sites were written that way.
+   All inverted ramps are now spelled `1.0 - smoothstep(lo, hi, x)`.
+3. **GSAP's `lagSmoothing` stretched the Quick View resolve indefinitely** on
+   slow frames (advancing tween time by a nominal 33ms per frame once a frame
+   exceeds ~500ms), leaving the page stuck mid-resolve. The resolve is now
+   driven from `performance.now()` on a bare rAF, with a watchdog, and
+   `resolvingRef` is cleared on effect teardown — an interrupted resolve used
+   to poison every later ENTER/ESC.
+4. **The camera jumped to the Product world the instant the opening resolved**,
+   blacking out the hero. `frame.activeWorld` was being set from the
+   entrance-progress triggers, which span "top bottom"→"bottom top" and so
+   count a section as active the moment one pixel enters. Active-world is now
+   decided in one place (`useSectionNavigation`, centre-based).
+
+`ClientShell.tsx` change (the one genuinely-required edit outside the landing
+directory): `/`, `/coming-soon` and `/pricing` are now MARKETING_PATHS —
+public, and rendered bare without the product's terminal chrome. Also fixed a
+real bug found in passing: the shell polled `GET /chain-status` every 5s on
+those routes, where nothing could display it, so every anonymous landing-page
+visitor hammered the API with connection-refused retries.
+
+`eslint.config.mjs` disables `react-hooks/immutability` and `react-hooks/refs`
+for `components/landing/three/**` only. Those React Compiler rules assume
+values are immutable outside render; R3F's `useFrame` runs outside React's
+cycle and its entire job is mutating long-lived objects in place. Scoped to
+that directory so the rules keep full force everywhere else.
+
+Verified against a real production build (`next start`) driven with Chrome:
+30/30 automated acceptance checks from the spec's §21 list pass, repeatedly —
+hero UI hidden until the opening resolves, no visible Skip button, ENTER/ESC
+Quick View resolving in ~420-650ms into normal mode, the pin spacer reclaimed
+(13244px → 7844px document height) with no scroll lock, the awakening being
+one-way, feature cards and navbar navigating to their sections, both Coming
+Soon routes shipping no WebGL, the Pricing cinematic settling, reduced-motion
+starting at the awakened hero with no pin created, and mobile nav labels
+visible without hover with touch scrolling unblocked. Existing app routes
+re-checked: unauthenticated `/dashboard` still redirects to `/auth`.
+
+Known/deliberate: Docs, Log In and Get Started all point at `/coming-soon`
+because §14 of the spec says so — the real `/auth` page still exists and works,
+so pointing them there is a one-line edit in `config/content.ts` when wanted.
+Assets are procedural placeholders (spec §17 permits this); `config/assets`
+does not exist yet — swapping in real GLBs means replacing meshes in
+`three/Character.tsx` and `three/Monolith.tsx` and mapping the same beats onto
+clip times.
+
 ### Later same day (2026-08-20): Phase 5 pre-flight — Brevo enabled for
 real, Grafana Cloud credentials actually wired in, three stale processes
 found and killed

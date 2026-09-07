@@ -1,0 +1,87 @@
+/* Plain marketing landing page ("/"). Color tokens are scoped to .mkt-page
+   only — deliberately separate from lib/constants.ts's `C` (the green/teal
+   terminal palette shared by dashboard/audit/auth/history/leaderboard/
+   trust-scores/verify), which stays untouched. Everything else on this page
+   is inline styles that read these same custom properties via var(). */
+
+.mkt-page {
+  --mkt-bg: #020711;
+  --mkt-bg2: #050b16;
+  --mkt-surface: #07111f;
+  --mkt-surface-elevated: #0a1628;
+
+  --mkt-cyan: #22d3ee;
+  --mkt-cyan-bright: #38e8ff;
+  --mkt-cyan-dim: rgba(34, 211, 238, 0.55);
+  --mkt-blue: #2f80ff;
+  --mkt-blue-deep: #155eef;
+  --mkt-ice: #ddf7ff;
+
+  --mkt-text: #d8e6ea;
+  --mkt-text-secondary: #748a96;
+  --mkt-text-muted: #536771;
+
+  --mkt-border-subtle: rgba(34, 211, 238, 0.2);
+  --mkt-border-strong: rgba(34, 211, 238, 0.38);
+  --mkt-divider: rgba(34, 211, 238, 0.1);
+  --mkt-glow-cyan: rgba(34, 211, 238, 0.25);
+  --mkt-glow-blue: rgba(47, 128, 255, 0.3);
+}
+
+.mkt-nav-link {
+  color: var(--mkt-text-secondary);
+  transition: color 0.15s;
+}
+
+.mkt-nav-link:hover {
+  color: var(--mkt-text);
+}
+
+.mkt-btn-primary {
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+
+.mkt-btn-primary:hover {
+  box-shadow: 0 6px 20px var(--mkt-glow-cyan), 0 10px 32px var(--mkt-glow-blue);
+  transform: translateY(-1px);
+}
+
+.mkt-btn-secondary {
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.mkt-btn-secondary:hover {
+  border-color: var(--mkt-border-strong);
+  color: var(--mkt-text);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.mkt-pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.mkt-security-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+}
+
+.mkt-card {
+  background: var(--mkt-surface);
+  border: 1px solid var(--mkt-divider);
+  border-radius: 10px;
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.mkt-card:hover {
+  border-color: var(--mkt-border-subtle);
+  transform: translateY(-2px);
+}
+
+@media (max-width: 640px) {
+  .mkt-hero-title {
+    font-size: clamp(2.2rem, 10vw, 3rem) !important;
+  }
+}

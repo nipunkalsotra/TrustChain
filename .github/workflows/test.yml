@@ -16,20 +16,29 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Foundry
+        # Pinned: unpinned, this installs whatever is "latest" at run time.
+        # v1.8.0 flipped --isolate and dynamic test linking on by default,
+        # which silently broke `forge snapshot --check` here (every test's
+        # gas cost shifted, e.g. CI run 33726774238) on a PR that never
+        # touched contracts/ at all — not a contract or test bug, just an
+        # unpinned CI default drifting out from under a committed baseline.
+        # Two independent fixes converged on this same root cause: pinning
+        # to 1.7.1 alone also works (that's the version .gas-snapshot was
+        # originally generated with, and it predates isolate/dynamic-test-
+        # linking defaulting on). v1.8.1 was kept instead — confirmed
+        # locally with a clean `forge snapshot --check` (0 diffs) and
+        # `forge test` (147/147; the invariant-campaign-consolidation
+        # change in v1.8 reports 5 fewer than 1.7.1's 151, not a dropped
+        # test) — because foundry.toml's isolate/dynamic_test_linking
+        # flags (see that file's comment) make gas accounting
+        # reproducible regardless of which Foundry version runs the
+        # suite, and 1.8+ adds first-class Monad execution support,
+        # directly relevant to this project's own testnet. Bump
+        # deliberately (and regenerate .gas-snapshot alongside) when
+        # there's a reason to, not silently.
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned, not "stable" — an unpinned "stable" default drifted to a
-          # newer Foundry release between whenever contracts/.gas-snapshot was
-          # last regenerated and 2026-09-03, producing gas numbers that no
-          # longer matched the committed snapshot on a PR that never touched
-          # contracts/ at all (CI run 33726774238, "Check gas snapshot for
-          # regressions" step). Confirmed locally: forge 1.7.1 is the only
-          # version verified to reproduce the committed .gas-snapshot with a
-          # clean `forge snapshot --check` exit 0 alongside a clean
-          # `forge test` (151/151) — pinning here removes that whole class of
-          # false-positive CI failure. Bump deliberately (and regenerate
-          # .gas-snapshot alongside) when there's a reason to, not silently.
-          version: 1.7.1
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
@@ -255,11 +264,11 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -r requirements-dev.txt
         working-directory: backend
       - name: Install Foundry
+        # Pinned — see the "Foundry project" job's own "Install Foundry"
+        # step near the top of this file for why.
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned — see the "Foundry project" job's own "Install Foundry"
-          # step near the top of this file for why.
-          version: 1.7.1
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
@@ -540,11 +549,11 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Foundry
+        # Pinned — see the "Foundry project" job's own "Install Foundry"
+        # step near the top of this file for why.
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned — see the "Foundry project" job's own "Install Foundry"
-          # step near the top of this file for why.
-          version: 1.7.1
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # forge's own cache/ (compiler input/output hashes) + out/ (compiled
         # artifacts) — keyed on the actual contract sources so an unrelated
