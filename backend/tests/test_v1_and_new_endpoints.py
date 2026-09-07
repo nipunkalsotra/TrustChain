@@ -22,7 +22,6 @@ with test_anchor_worker.py) since they exercise real on-chain writes.
 """
 
 import asyncio
-import json
 import uuid
 
 from web3 import Web3
@@ -104,32 +103,22 @@ def test_v1_runs_post_is_an_alias_for_run_agent(client, monkeypatch):
     assert r.status_code == 422
 
 
-def test_v1_runs_stream_is_an_alias_for_stream(client, monkeypatch):
-    # GET /stream/{run_id} long-polls Redis for up to 120s on an unknown
-    # run_id before yielding its own timeout error event — same
-    # short-timeout monkeypatch test_sse.py's own tests use, so this
-    # proves the ALIAS resolves to the identical handler without
-    # actually waiting out that real 120s (see run_events.read_events).
-    import main
-    import run_events as run_events_module
+def test_v1_runs_stream_is_an_alias_for_stream(client):
+    # Phase 5: GET /stream/{run_id} (and this /v1 alias) now requires a
+    # signed, run-scoped token (auth.create_stream_token) — a run_id with
+    # no matching DB row 403s immediately via db.get_run's cross-check
+    # rather than opening a connection at all (see
+    # tests/test_sse.py::test_stream_rejects_a_run_id_that_does_not_exist,
+    # which covers the base /stream/{run_id} path this alias must behave
+    # identically to). Proving the alias resolves to the IDENTICAL handler
+    # is exactly this: same token, same nonexistent run_id, same rejection.
+    import auth
 
-    original_read_events = run_events_module.read_events
+    user = seed_user_and_token(email="v1_stream_alias@example.com")
+    token = auth.create_stream_token("nonexistent-run-id", user["projectId"], user["email"])
 
-    async def _short_timeout_read_events(run_id, timeout_seconds=120):
-        async for evt in original_read_events(run_id, timeout_seconds=1):
-            yield evt
-
-    monkeypatch.setattr(main.run_events, "read_events", _short_timeout_read_events)
-
-    with client.stream("GET", "/v1/runs/nonexistent-run-id/stream") as r:
-        assert r.status_code == 200
-        assert r.headers["content-type"].startswith("text/event-stream")
-        lines = [line for line in r.iter_lines() if line.startswith("data: ")]
-
-    assert len(lines) == 1
-    event = json.loads(lines[0].removeprefix("data: "))
-    assert event["type"] == "error"
-    assert "timeout" in event["message"]
+    r = client.get(f"/v1/runs/nonexistent-run-id/stream?token={token}")
+    assert r.status_code == 403
 
 
 # ── POST /agents, GET /agents/{id}/verify ────────────────────────────────
@@ -238,6 +227,63 @@ def test_list_agents_reflects_indexed_registrations_and_revocations(client, chai
     with_revoked = client.get("/agents", params={"include_revoked": "true"}, headers=headers).json()
     revoked_entry = next(a for a in with_revoked["agents"] if a["agentId"] == agent_a)
     assert revoked_entry["isActive"] is False
+
+
+@requires_anvil
+def test_reregistering_a_revoked_agent_does_not_reactivate_it(client, chain_settings):
+    """Regression test for a real, confirmed discrepancy: main.py's
+    GET /agents docstring used to claim "a revoked agent_id can be
+    re-registered fresh" — false. AgentIdentityRegistryV2.registerAgent()'s
+    already-registered branch (contracts/src/v2/AgentIdentityRegistryV2.sol)
+    updates codeHash/modelName/modelVersion but never touches isActive;
+    nothing in that deployed contract ever sets isActive back to true once
+    revokeAgent() has cleared it. Revocation is permanent BY CONSTRUCTION
+    on the contract that's actually live — this proves it end-to-end
+    (register -> revoke -> register again with a DIFFERENT hash -> still
+    inactive, and verify still fails), not just by reading the Solidity."""
+    user = seed_user_and_token(f"reregister_revoked_{uuid.uuid4().hex[:8]}@example.com", "ReregisterRevokedTest")
+    headers = _auth_headers(user["token"])
+
+    agent_id = _unique_agent_id()
+    original_config = {"agentId": agent_id, "model": "gpt-4o", "version": "2026-01"}
+    original_hash = _code_hash_for(original_config)
+
+    r = client.post(
+        "/agents",
+        json={"agent_id": agent_id, "code_hash": original_hash, "model": "gpt-4o", "version": "2026-01"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    revoke = client.delete(f"/agents/{agent_id}", headers=headers)
+    if revoke.status_code == 404:
+        from blockchain import identity_writer
+        run(identity_writer.revoke_agent(user["projectId"], agent_id))
+    else:
+        assert revoke.status_code == 200, revoke.text
+
+    v = client.get(f"/agents/{agent_id}/verify", params={"code_hash": original_hash}, headers=headers)
+    assert v.json()["isActive"] is False
+
+    # Re-register the SAME agent_id with a genuinely different hash — the
+    # "re-registration" a stale doc claimed would reactivate it.
+    new_config = {"agentId": agent_id, "model": "gpt-4o", "version": "2026-02"}
+    new_hash = _code_hash_for(new_config)
+    r2 = client.post(
+        "/agents",
+        json={"agent_id": agent_id, "code_hash": new_hash, "model": "gpt-4o", "version": "2026-02"},
+        headers=headers,
+    )
+    assert r2.status_code == 200, r2.text
+
+    # The hash DID update (registerAgent's already-registered branch always
+    # updates codeHash/model, regardless of isActive) — but the agent is
+    # still inactive, and verification against the NEW hash still fails.
+    v2 = client.get(f"/agents/{agent_id}/verify", params={"code_hash": new_hash}, headers=headers)
+    result = v2.json()
+    assert result["hashMatches"] is True, "codeHash should update on re-registration"
+    assert result["isActive"] is False, "revocation must stay permanent — re-registering must not reactivate"
+    assert result["isValid"] is False, "isValid requires BOTH isActive and hashMatches"
 
 
 @requires_anvil

@@ -319,6 +319,18 @@ class AnchorBatch(Base):
     # project see its own real cumulative on-chain spend (GET /gas-spend).
     gas_used:         Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     gas_price_wei:    Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # The content-addressed URI (e.g. "ipfs://Qm...") a batch's evidence
+    # manifest was actually published to — see evidence/manifest.py for
+    # what the manifest contains (leaf hashes, root, proof-reconstruction
+    # metadata; never raw prompts/outputs/PII) and evidence/backends/ for
+    # the pluggable publisher. NULL means no evidence was published —
+    # either evidence_publisher_backend=disabled (the default) or a real
+    # publish attempt failed; this column is never a fabricated value
+    # standing in for either case. This IS what gets passed as
+    # AgentAuditLogV2.anchorBatch()'s metaURI param, persisted here BEFORE
+    # that call so a crash between "published" and "anchored on-chain"
+    # doesn't lose track of where the manifest actually landed.
+    evidence_cid:     Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_error:       Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at:       Mapped[int] = mapped_column(BigInteger, nullable=False)
     submitted_at:     Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

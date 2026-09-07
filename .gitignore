@@ -17,6 +17,8 @@ contracts/lcov.info
 .env
 .env.*
 !.env.example
+!.env.production.example
+!**/.env.production.example
 
 # ── Python ───────────────────────────────────────────────────────────────────
 venv/

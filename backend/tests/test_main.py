@@ -476,6 +476,12 @@ def test_error_responses_carry_a_stable_machine_readable_error_code(client):
     assert bad_login.status_code == 401
     assert bad_login.json()["error_code"] == "invalid_credentials"
 
+    # The signup above (P1: cookie-based auth) left a genuinely valid
+    # tc_access cookie sitting in this client's jar — the failed login
+    # just above never touched it (main.py's login() only sets cookies on
+    # the success path). Clear it explicitly so this really is an
+    # unauthenticated request, not one riding on a leftover session cookie.
+    client.cookies.clear()
     no_auth = client.get("/runs")
     assert no_auth.status_code == 401
     assert no_auth.json()["error_code"] == "missing_bearer_token"

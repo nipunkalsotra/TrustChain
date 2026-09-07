@@ -8,19 +8,28 @@ unprefixed (legacy) and under `/v1` (canonical), pointing at identical
 handlers (ADR-0005) — call either; `/v1` is the one to prefer for new
 frontend code.
 
-Auth column: `JWT` = human session token only (`Authorization: Bearer
-<token>` from signup/login); `JWT or key` = also accepts a project API
-key (`tc_live_.../tc_test_...`); `none` = unauthenticated by design.
+Auth column: `JWT` = human session — EITHER an `Authorization: Bearer
+<token>` header (SDK/CLI/any Bearer-based caller) OR the browser's own
+`tc_access` HttpOnly cookie (P1: cookie-based auth, replacing the old
+localStorage token — see refresh.py/auth.py's module docstrings); `JWT or
+key` = also accepts a project API key (`tc_live_.../tc_test_...`,
+Authorization header only — a cookie never carries a raw API key); `none`
+= unauthenticated by design. A request authenticated via cookie (not
+Bearer) must ALSO carry a matching `X-CSRF-Token` header on any unsafe
+method (POST/PUT/PATCH/DELETE) — see `_csrf_protection_middleware` in
+main.py; the value to send is the (non-HttpOnly, JS-readable) `tc_csrf`
+cookie's own value, double-submit style. Bearer/API-key callers never need
+this header, on any endpoint.
 
 ## Auth & account lifecycle
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /auth/signup` | none | Optional `org_name`/`project_name`/`invite_token`. Returns `{token, name, email}`. |
-| `POST /auth/login` | none | Credential-stuffing backoff per account+IP. |
-| `POST /auth/token-pair` | JWT | Exchanges the primary session JWT for a short-lived access + rotating refresh token pair. |
-| `POST /auth/refresh` | none (refresh token in body) | Rotates a refresh token; reuse of an already-rotated one revokes the whole family. |
-| `POST /auth/logout` | none (refresh token in body) | Revokes the refresh-token family. |
+| `POST /auth/signup` | none | Optional `org_name`/`project_name`/`invite_token`. Body UNCHANGED — still `{token, name, email}` (SDK/CLI compatibility) — but ALSO sets tc_access/tc_refresh/tc_csrf cookies. CSRF-exempt (see the middleware's own comment: this establishes a session, doesn't act on an existing one). |
+| `POST /auth/login` | none | Credential-stuffing backoff per account+IP. Same body-unchanged-but-also-sets-cookies shape and CSRF exemption as signup. |
+| `POST /auth/token-pair` | JWT | Exchanges the primary session JWT for a short-lived access + rotating refresh token pair (JSON only — no cookie equivalent; the browser gets its pair directly from login/signup). |
+| `POST /auth/refresh` | none — refresh token via JSON body (SDK/CLI) OR the `tc_refresh` cookie (browser, empty body) | Rotates a refresh token; reuse of an already-rotated one revokes the whole family. Cookie-driven calls need the CSRF header like any other unsafe cookie request. |
+| `POST /auth/logout` | none — same body-or-cookie fallback as refresh | Revokes the refresh-token family and clears all three session cookies. |
 | `POST /auth/resend-verification` **NEW** | JWT | `{"ok": true, "alreadyVerified": bool}` — a no-op, not an error, once already verified. |
 | `POST /auth/verify-email/{token}` **NEW** | none | Token from the verification email. `400 verification_token_invalid` if bad/expired/used. |
 | `POST /auth/forgot-password` **NEW** | none | Body `{"email"}`. **Always** `{"ok": true}` — never reveals whether the account exists. |
@@ -71,7 +80,8 @@ Valid scopes: `logs:write`, `runs:read`, `runs:write`, `agents:register`,
 | Method & path | Auth | Notes |
 |---|---|---|
 | `POST /run-agent` (`POST /v1/runs`) | JWT or key (`runs:write`) | Starts TrustChain's own 4-agent pipeline. Returns immediately; poll or stream. |
-| `GET /stream/{run_id}` (`GET /v1/runs/{id}/stream`) | none | SSE — deliberately unauthenticated (browser `EventSource` can't send a header). |
+| `GET /stream/{run_id}` (`GET /v1/runs/{id}/stream`) | `token` query param | SSE — browser `EventSource` can't send a header, so this takes a short-lived (5 min), run-scoped signed token instead (`?token=...`), embedded in `POST /run-agent`'s `stream_url` response field. Never construct this URL from just a `run_id` — a bare `GET /stream/{run_id}` with no token 401s. |
+| `POST /runs/{run_id}/stream-token` | JWT or key (`runs:read`) | Mints a fresh stream token for a run you already own — for reconnecting after the original token expires. 404s (not 403) for a run belonging to another project, same as `GET /runs/{run_id}`. |
 | `GET /runs` | JWT or key (`runs:read`) | Project-scoped run history. |
 | `GET /runs/{run_id}` | JWT or key (`runs:read`) | |
 | `POST /agents` | JWT or key (`agents:register`) | On-chain identity registration. |

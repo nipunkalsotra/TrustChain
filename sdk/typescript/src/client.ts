@@ -157,6 +157,15 @@ export class TrustChainClient {
     return this.request("GET", `/runs/${encodeURIComponent(runId)}`);
   }
 
+  /** Mints a fresh GET /stream/{run_id} token for a run this client's
+   * credential already owns — for stream()ing a run whose original
+   * runAgent()-returned stream_url token has expired (5 minutes) or was
+   * never held in the first place (e.g. `trustchain stream <run-id>` in
+   * cli.ts, given only a bare run id typed by a user). */
+  async getStreamToken(runId: string): Promise<{ stream_url: string }> {
+    return this.request("POST", `/runs/${encodeURIComponent(runId)}/stream-token`);
+  }
+
   async listRuns(limit = 50): Promise<{ runs: unknown[]; total: number }> {
     return this.request("GET", "/runs", { params: { limit } });
   }
@@ -251,11 +260,15 @@ export class TrustChainClient {
   }
 
   /**
-   * Yields parsed SSE events for a run as they arrive. Deliberately
-   * unauthenticated on the server side (see main.py's stream_events
-   * docstring — browser EventSource can't send an Authorization
-   * header), so this doesn't send the API key either; it only needs
-   * the run_id, same as the browser frontend.
+   * Yields parsed SSE events for a run as they arrive. GET /stream/{run_id}
+   * requires a short-lived, run-scoped `token` query param (backend/auth.py's
+   * create_stream_token) — `streamUrl` must be the relative
+   * `stream_url` field `runAgent()`'s response already carries (e.g.
+   * `/stream/{run_id}?token=...`), not something reconstructed from just
+   * runId. The token expires after 5 minutes; POST /runs/{run_id}/stream-token
+   * mints a fresh one for a reconnect this SDK doesn't currently implement
+   * (runs typically finish well inside that window — see runAndWait, which
+   * this stream() feeds).
    *
    * Consumes the stream to its NATURAL end (connection close) rather
    * than returning as soon as it sees a `type: "run_complete"` or
@@ -276,7 +289,7 @@ export class TrustChainClient {
    * Raises StreamTimeoutError if the stream goes quiet for longer than
    * `timeoutMs` without the connection closing.
    */
-  async *stream(runId: string, timeoutMs = DEFAULT_STREAM_TIMEOUT_MS): AsyncGenerator<SseEvent, void, void> {
+  async *stream(runId: string, streamUrl: string, timeoutMs = DEFAULT_STREAM_TIMEOUT_MS): AsyncGenerator<SseEvent, void, void> {
     const controller = new AbortController();
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -291,7 +304,7 @@ export class TrustChainClient {
     resetIdleTimer();
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/stream/${encodeURIComponent(runId)}`, { signal: controller.signal });
+      response = await fetch(`${this.baseUrl}${streamUrl}`, { signal: controller.signal });
     } catch (e) {
       if (idleTimer) clearTimeout(idleTimer);
       if (timedOut) throw new StreamTimeoutError(`stream for run ${runId} timed out after ${timeoutMs}ms with no terminal event`);
@@ -344,7 +357,7 @@ export class TrustChainClient {
   async runAndWait(task: string, timeoutMs = DEFAULT_STREAM_TIMEOUT_MS): Promise<SseEvent | undefined> {
     const started = await this.runAgent(task);
     let finalEvent: SseEvent | undefined;
-    for await (const event of this.stream(started.run_id, timeoutMs)) {
+    for await (const event of this.stream(started.run_id, started.stream_url, timeoutMs)) {
       finalEvent = event;
     }
     return finalEvent;

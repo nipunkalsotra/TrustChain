@@ -35,6 +35,7 @@ class ErrorCode(str, Enum):
     INVALID_TOKEN = "invalid_token"
     INVALID_API_KEY = "invalid_api_key"
     INSUFFICIENT_SCOPE = "insufficient_scope"
+    CSRF_TOKEN_INVALID = "csrf_token_invalid"
 
     # Rate limiting / login backoff (rate_limit.py)
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"

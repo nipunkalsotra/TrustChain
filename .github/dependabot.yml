@@ -1,4 +1,20 @@
 version: 2
+
+# Every ecosystem below groups its own minor+patch updates into ONE weekly
+# PR instead of one PR per package — this is the actual fix for "dozens of
+# stale PRs piling up": a repo with this many ecosystem/directory
+# combinations (13) generates a lot of individual Dependabot PRs on its
+# own even before counting how many packages update in a typical week: at
+# one PR per package per week, that backlog was structural, not a team
+# discipline problem. A major-version bump is deliberately NOT grouped
+# (grouping's default `update-types` already only includes minor/patch
+# unless major is added) — it still opens on its own, one PR at a time,
+# because a major bump is exactly the "review and test in isolation, don't
+# bundle it with 5 unrelated patch bumps" case (see docs/implementation-
+# hardening-plan.md §9's real example: Next.js 16.2.7 -> 16.3.4 turned out
+# to be a minor/patch fix for a real CVE, not the major-version risk an
+# older comment assumed — that distinction only matters if majors stay
+# ungrouped and individually reviewable).
 updates:
   # ── Python ────────────────────────────────────────────────────────────
   - package-ecosystem: pip
@@ -6,67 +22,121 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      backend-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pip
     directory: /sdk/python
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      sdk-python-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pip
     directory: /sdk/python-cli
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      sdk-python-cli-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pip
     directory: /mcp_servers/blockchain
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      mcp-blockchain-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pip
     directory: /mcp_servers/web_search
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      mcp-web-search-minor-patch:
+        update-types: ["minor", "patch"]
 
   # ── JavaScript/TypeScript ────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      root-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      frontend-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /sdk/typescript
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      sdk-typescript-minor-patch:
+        update-types: ["minor", "patch"]
 
   # ── Docker base images ───────────────────────────────────────────────
   - package-ecosystem: docker
     directory: /backend
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker-backend-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
     directory: /mcp_servers/blockchain
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker-mcp-blockchain-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
     directory: /mcp_servers/web_search
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker-mcp-web-search-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
     directory: /docker
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker-images-minor-patch:
+        update-types: ["minor", "patch"]
 
   # ── GitHub Actions ────────────────────────────────────────────────────
+  # Deliberately NOT grouped: an Actions version bump landing silently
+  # alongside others is exactly what already broke gas-snapshot CI once
+  # this session (see docs/implementation-hardening-plan.md §3 — an
+  # unpinned foundry-toolchain "stable" drift) — these are few enough in
+  # number that one-PR-per-action isn't backlog-generating on its own, and
+  # the whole point of the Foundry-pin incident is that Actions updates
+  # deserve MORE individual scrutiny than average, not less.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 10

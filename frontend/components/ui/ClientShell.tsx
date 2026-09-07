@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter, usePathname } from "next/navigation"
 import Link from "next/link"
-import { getChainStatus } from "@/lib/api"
+import { getChainStatus, logout as apiLogout } from "@/lib/api"
 import { getSession, clearSession, type Session } from "@/lib/auth"
 import { Dot, Ticker } from "@/components/ui/TrustChainUI"
 import { C } from "@/lib/constants"
@@ -70,6 +70,13 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     }, [pathname, isMarketing])
 
     const logout = () => {
+        // Revokes the refresh-token family and clears the session cookies
+        // server-side (backend/refresh.py's revoke_family_for_token) —
+        // clearing only the local display shadow would leave tc_access
+        // valid until its own 15-minute expiry. Fire-and-forget: the local
+        // UI state below is what actually gates the redirect, so a slow or
+        // failed network call here shouldn't block logging out locally.
+        void apiLogout()
         clearSession()
         setLocalSession(null)
         router.replace("/auth")

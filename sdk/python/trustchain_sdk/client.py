@@ -200,6 +200,13 @@ class TrustChainClient(_BaseClient):
             body["agent_code_hash"] = agent_code_hash
         return self._request("POST", "/steps", json=body, headers=headers)
 
+    def get_stream_token(self, run_id: str) -> dict:
+        """Mints a fresh GET /stream/{run_id} token for a run this
+        client's API key/JWT already owns — POST /run-agent's own
+        stream_url already carries one; this is for stream()ing a run id
+        by itself (that original token expired, or was never held)."""
+        return self._request("POST", f"/runs/{run_id}/stream-token")
+
     def get_step_proof(self, step_id: int) -> dict:
         return self._request("GET", f"/steps/{step_id}/proof")
 
@@ -236,12 +243,17 @@ class TrustChainClient(_BaseClient):
         the endpoint simply ignores)."""
         return self._request("GET", "/stats")
 
-    def stream(self, run_id: str, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS) -> Iterator[dict]:
-        """Yields parsed SSE events for a run as they arrive. Deliberately
-        unauthenticated on the server side (see main.py's stream_events
-        docstring — browser EventSource can't send an Authorization
-        header), so this doesn't send the API key either; it only needs
-        the run_id, same as the browser frontend.
+    def stream(
+        self, run_id: str, stream_url: Optional[str] = None, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS,
+    ) -> Iterator[dict]:
+        """Yields parsed SSE events for a run as they arrive. GET
+        /stream/{run_id} requires a short-lived, run-scoped `token` query
+        param (backend/auth.py's create_stream_token) — pass the
+        `stream_url` field run_agent()'s response already carries when you
+        have it (run_and_wait does). Omitting stream_url mints a fresh one
+        via get_stream_token() first, so `client.stream(run_id)` alone
+        still works exactly like before this token requirement existed —
+        one extra round trip, not a breaking change.
 
         Consumes the stream to its NATURAL end (connection close) rather
         than returning as soon as it sees a `type: "run_complete"` or
@@ -262,9 +274,11 @@ class TrustChainClient(_BaseClient):
 
         Raises StreamTimeoutError if the stream goes quiet for longer
         than `timeout` without the connection closing."""
+        if stream_url is None:
+            stream_url = self.get_stream_token(run_id)["stream_url"]
         with httpx.Client(base_url=self._base_url, timeout=httpx.Timeout(timeout, connect=10.0)) as stream_client:
             try:
-                with stream_client.stream("GET", f"/stream/{run_id}") as response:
+                with stream_client.stream("GET", stream_url) as response:
                     _raise_for_status(response)
                     for line in response.iter_lines():
                         event = _parse_sse_line(line)
@@ -281,7 +295,7 @@ class TrustChainClient(_BaseClient):
         want this rather than manually wiring run_agent()+stream()."""
         started = self.run_agent(task)
         final_event = None
-        for event in self.stream(started["run_id"], timeout=timeout):
+        for event in self.stream(started["run_id"], started["stream_url"], timeout=timeout):
             final_event = event
         return final_event
 
@@ -339,15 +353,24 @@ class AsyncTrustChainClient(_BaseClient):
         """See TrustChainClient.list_agents's docstring."""
         return await self._request("GET", "/agents", params={"include_revoked": include_revoked})
 
-    async def stream(self, run_id: str, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS) -> AsyncIterator[dict]:
+    async def get_stream_token(self, run_id: str) -> dict:
+        """See TrustChainClient.get_stream_token's docstring."""
+        return await self._request("POST", f"/runs/{run_id}/stream-token")
+
+    async def stream(
+        self, run_id: str, stream_url: Optional[str] = None, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS,
+    ) -> AsyncIterator[dict]:
         """See TrustChainClient.stream's docstring — same "consume to the
         stream's natural end, don't stop early on the pipeline's own
-        error/run_complete event" reasoning applies here identically."""
+        error/run_complete event" reasoning, and same stream_url/token
+        handling, applies here identically."""
+        if stream_url is None:
+            stream_url = (await self.get_stream_token(run_id))["stream_url"]
         async with httpx.AsyncClient(
             base_url=self._base_url, timeout=httpx.Timeout(timeout, connect=10.0)
         ) as stream_client:
             try:
-                async with stream_client.stream("GET", f"/stream/{run_id}") as response:
+                async with stream_client.stream("GET", stream_url) as response:
                     _raise_for_status(response)
                     async for line in response.aiter_lines():
                         event = _parse_sse_line(line)
@@ -361,6 +384,6 @@ class AsyncTrustChainClient(_BaseClient):
     async def run_and_wait(self, task: str, timeout: float = DEFAULT_STREAM_TIMEOUT_SECONDS) -> dict:
         started = await self.run_agent(task)
         final_event = None
-        async for event in self.stream(started["run_id"], timeout=timeout):
+        async for event in self.stream(started["run_id"], started["stream_url"], timeout=timeout):
             final_event = event
         return final_event

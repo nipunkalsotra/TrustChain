@@ -1,8 +1,21 @@
-# TrustChain local development stack: postgres (write + read model), anvil
+# TrustChain LOCAL DEVELOPMENT stack: postgres (write + read model), anvil
 # (local chain — never Monad testnet in CI/dev-by-default), redis (SSE
 # event bus across API replicas + rate limiting — see backend/run_events.py
 # and backend/rate_limit.py), the API, the anchor worker, the indexer, and
 # both MCP servers /run-agent needs to actually complete a pipeline run.
+#
+# NEVER run this file on a public host. Every service's port below is bound
+# to 127.0.0.1 specifically so bringing this up on a machine with a public
+# interface still doesn't expose Postgres/Redis/Anvil/MCP/worker-metrics to
+# the internet — but the credentials in here (trustchain_api_dev_password,
+# Anvil's well-known default account key) are still checked-in, guessable
+# dev-only values, not something a real deployment should ever run with.
+# For a real host, use docker-compose.production.yml instead — a separate,
+# internal-network-only topology with no default credentials (every secret
+# is required via docker-compose.production.yml's `${VAR:?...}` guards,
+# which make `docker compose` itself refuse to start if one is unset) and
+# a TLS reverse proxy as the only public entry point. See that file's own
+# header comment and backend/.env.production.example.
 #
 # The anchor worker and indexer both need V2 contracts already deployed to
 # `anvil` and their addresses recorded at backend/contracts/addresses_v2.json
@@ -22,7 +35,7 @@ services:
       POSTGRES_PASSWORD: trustchain
       POSTGRES_DB: trustchain
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - trustchain_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -36,7 +49,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.anvil
     ports:
-      - "8545:8545"
+      - "127.0.0.1:8545:8545"
     healthcheck:
       # anvil has no HTTP health endpoint; a JSON-RPC eth_blockNumber call
       # is the standard liveness probe for it.
@@ -51,7 +64,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -65,7 +78,7 @@ services:
       - path: ./mcp_servers/web_search/.env
         required: false
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
 
   mcp-blockchain:
     build:
@@ -78,7 +91,7 @@ services:
       - path: ./backend/.env
         required: false
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
 
   api:
     build:
@@ -121,7 +134,7 @@ services:
     volumes:
       - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     # F14 (Graceful shutdown): Docker's own default here is 10s SIGTERM ->
     # SIGKILL, which is LESS than uvicorn's own --timeout-graceful-shutdown
     # (10s, see the Dockerfile CMD) alone — SIGKILL would already have
@@ -186,7 +199,7 @@ services:
     volumes:
       - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
-      - "9101:9101"   # Prometheus /metrics — see backend/observability.py
+      - "127.0.0.1:9101:9101"   # Prometheus /metrics — see backend/observability.py
     depends_on:
       postgres:
         condition: service_healthy
@@ -221,7 +234,7 @@ services:
     volumes:
       - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
-      - "9103:9103"   # Prometheus /metrics — see backend/observability.py
+      - "127.0.0.1:9103:9103"   # Prometheus /metrics — see backend/observability.py
     depends_on:
       postgres:
         condition: service_healthy
@@ -243,7 +256,7 @@ services:
     volumes:
       - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
     ports:
-      - "9102:9102"   # Prometheus /metrics — see backend/observability.py
+      - "127.0.0.1:9102:9102"   # Prometheus /metrics — see backend/observability.py
     depends_on:
       postgres:
         condition: service_healthy
@@ -305,7 +318,7 @@ services:
       - ./docker/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "12345:12345"   # Alloy's own UI (component graph, live debugging)
+      - "127.0.0.1:12345:12345"   # Alloy's own UI (component graph, live debugging)
     depends_on:
       - api
       - anchor-worker

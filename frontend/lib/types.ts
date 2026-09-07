@@ -42,7 +42,7 @@ export interface ChainStatus {
     connected: boolean
     chainId: number
     blockNumber: number
-    rpcUrl: string
+    rpcHost: string
     contractsDeployed: number
 }
 

@@ -46,18 +46,17 @@ async def submit_batch(
     confirm_timeout: int = 60,
     rbf_max_attempts: int = 3,
     rbf_fee_bump_fraction: float = 0.15,
+    meta_uri: str = "",
 ) -> dict:
-    # metaURI: optional IPFS/Arweave content-address for the batch's full
-    # leaf set (AgentAuditLogV2.anchorBatch's 4th param — see its
-    # docstring for what this buys: full public verifiability independent
-    # of TrustChain's own database staying intact, §8.1's "recommended
-    # end state" mitigation for the Merkle-batching data-availability
-    # trade-off). Always "" today — actually pinning the leaf set to
-    # IPFS/Arweave needs a real pinning service account, which is
-    # out of scope here (no such credentials exist for this deployment);
-    # wiring one in later is exactly this one line, not a schema or
-    # contract change.
-    meta_uri = ""
+    # metaURI: optional content-address for the batch's evidence manifest
+    # (AgentAuditLogV2.anchorBatch's 4th param — see evidence/manifest.py
+    # for what it contains: leaf hashes/root/proof-reconstruction
+    # metadata, never raw step content). Caller (anchor_worker/main.py)
+    # has already attempted to publish the manifest and persisted the
+    # resulting evidence_cid BEFORE calling this function — empty string
+    # here means either evidence_publisher_backend=disabled (the default)
+    # or a real publish attempt failed; either way this function never
+    # fabricates a value on its own.
     fn = contract.functions.anchorBatch(batch["run_id_hash"], batch["root_hex"], batch["step_count"], meta_uri)
     submit_start = time.monotonic()
 

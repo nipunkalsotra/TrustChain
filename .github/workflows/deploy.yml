@@ -71,10 +71,15 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned to match test.yml's own pin — see that file's comment on
-          # the same line for why (unpinned "stable" drifted and broke the
-          # gas-snapshot check on a PR that never touched contracts/).
-          version: 1.7.1
+          # Pinned to match test.yml's own pin — see that file's "Install
+          # Foundry" step (top of the "Foundry project" job) for the full
+          # story (unpinned "stable" drifted and broke the gas-snapshot
+          # check on a PR that never touched contracts/). This job doesn't
+          # run the gas-snapshot check itself, but it does `forge build`/
+          # `forge script --broadcast` — keeping it on the same version as
+          # everywhere else avoids ever deploying with a Foundry release
+          # that wasn't the one CI actually validated.
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # Same cache as test.yml's jobs — see that file's comment.
         uses: actions/cache@v4
@@ -175,10 +180,10 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned to match test.yml's own pin — see that file's comment on
-          # the same line for why (unpinned "stable" drifted and broke the
-          # gas-snapshot check on a PR that never touched contracts/).
-          version: 1.7.1
+          # Pinned to match test.yml's own pin — see the "staging" job's
+          # own "Install Foundry" step above, or test.yml's "Foundry
+          # project" job, for the full story.
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # Same cache as test.yml's jobs — see that file's comment.
         uses: actions/cache@v4

@@ -28,9 +28,43 @@ from blockchain.resilient_provider import sample_breaker_states
 from config import get_settings
 from db import idempotency, tenancy
 from db.engine import get_sessionmaker
+from evidence.backends.base import EvidencePublishError, get_publisher
+from evidence.manifest import build_manifest
 from logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+async def publish_evidence(session, batch: dict, settings) -> str:
+    """Builds and publishes `batch`'s evidence manifest, persisting the
+    resulting evidence_cid on the anchor_batches row BEFORE the caller
+    ever calls submit_batch() — so a crash between "published" and
+    "anchored on-chain" doesn't lose track of where the manifest actually
+    landed; the batch just gets retried with a fresh (idempotent, since
+    IPFS content-addressing means an identical manifest publishes to the
+    identical CID) publish attempt next time this function runs for it.
+
+    Never raises — a publish failure (disabled backend, missing
+    credentials, a real network/API error) must not block anchoring
+    itself; returns "" in every one of those cases, which becomes
+    anchorBatch()'s metaURI and leaves evidence_cid NULL (see that
+    column's own comment in db/models.py for why NULL, not a
+    placeholder)."""
+    manifest = build_manifest(batch)
+    try:
+        publisher = get_publisher(settings.evidence_publisher_backend)
+        result = await publisher.publish(manifest)
+    except EvidencePublishError as e:
+        logger.warning("evidence_publish_unavailable", batch_id=batch["batch_id"], reason=str(e))
+        return ""
+
+    await session.execute(
+        text("UPDATE anchor_batches SET evidence_cid = :cid WHERE id = :batch_id"),
+        {"cid": result.content_uri, "batch_id": batch["batch_id"]},
+    )
+    await session.commit()
+    logger.info("evidence_published", batch_id=batch["batch_id"], content_uri=result.content_uri)
+    return result.content_uri
 
 
 def make_worker_id() -> str:
@@ -236,6 +270,9 @@ async def run_once(worker_id: str, settings) -> int:
                 continue
 
         async with session_factory() as session:
+            meta_uri = await publish_evidence(session, batch, settings)
+
+        async with session_factory() as session:
             with tracer.start_as_current_span("anchor_batch_submit") as span:
                 span.set_attribute("batch_id", batch["batch_id"])
                 span.set_attribute("run_id", batch["run_id"])
@@ -245,6 +282,7 @@ async def run_once(worker_id: str, settings) -> int:
                         session, batch, contract, signer, w3,
                         rbf_max_attempts=settings.anchor_rbf_max_attempts,
                         rbf_fee_bump_fraction=settings.anchor_rbf_fee_bump_fraction,
+                        meta_uri=meta_uri,
                     )
                     span.set_attribute("tx_hash", result["tx_hash"])
                     span.set_attribute("block_number", result["block_number"])
