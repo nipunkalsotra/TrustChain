@@ -12,6 +12,7 @@ Run:
 """
 
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -64,11 +65,22 @@ def api_key() -> str:
 
 
 def test_run_agent_returns_run_id_and_stream_url(api_key):
+    """stream_url carries a signed, single-run-scoped token as a query
+    param (P1 hardening — see backend/main.py's GET /stream/{run_id}
+    docstring): the bare `/stream/{run_id}` path with no token is the
+    OLD, insecure contract this test used to assert. Parsed via
+    urllib.parse rather than matched as a whole string so this only
+    pins the path and "a token is present", not the token's own value
+    (which is a live credential — never logged/asserted verbatim)."""
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
         result = client.run_agent(f"sdk integration test task {uuid.uuid4().hex}")
         assert result["status"] == "started"
         assert result["run_id"]
-        assert result["stream_url"] == f"/stream/{result['run_id']}"
+        assert result["stream_url"]
+        parsed = urlparse(result["stream_url"])
+        assert parsed.path == f"/stream/{result['run_id']}"
+        token = parse_qs(parsed.query).get("token", [""])[0]
+        assert token
 
 
 def test_get_run_for_unknown_run_id_raises_not_found(api_key):
