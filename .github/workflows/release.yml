@@ -203,7 +203,7 @@ jobs:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -299,7 +299,7 @@ jobs:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install build tooling

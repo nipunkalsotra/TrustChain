@@ -121,7 +121,7 @@ jobs:
           "
         working-directory: contracts
       - name: Set up Python (for Slither)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -255,7 +255,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -417,7 +417,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0   # need real tag history, not the default shallow clone
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -601,7 +601,7 @@ jobs:
           restore-keys: |
             forge-${{ runner.os }}-
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
