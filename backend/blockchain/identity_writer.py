@@ -55,7 +55,7 @@ async def register_agent(project_id: int, agent_id: str, code_hash: str, model: 
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
         receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-        if receipt.status != 1:
+        if receipt["status"] != 1:
             span.set_attribute("error", "reverted")
             raise RuntimeError(f"AgentIdentityRegistryV2.registerAgent reverted for agentId={agent_id}")
 
@@ -86,7 +86,7 @@ async def revoke_agent(project_id: int, agent_id: str) -> str:
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
         receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-        if receipt.status != 1:
+        if receipt["status"] != 1:
             span.set_attribute("error", "reverted")
             raise RuntimeError(f"AgentIdentityRegistryV2.revokeAgent reverted for agentId={agent_id}")
 

@@ -32,6 +32,7 @@ import auth
 import auth_pwned
 import db
 import deprecation
+from db.engine import current_project_id
 import observability
 import rate_limit
 import refresh
@@ -45,7 +46,7 @@ from db import orgs as orgs_db
 from db import password_reset as password_reset_db
 from errors import ApiError, ErrorCode
 from config import get_settings
-from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
+from logging_config import configure_logging, get_logger, bind_run_id, bind_tenant_context, CorrelationIdMiddleware
 from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
 from agents.base import make_run_id, log_step
@@ -1053,6 +1054,28 @@ async def stream_events(run_id: str, request: Request, token: Optional[str] = Qu
         raise ApiError(401, "invalid or expired stream token", ErrorCode.INVALID_TOKEN)
     if stream_claims["run_id"] != run_id:
         raise ApiError(403, "stream token does not match this run", ErrorCode.INVALID_TOKEN)
+
+    # This endpoint can't use auth.get_current_principal (browser EventSource
+    # can't attach an Authorization header — see the module comment above),
+    # which is the ONLY place that normally sets db/engine.py's
+    # current_project_id ContextVar for RLS. Without this, every query below
+    # runs with no app.current_project_id GUC set at all under the RLS-bound
+    # trustchain_api role (docker-compose.yml's real api service, and any
+    # production deployment) — Postgres's tenant_isolation policy then hides
+    # EVERY row unconditionally, including the caller's own run, so a
+    # perfectly valid signed stream token would 403 deterministically, every
+    # time. Found via CI: the "authorised stream succeeds" assertion in
+    # frontend/e2e/smoke.spec.ts got a real 403, not the flaky 401-vs-429
+    # rate-limit race that was the original suspicion — confirmed directly
+    # against Postgres (trustchain_api role, same query with/without this GUC
+    # set in the same transaction: 0 rows vs. 1 row). The stream token's own
+    # signature is exactly the same proof of authorization
+    # get_current_principal derives from a session/API-key JWT, so using its
+    # already-verified project_id claim here is the same trust boundary, not
+    # a new one.
+    current_project_id.set(stream_claims["project_id"])
+    bind_tenant_context(stream_claims["project_id"], None)
+
     # Cross-checks the token's embedded project_id against the run's actual
     # project_id in the database (invariant I7's usual two-layers pattern) —
     # not just trusting what the token claims about itself.

@@ -97,7 +97,13 @@ async def submit_batch(
         except Exception:
             base_fee = None
             history = None
-        if base_fee is not None:
+        # base_fee and history are only ever set together (both real, from
+        # the same successful call, or both None from the same except) —
+        # checking both is what actually narrows `history` for the
+        # `history["reward"]` indexing below; checking base_fee alone
+        # leaves history's type unresolved to mypy even though the two
+        # can never disagree at runtime.
+        if base_fee is not None and history is not None:
             rewards = sorted(r[0] for r in history["reward"] if r[0] > 0)
             fresh_priority_fee = max(rewards[len(rewards) // 2], w3.to_wei(1, "gwei")) if rewards else w3.to_wei(1, "gwei")
             if previous is not None:
@@ -173,7 +179,17 @@ async def submit_batch(
             # Same nonce, bumped fee, loop again — this IS the
             # replacement, not a giveup-and-requeue.
 
-    if receipt.status != 1:
+    # Provably non-None here, not a blind assumption: range(1, rbf_max_attempts+1)
+    # is non-empty (rbf_max_attempts >= 1, config.py's ge=1 validator), and
+    # every iteration either assigns a real receipt and breaks (line ~165)
+    # or raises SubmitError on its last attempt (the `if attempt >=
+    # rbf_max_attempts` branch above) — there is no path that lets the loop
+    # exhaust normally while receipt is still None. The assert documents
+    # that invariant for mypy (receipt's declared type is TxReceipt | None,
+    # from the pre-loop sentinel) and fails loudly instead of silently
+    # operating on None if a future edit ever breaks it.
+    assert receipt is not None, "unreachable: loop above always assigns receipt or raises"
+    if receipt["status"] != 1:
         observability.ANCHOR_BATCHES_FAILED_TOTAL.labels(reason="revert").inc()
         raise SubmitError(f"tx {tx_hash_hex} reverted (status=0)")
 
@@ -204,7 +220,7 @@ async def submit_batch(
         sent_tx = await asyncio.to_thread(w3.eth.get_transaction, tx_hash)
         gas_price_wei = sent_tx.get("gasPrice")
 
-    block_hash_hex = "0x" + receipt.blockHash.hex() if receipt.blockHash else None
+    block_hash_hex = "0x" + receipt["blockHash"].hex() if receipt["blockHash"] else None
 
     await session.execute(
         text("""
@@ -214,9 +230,9 @@ async def submit_batch(
             WHERE id = :batch_id
         """),
         {
-            "block_number": receipt.blockNumber, "block_hash": block_hash_hex, "now": _now(), "batch_id": batch["batch_id"],
+            "block_number": receipt["blockNumber"], "block_hash": block_hash_hex, "now": _now(), "batch_id": batch["batch_id"],
             "onchain_anchor_id": onchain_anchor_id,
-            "gas_used": receipt.gasUsed, "gas_price_wei": gas_price_wei,
+            "gas_used": receipt["gasUsed"], "gas_price_wei": gas_price_wei,
         },
     )
     await session.execute(
@@ -232,13 +248,13 @@ async def submit_batch(
         observability.ANCHOR_GAS_PRICE_WEI.observe(gas_price_wei)
 
     return {
-        "tx_hash": tx_hash_hex, "block_number": receipt.blockNumber, "block_hash": block_hash_hex, "status": "confirmed",
+        "tx_hash": tx_hash_hex, "block_number": receipt["blockNumber"], "block_hash": block_hash_hex, "status": "confirmed",
         "onchain_anchor_id": onchain_anchor_id,
         # Real cost of THIS confirmation, for the caller to attribute to
         # the owning org's gas-spend ceiling (db/tenancy.py's
         # record_gas_spend) — same values just written to
         # anchor_batches.gas_used/gas_price_wei above, not recomputed.
-        "gas_used": receipt.gasUsed, "gas_price_wei": gas_price_wei,
+        "gas_used": receipt["gasUsed"], "gas_price_wei": gas_price_wei,
     }
 
 
