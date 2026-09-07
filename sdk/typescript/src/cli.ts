@@ -214,7 +214,7 @@ async function main(): Promise<void> {
         const client = makeClient(args);
         const started = await client.runAgent(task);
         console.log(`started ${started.run_id}`);
-        for await (const event of client.stream(started.run_id)) {
+        for await (const event of client.stream(started.run_id, started.stream_url)) {
           printJson(event);
         }
         break;
@@ -226,7 +226,12 @@ async function main(): Promise<void> {
           process.exit(1);
         }
         const client = makeClient(args);
-        for await (const event of client.stream(runId)) {
+        // Only a bare run id, typed by the user — not the token-bearing
+        // stream_url a runAgent() call would have. Mint a fresh one (this
+        // client's own credential must own the run — see main.py's
+        // POST /runs/{run_id}/stream-token).
+        const { stream_url } = await client.getStreamToken(runId);
+        for await (const event of client.stream(runId, stream_url)) {
           printJson(event);
         }
         break;

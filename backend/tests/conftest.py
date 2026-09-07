@@ -39,6 +39,15 @@ os.environ.setdefault("DATABASE_USE_NULL_POOL", "true")
 # issue, a deterministic one, since alembic upgrade always runs before
 # this line did in the old order.
 os.environ.setdefault("CHECK_PWNED_PASSWORDS", "false")
+# FastAPI's TestClient talks to "http://testserver" — never real TLS — so a
+# Secure-flagged cookie (config.py's cookie_secure, True by default for any
+# real deployment) would be stored by httpx's cookiejar but never RE-SENT
+# on a later request to that same plain-http origin (RFC 6265's own Secure
+# semantics, not a TestClient quirk). Found for real: every cookie-auth
+# test in test_cookie_auth.py 401'd on the second request in the sequence
+# until this was added — same "settle it before get_settings() is ever
+# called" ordering constraint as JWT_SECRET/CHECK_PWNED_PASSWORDS above.
+os.environ.setdefault("COOKIE_SECURE", "false")
 
 
 # ── Self-provisioned Postgres/Redis (Testcontainers) ────────────────────

@@ -16,11 +16,14 @@ Run:
 
 import asyncio
 import json
+import secrets
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, Query, Request
+import jwt
+from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -29,6 +32,7 @@ import auth
 import auth_pwned
 import db
 import deprecation
+from db.engine import current_project_id
 import observability
 import rate_limit
 import refresh
@@ -42,7 +46,7 @@ from db import orgs as orgs_db
 from db import password_reset as password_reset_db
 from errors import ApiError, ErrorCode
 from config import get_settings
-from logging_config import configure_logging, get_logger, bind_run_id, CorrelationIdMiddleware
+from logging_config import configure_logging, get_logger, bind_run_id, bind_tenant_context, CorrelationIdMiddleware
 from blockchain.client import get_bridge
 from agents.pipeline import run_pipeline
 from agents.base import make_run_id, log_step
@@ -186,10 +190,112 @@ async def _deprecation_headers_middleware(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def _referrer_policy_middleware(request: Request, call_next):
+    """GET /stream/{run_id}?token=... carries a live credential in the URL
+    (see that endpoint's own comment) — without a strict Referrer-Policy, a
+    browser navigating away from a page that embedded this URL (e.g. an
+    <a> or a redirect) would include the full URL, token and all, in the
+    Referer header of whatever request that navigation makes. no-referrer
+    applies to every response, not just /stream, since any page could
+    embed any of this API's URLs and none of them should leak via Referer."""
+    response = await call_next(request)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+_CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# Two categories of unsafe POST deliberately do NOT require CSRF, even
+# though a cookie-holding browser can reach both:
+#
+#   1. /auth/login, /auth/signup — these ESTABLISH a session rather than
+#      act on an existing one, so the usual "an attacker's page tricks
+#      your browser into spending YOUR session's authority" CSRF threat
+#      doesn't apply — there's no authority yet at the moment either
+#      fires. Requiring it here would also be self-defeating: tc_csrf is
+#      only ever minted BY a successful login/signup/refresh response, so
+#      a browser's very first login (no session, no tc_csrf cookie yet)
+#      could never satisfy the check regardless.
+#   2. /auth/verify-email/{token}, /auth/reset-password/{token} — gated
+#      entirely by possession of an out-of-band, single-use, emailed
+#      token in the URL path, not by the caller's session (both are
+#      "Unauthenticated by design" per their own docstrings — the whole
+#      point is that the link works from wherever the recipient opens
+#      their email, which is very often NOT the browser tab/session that
+#      originally triggered the email). The token in the path IS this
+#      request's real credential; a stale tc_access cookie just happening
+#      to also be present is incidental, not what's authorizing the action.
+#
+# The practical failure mode both categories avoid: a client whose jar
+# carries ANY tc_access cookie (a stale one from a previous session, or
+# the one this exact flow's own preceding signup call just set) would
+# otherwise get CSRF-blocked here before ever reaching the real
+# business-logic check (wrong password, duplicate email, invalid/already-
+# used verification token, ...) — confirmed for real: every one of these
+# paths was a genuine test failure (a 403 masking the real expected
+# status) before this exemption existed.
+_CSRF_EXEMPT_PATHS = {"/auth/login", "/auth/signup", "/v1/auth/login", "/v1/auth/signup"}
+_CSRF_EXEMPT_PREFIXES = (
+    "/auth/verify-email/", "/v1/auth/verify-email/",
+    "/auth/reset-password/", "/v1/auth/reset-password/",
+)
+
+
+def _csrf_exempt(path: str) -> bool:
+    return path in _CSRF_EXEMPT_PATHS or path.startswith(_CSRF_EXEMPT_PREFIXES)
+
+
+@app.middleware("http")
+async def _csrf_protection_middleware(request: Request, call_next):
+    """Double-submit CSRF check — required ONLY for a request authenticated
+    via the browser's tc_access cookie (P1: cookie-based auth), never for
+    an Authorization: Bearer/API-key caller (SDK/CLI). A CSRF attack works
+    by getting a victim's browser to auto-attach their cookies to a
+    cross-site request the attacker's page originates — it can't forge a
+    custom Authorization header the same way, so a request that already
+    carries one needs no additional CSRF check here.
+
+    Scoped purely by "does this request carry a tc_access cookie" rather
+    than by fully resolving the principal first (which would mean decoding
+    the JWT twice per request, once here and once in the route's own
+    Depends(auth.get_current_principal)) — a request with no tc_access
+    cookie at all can only be a Bearer/API-key caller or an unauthenticated
+    one, both of which the route's own auth dependency rejects/allows on
+    its own merits regardless of what happens here.
+
+    Skips entirely if no tc_access cookie is present, an Authorization
+    header is (the header takes precedence in auth.py's own resolution —
+    same rule applied here for consistency), or the path is CSRF-exempt
+    (see _csrf_exempt's own comment)."""
+    from refresh import ACCESS_COOKIE_NAME, CSRF_COOKIE_NAME
+
+    if (
+        request.method in _CSRF_UNSAFE_METHODS
+        and not _csrf_exempt(request.url.path)
+        and ACCESS_COOKIE_NAME in request.cookies
+        and "authorization" not in request.headers
+    ):
+        cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME)
+        header_csrf = request.headers.get("X-CSRF-Token")
+        if not cookie_csrf or not header_csrf or not secrets.compare_digest(cookie_csrf, header_csrf):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "missing or invalid CSRF token", "error_code": ErrorCode.CSRF_TOKEN_INVALID.value},
+            )
+
+    return await call_next(request)
+
+
 @app.get("/metrics")
-async def metrics():
+async def metrics(x_metrics_token: Optional[str] = Header(None)):
     from fastapi import Response
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+    configured = get_settings().metrics_auth_token
+    if configured and x_metrics_token != configured:
+        raise ApiError(401, "missing or invalid metrics token", ErrorCode.INVALID_TOKEN)
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -437,14 +543,18 @@ class ApiKeyListItem(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 #  POST /auth/signup, POST /auth/login
 #
-#  Response shape and the primary token's lifetime are UNCHANGED from
-#  Phase 1/2.0-2.2 — the deployed frontend depends on both. What changed is
-#  invisible to it: the token now embeds project_id/org_id (auth.py), and
-#  signup provisions a real Organization/Project underneath (db.tenancy).
+#  Response BODY shape and the primary token's lifetime are UNCHANGED from
+#  Phase 1/2.0-2.2 — the SDK/CLI (trustchain-cli's own `login` command
+#  parses body["token"] directly, see sdk/python-cli/trustchain_cli/main.py)
+#  depends on both, and neither is a browser, so neither ever sees or needs
+#  the cookies set alongside it. What's NEW (P1: cookie-based browser auth)
+#  is that this response ALSO sets tc_access/tc_refresh/tc_csrf cookies
+#  (refresh.set_session_cookies) — the Next.js frontend now uses ONLY
+#  those, never body["token"] — see frontend/lib/auth.ts.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/auth/signup", response_model=AuthResponse)
-async def signup(body: SignupRequest, request: Request):
+async def signup(body: SignupRequest, request: Request, response: Response):
     settings = get_settings()
     await rate_limit.enforce_ip_rate_limit(
         request, "signup", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
@@ -510,11 +620,15 @@ async def signup(body: SignupRequest, request: Request):
         email=user["email"], name=user["name"],
         project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],
     )
+    pair = await refresh.issue_token_pair(
+        user["userId"], user["email"], user["name"], user["projectId"], user["orgId"],
+    )
+    refresh.set_session_cookies(response, pair["accessToken"], pair["refreshToken"])
     return AuthResponse(token=token, name=user["name"], email=user["email"])
 
 
 @router.post("/auth/login", response_model=AuthResponse)
-async def login(body: LoginRequest, request: Request):
+async def login(body: LoginRequest, request: Request, response: Response):
     """Credential-stuffing defense (plan §11.3): exponential backoff per
     account AND per IP on failed attempts, checked BEFORE the password
     verification runs — a locked-out attempt shouldn't pay for PBKDF2."""
@@ -531,15 +645,24 @@ async def login(body: LoginRequest, request: Request):
         email=user["email"], name=user["name"],
         project_id=user["projectId"], org_id=user["orgId"], user_id=user["userId"],
     )
+    pair = await refresh.issue_token_pair(
+        user["userId"], user["email"], user["name"], user["projectId"], user["orgId"],
+    )
+    refresh.set_session_cookies(response, pair["accessToken"], pair["refreshToken"])
     return AuthResponse(token=token, name=user["name"], email=user["email"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  POST /auth/token-pair, POST /auth/refresh, POST /auth/logout
 #
-#  Additive short-lived-access + rotating-refresh flow (plan §11.3) — for
-#  the SDK/CLI and any future frontend, not the current web login (see
-#  auth.py's module docstring on why /auth/login stays as it is).
+#  Short-lived-access + rotating-refresh flow (plan §11.3). /auth/refresh
+#  and /auth/logout serve BOTH the SDK/CLI (refresh_token in the JSON
+#  body) and the browser (tc_refresh cookie, body omitted entirely) —
+#  body wins if both are somehow present, same precedence auth.py's
+#  _bearer_or_cookie_token uses. /auth/token-pair itself stays JSON-only:
+#  it exists to let an already-Bearer-authenticated SDK/CLI caller opt
+#  into this flow without a second login, which has no cookie equivalent
+#  (the browser gets its pair directly from /auth/login or /auth/signup).
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/auth/token-pair", response_model=TokenPairResponse)
@@ -557,20 +680,31 @@ async def issue_token_pair(current_user: auth.CurrentUser = Depends(auth.get_cur
 
 
 @router.post("/auth/refresh", response_model=TokenPairResponse)
-async def refresh_token_pair(body: RefreshRequest):
+async def refresh_token_pair(request: Request, response: Response, body: Optional[RefreshRequest] = None):
+    raw_refresh_token = (body.refresh_token if body else None) or request.cookies.get(refresh.REFRESH_COOKIE_NAME)
+    if not raw_refresh_token:
+        raise ApiError(401, "missing refresh token", ErrorCode.INVALID_REFRESH_TOKEN)
     try:
-        pair = await refresh.rotate_refresh_token(body.refresh_token)
+        pair = await refresh.rotate_refresh_token(raw_refresh_token)
     except refresh.RefreshError as e:
         logger.warning("refresh_token_rejected", reason=str(e))
         raise ApiError(401, "invalid, expired, or reused refresh token", ErrorCode.INVALID_REFRESH_TOKEN)
+    # Only re-set cookies for a caller that had one to begin with — an
+    # SDK/CLI caller refreshing via JSON body never gets cookies it never
+    # asked for.
+    if refresh.REFRESH_COOKIE_NAME in request.cookies:
+        refresh.set_session_cookies(response, pair["accessToken"], pair["refreshToken"])
     return TokenPairResponse(
         access_token=pair["accessToken"], refresh_token=pair["refreshToken"], expires_in=pair["expiresIn"]
     )
 
 
 @router.post("/auth/logout")
-async def logout(body: RefreshRequest):
-    await refresh.revoke_family_for_token(body.refresh_token)
+async def logout(request: Request, response: Response, body: Optional[RefreshRequest] = None):
+    raw_refresh_token = (body.refresh_token if body else None) or request.cookies.get(refresh.REFRESH_COOKIE_NAME)
+    if raw_refresh_token:
+        await refresh.revoke_family_for_token(raw_refresh_token)
+    refresh.clear_session_cookies(response)
     return {"ok": True}
 
 
@@ -875,7 +1009,11 @@ async def run_agent(
     _spawn_background_pipeline_run(body.task, run_id, principal.org_id)
     logger.info("run_started", run_id=run_id, actor=principal.actor, project_id=principal.project_id, task=body.task)
 
-    response = RunAgentResponse(run_id=run_id, task=body.task, status="started", stream_url=f"/stream/{run_id}")
+    stream_token = auth.create_stream_token(run_id, principal.project_id, principal.actor)
+    response = RunAgentResponse(
+        run_id=run_id, task=body.task, status="started",
+        stream_url=f"/stream/{run_id}?token={stream_token}",
+    )
 
     if idempotency_key:
         await idempotency.store_response(
@@ -889,22 +1027,60 @@ async def run_agent(
 # ─────────────────────────────────────────────────────────────────────────────
 #  GET /stream/{run_id}  — SSE, backed by Redis Streams (run_events.py)
 #
-#  Deliberately unauthenticated, unlike every other endpoint below: browser
-#  EventSource cannot attach an Authorization header, so the frontend
-#  connects here with nothing but the run_id from POST /run-agent's
-#  response. This predates multi-tenancy and stays as-is (a real fix needs
-#  a short-lived signed stream token the frontend would have to adopt —
-#  out of scope for this backend-only pass). It leaks no listing, only the
-#  live event stream for one specific already-known run_id.
+#  Browser EventSource can't attach an Authorization header, so this can't
+#  use auth.get_current_principal like every other endpoint — instead it
+#  takes a short-lived, single-run-scoped `token` query param
+#  (auth.create_stream_token, minted by POST /run-agent and returned
+#  embedded in `stream_url`; POST /stream-token below mints a replacement
+#  for an already-owned run on reconnect after expiry). This used to accept
+#  nothing but a guessable run_id in the URL path at all — anyone who saw
+#  or guessed one could watch its live events. See
+#  docs/implementation-hardening-plan.md Phase 5.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/stream/{run_id}")
 @v1_only_router.get("/runs/{run_id}/stream")  # Appendix A: GET /v1/runs/{id}/stream
-async def stream_events(run_id: str, request: Request):
+async def stream_events(run_id: str, request: Request, token: Optional[str] = Query(None)):
     settings = get_settings()
     await rate_limit.enforce_ip_rate_limit(
         request, "stream", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
     )
+
+    if not token:
+        raise ApiError(401, "missing stream token", ErrorCode.MISSING_BEARER_TOKEN)
+    try:
+        stream_claims = auth.decode_stream_token(token)
+    except jwt.PyJWTError:
+        raise ApiError(401, "invalid or expired stream token", ErrorCode.INVALID_TOKEN)
+    if stream_claims["run_id"] != run_id:
+        raise ApiError(403, "stream token does not match this run", ErrorCode.INVALID_TOKEN)
+
+    # This endpoint can't use auth.get_current_principal (browser EventSource
+    # can't attach an Authorization header — see the module comment above),
+    # which is the ONLY place that normally sets db/engine.py's
+    # current_project_id ContextVar for RLS. Without this, every query below
+    # runs with no app.current_project_id GUC set at all under the RLS-bound
+    # trustchain_api role (docker-compose.yml's real api service, and any
+    # production deployment) — Postgres's tenant_isolation policy then hides
+    # EVERY row unconditionally, including the caller's own run, so a
+    # perfectly valid signed stream token would 403 deterministically, every
+    # time. Found via CI: the "authorised stream succeeds" assertion in
+    # frontend/e2e/smoke.spec.ts got a real 403, not the flaky 401-vs-429
+    # rate-limit race that was the original suspicion — confirmed directly
+    # against Postgres (trustchain_api role, same query with/without this GUC
+    # set in the same transaction: 0 rows vs. 1 row). The stream token's own
+    # signature is exactly the same proof of authorization
+    # get_current_principal derives from a session/API-key JWT, so using its
+    # already-verified project_id claim here is the same trust boundary, not
+    # a new one.
+    current_project_id.set(stream_claims["project_id"])
+    bind_tenant_context(stream_claims["project_id"], None)
+
+    # Cross-checks the token's embedded project_id against the run's actual
+    # project_id in the database (invariant I7's usual two-layers pattern) —
+    # not just trusting what the token claims about itself.
+    if await db.get_run(run_id, stream_claims["project_id"]) is None:
+        raise ApiError(403, "run does not belong to this token's project", ErrorCode.RUN_NOT_FOUND)
 
     async def event_generator():
         try:
@@ -1195,7 +1371,14 @@ async def chain_status(request: Request):
     await rate_limit.enforce_ip_rate_limit(
         request, "chain_status", settings.ip_rate_limit_capacity, settings.ip_rate_limit_refill_per_second,
     )
-    rpc_url = settings.monad_rpc_url
+    # Never return the raw RPC URL to an unauthenticated caller — some
+    # providers embed an API key/project id in the path or query string
+    # (e.g. https://.../v2/<key>), and this endpoint has no auth at all.
+    # A hostname-only label is enough for the frontend's connection
+    # indicator (it never rendered the full URL either — see
+    # frontend/lib/types.ts's ChainStatus type) without leaking whatever
+    # credential a real deployment's provider URL might carry.
+    rpc_host = urllib.parse.urlparse(settings.monad_rpc_url).hostname or "unknown"
     try:
         bridge = get_bridge()
         # FIX 6: bridge.w3.eth.block_number and chain_id are SYNCHRONOUS.
@@ -1208,7 +1391,7 @@ async def chain_status(request: Request):
             "connected":         True,
             "chainId":           chain_id,
             "blockNumber":       block_number,
-            "rpcUrl":            rpc_url,
+            "rpcHost":           rpc_host,
             "contractsDeployed": 3,
         }
     except Exception as e:
@@ -1219,9 +1402,9 @@ async def chain_status(request: Request):
             "connected":         False,
             "chainId":           0,
             "blockNumber":       0,
-            "rpcUrl":            rpc_url,
+            "rpcHost":           rpc_host,
             "contractsDeployed": 3,
-            "error":             str(e),   # shows in uvicorn log, not UI
+            "error":             "chain connection failed",   # never the raw exception — see /ready's identical rule
         }
 
 
@@ -1389,6 +1572,30 @@ async def get_run(run_id: str, principal: auth.Principal = Depends(auth.get_curr
     return run["result"] if run["result"] is not None else run
 
 
+class StreamTokenResponse(BaseModel):
+    stream_url: str
+
+
+@router.post("/runs/{run_id}/stream-token")
+async def mint_stream_token(run_id: str, principal: auth.Principal = Depends(auth.get_current_principal)):
+    """Mints a fresh GET /stream/{run_id} token for a run the caller
+    already owns — for reconnecting after the original 5-minute token
+    (auth.create_stream_token, minted once by POST /run-agent) expires.
+    Scoped by invariant I7 the same way GET /runs/{run_id} is: a run_id
+    belonging to another project 404s here exactly like it does there,
+    never a 403 that would confirm the run_id exists at all."""
+    auth.require_scope(principal, "runs:read")
+    settings = get_settings()
+    await rate_limit.enforce_read_rate_limit(
+        principal.project_id, settings.read_path_rate_limit_capacity, settings.read_path_rate_limit_refill_per_second,
+    )
+    if await db.get_run(run_id, principal.project_id) is None:
+        raise ApiError(404, f"Run '{run_id}' not found", ErrorCode.RUN_NOT_FOUND)
+
+    stream_token = auth.create_stream_token(run_id, principal.project_id, principal.actor)
+    return StreamTokenResponse(stream_url=f"/stream/{run_id}?token={stream_token}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  POST /agents, GET /agents/{agent_id}/verify — SDK register_agent()/
 #  verify_agent() (plan §7.3/§13.2). Distinct from the pipeline's own
@@ -1432,9 +1639,25 @@ async def list_agents(
     for project X" view — AgentIdentityRegistryV2's registeredKeys is
     deliberately cross-tenant and untouched by the backend, see that
     contract's own comment). Revoked agents are excluded by default
-    (?include_revoked=true to see them too) — a revoked agent_id can be
-    re-registered fresh, so most callers listing "my agents" want the
-    currently-usable set, not history."""
+    (?include_revoked=true to see them too) — most callers listing "my
+    agents" want the currently-usable set, not history.
+
+    Revocation is PERMANENT on the deployed contract, not a suspension:
+    AgentIdentityRegistryV2.registerAgent()'s already-registered branch
+    (isRegistered[key] == true, which a revocation never clears) updates
+    codeHash/modelName/modelVersion but never touches isActive — there is
+    no code path anywhere in that contract that sets isActive back to
+    true once revokeAgent() has set it false. Calling registerAgent()
+    again on a revoked agentId updates its recorded hash/model (emits
+    AgentUpdated) but the agent stays inactive; verifyAgent()/
+    verifyAgentAndLog() keep returning false for it regardless of hash
+    match (see that function's own isActive check). An earlier version of
+    this comment claimed re-registering "makes it fresh" again — that was
+    wrong; corrected to match actual deployed contract behavior rather
+    than the contract being changed to match the old claim (no redeploy,
+    no storage-layout risk). A genuine reactivation path would need a new
+    contract function, deployed deliberately with its own audit trail —
+    not built here."""
     auth.require_scope(principal, "agents:read")
     settings = get_settings()
     await rate_limit.enforce_read_rate_limit(
@@ -1703,7 +1926,10 @@ async def get_me(current_user: auth.CurrentUser = Depends(auth.get_current_user)
 
 
 @router.post("/auth/switch-project")
-async def switch_project(body: SwitchProjectRequest, current_user: auth.CurrentUser = Depends(auth.get_current_user)):
+async def switch_project(
+    body: SwitchProjectRequest, request: Request, response: Response,
+    current_user: auth.CurrentUser = Depends(auth.get_current_user),
+):
     """Mints a FRESH token scoped to a different project the caller
     already holds a membership in — see auth.py's module docstring for
     why this mints a new token rather than mutating the current one."""
@@ -1718,6 +1944,16 @@ async def switch_project(body: SwitchProjectRequest, current_user: auth.CurrentU
         email=current_user.email, name=current_user.name,
         project_id=project["id"], org_id=project["orgId"], user_id=current_user.user_id,
     )
+    # A cookie-authenticated browser session's tc_access cookie still
+    # scopes every subsequent request to the OLD project until this
+    # re-mints it — an SDK/CLI caller (no tc_access cookie, authenticated
+    # via the body's token or an Authorization header) gets nothing extra
+    # here beyond the returned `token`, same as before this existed.
+    if refresh.ACCESS_COOKIE_NAME in request.cookies:
+        pair = await refresh.issue_token_pair(
+            current_user.user_id, current_user.email, current_user.name, project["id"], project["orgId"],
+        )
+        refresh.set_session_cookies(response, pair["accessToken"], pair["refreshToken"])
     return {"token": token, "orgId": project["orgId"], "projectId": project["id"], "role": role}
 
 

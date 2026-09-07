@@ -23,7 +23,8 @@ async def build_batches(session: AsyncSession, claimed_steps: list[dict]) -> lis
     """
     `claimed_steps` is claim_batch()'s output. Returns one dict per created
     AnchorBatch: {batch_id, run_id, run_id_hash, root_hex, step_count,
-    leaf_order, outbox_ids}, ready for submit_batch().
+    leaf_order, leaf_hashes, outbox_ids}, ready for
+    evidence/manifest.py::build_manifest and submit_batch().
     """
     now = int(datetime.now(timezone.utc).timestamp())
     by_run: dict[str, list[dict]] = {}
@@ -37,6 +38,7 @@ async def build_batches(session: AsyncSession, claimed_steps: list[dict]) -> lis
         tree = build_tree(leaves)
         run_id_hash = "0x" + bytes(Web3.keccak(text=run_id)).hex()
         leaf_order = [s["id"] for s in steps]
+        leaf_hashes = [s["leaf_hash"] for s in steps]
         outbox_ids = [s["outbox_id"] for s in steps]
 
         insert_result = await session.execute(
@@ -72,6 +74,7 @@ async def build_batches(session: AsyncSession, claimed_steps: list[dict]) -> lis
             "root_hex": tree.root_hex,
             "step_count": len(steps),
             "leaf_order": leaf_order,
+            "leaf_hashes": leaf_hashes,
             "outbox_ids": outbox_ids,
         })
 

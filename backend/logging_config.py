@@ -20,6 +20,7 @@ event with no way to jump between them.
 """
 
 import logging
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -98,6 +99,34 @@ def _add_trace_context(logger, method_name, event_dict):
     return event_dict
 
 
+_TOKEN_QUERY_PARAM_RE = re.compile(r"([?&](?:token|api_key)=)[^&\s]*")
+
+
+class _RedactAccessLogTokens(logging.Filter):
+    """GET /stream/{run_id}?token=... (P2P-0 stream token, see main.py) is
+    the one query-string credential this API accepts — EventSource can't
+    set an Authorization header, so the token has to live in the URL.
+    uvicorn's access logger otherwise writes that raw URL (confirmed
+    empirically: 'GET /stream/xyz?token=<full JWT> HTTP/1.1" 200') straight
+    to stdout, which docker-compose.yml's `alloy` service tails and ships
+    to Grafana Cloud Loki — a live stream token would sit in centralized
+    logs outside this process's own control. Uvicorn's access log call
+    passes args=(client_addr, method, path_with_query, http_version,
+    status) — see uvicorn/protocols/http/h11_impl.py's access_logger.info()
+    call — so this rewrites args[2] in place before formatting."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            path = record.args[2]
+            if isinstance(path, str) and "token=" in path:
+                record.args = (
+                    *record.args[:2],
+                    _TOKEN_QUERY_PARAM_RE.sub(r"\1***REDACTED***", path),
+                    *record.args[3:],
+                )
+        return True
+
+
 def configure_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
     logging.basicConfig(
         format="%(message)s",
@@ -140,6 +169,8 @@ def configure_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
     )
     root_handler = logging.getLogger().handlers[0]
     root_handler.setFormatter(formatter)
+
+    logging.getLogger("uvicorn.access").addFilter(_RedactAccessLogTokens())
 
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):

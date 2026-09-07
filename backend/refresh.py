@@ -25,6 +25,60 @@ from db.models import RefreshToken
 ACCESS_TTL_SECONDS = 15 * 60           # short-lived, per the plan
 REFRESH_TTL_SECONDS = 30 * 24 * 3600   # 30 days
 
+# ── Browser session cookies ──────────────────────────────────────────────
+#
+# The SDK/CLI flow above returns these two values as plain JSON
+# (accessToken/refreshToken) for a caller to store however it wants. The
+# browser flow (main.py's /auth/login, /auth/signup, /auth/refresh,
+# /auth/logout) additionally sets them as cookies so the frontend never
+# has to touch localStorage/sessionStorage at all — see
+# frontend/lib/auth.ts's own comment on why that mattered (an XSS bug
+# anywhere in the app used to be able to read a 7-day session token
+# straight out of localStorage).
+ACCESS_COOKIE_NAME = "tc_access"
+REFRESH_COOKIE_NAME = "tc_refresh"
+# Double-submit CSRF cookie — deliberately NOT HttpOnly (the frontend's own
+# JS has to read it to echo it back in the X-CSRF-Token header on every
+# unsafe request; see main.py's _csrf_protection_middleware). This is safe
+# specifically because it's a MATCHING pair the middleware checks against
+# each other, not a secret an attacker gains anything by reading — the
+# actual auth material (tc_access/tc_refresh) stays HttpOnly throughout.
+CSRF_COOKIE_NAME = "tc_csrf"
+
+
+def set_session_cookies(response, access_token: str, refresh_token: str) -> None:
+    """Sets all three session cookies on an outgoing response — called
+    from every endpoint that mints or rotates a session (login, signup,
+    refresh, switch-project)."""
+    from config import get_settings
+
+    settings = get_settings()
+    shared = dict(
+        domain=settings.cookie_domain, secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite, path="/",
+    )
+    response.set_cookie(ACCESS_COOKIE_NAME, access_token, max_age=ACCESS_TTL_SECONDS, httponly=True, **shared)
+    response.set_cookie(REFRESH_COOKIE_NAME, refresh_token, max_age=REFRESH_TTL_SECONDS, httponly=True, **shared)
+    response.set_cookie(
+        CSRF_COOKIE_NAME, secrets.token_urlsafe(32), max_age=REFRESH_TTL_SECONDS, httponly=False, **shared
+    )
+
+
+def clear_session_cookies(response) -> None:
+    """Called on logout. Matches domain/path/samesite/secure of the
+    original set_cookie calls — browsers only actually clear a cookie
+    when those attributes match; an unpaired delete_cookie(name) alone
+    silently no-ops against a cookie that was set with a non-default
+    domain or samesite."""
+    from config import get_settings
+
+    settings = get_settings()
+    for name in (ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, CSRF_COOKIE_NAME):
+        response.delete_cookie(
+            name, domain=settings.cookie_domain, path="/",
+            secure=settings.cookie_secure, samesite=settings.cookie_samesite,
+        )
+
 
 def _hash(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()

@@ -1,0 +1,37 @@
+# CODEOWNERS — review routing for a two-person team.
+#
+# Both maintainers are listed as owners of every path below (not just one),
+# because with only two people, "require review from code owners" only works
+# if whichever one didn't open the PR is actually eligible to approve it —
+# listing a single owner would make that owner unable to get their own PRs
+# reviewed by anyone GitHub recognizes as a code owner.
+#
+# Paths are scoped to what actually carries security/deployment risk
+# (backend auth/tenancy, contracts, CI/deploy config, frontend auth) rather
+# than a blanket "* @everyone", so routine changes elsewhere (docs, tests,
+# unrelated frontend components) don't force a review neither maintainer has
+# bandwidth to keep up with.
+
+# Backend security, auth, and tenancy — session/API-key resolution, rate
+# limiting, membership/role checks, config (secrets/signer backend selection).
+/backend/auth.py            @nipunkalsotra @Shreshtha280407
+/backend/config.py          @nipunkalsotra @Shreshtha280407
+/backend/permissions.py     @nipunkalsotra @Shreshtha280407
+/backend/rate_limit.py      @nipunkalsotra @Shreshtha280407
+/backend/membership_cache.py @nipunkalsotra @Shreshtha280407
+/backend/db/tenancy.py      @nipunkalsotra @Shreshtha280407
+/backend/blockchain/signer.py @nipunkalsotra @Shreshtha280407
+
+# Contracts — anything here can affect deployed, immutable on-chain behavior.
+/contracts/                 @nipunkalsotra @Shreshtha280407
+
+# Deployment / CI — workflow changes, compose topology, release pipeline.
+/.github/workflows/         @nipunkalsotra @Shreshtha280407
+/docker-compose.yml         @nipunkalsotra @Shreshtha280407
+/docker-compose.production.yml @nipunkalsotra @Shreshtha280407
+/deploy/                    @nipunkalsotra @Shreshtha280407
+/.releaserc.json            @nipunkalsotra @Shreshtha280407
+
+# Frontend auth — session storage, login/signup flows.
+/frontend/lib/auth.ts       @nipunkalsotra @Shreshtha280407
+/frontend/app/auth/         @nipunkalsotra @Shreshtha280407

@@ -46,11 +46,12 @@ the SDK/CLI and any future frontend to adopt, without changing what
 """
 
 import logging
+import secrets
 import time
 from typing import Optional
 
 import jwt
-from fastapi import Header
+from fastapi import Header, Request
 
 from errors import ApiError, ErrorCode
 
@@ -80,6 +81,44 @@ def decode_token(token: str) -> dict:
     return jwt.decode(
         token, settings.jwt_secret, algorithms=[_ALGORITHM],
         issuer=settings.jwt_issuer, audience=settings.jwt_audience,
+    )
+
+
+# ── Stream tokens (GET /stream/{run_id}) ────────────────────────────────────
+#
+# EventSource can't set an Authorization header, so the stream endpoint
+# predates multi-tenancy by accepting nothing but a guessable run_id in the
+# URL path — anyone who saw or guessed a run_id could watch its live events.
+# This mints a short-lived, single-run-scoped token instead: a distinct
+# audience from the main session JWT (so a stolen 7-day session token can't
+# be replayed here and vice versa), a hard 5-minute expiry regardless of the
+# session's own TTL, and a unique jti (not currently checked against a
+# denylist — nothing here supports revoking one early — but present so that
+# capability isn't foreclosed later without a token-shape migration).
+_STREAM_AUDIENCE = "trustchain-stream"
+_STREAM_TOKEN_TTL_SECONDS = 5 * 60
+
+
+def create_stream_token(run_id: str, project_id: int, actor: str) -> str:
+    settings = get_settings()
+    now = int(time.time())
+    payload = {
+        "run_id": run_id, "project_id": project_id, "actor": actor,
+        "iat": now, "exp": now + _STREAM_TOKEN_TTL_SECONDS,
+        "iss": settings.jwt_issuer, "aud": _STREAM_AUDIENCE,
+        "jti": secrets.token_urlsafe(16),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=_ALGORITHM)
+
+
+def decode_stream_token(token: str) -> dict:
+    """Raises jwt.PyJWTError (expired, bad signature, wrong audience/issuer —
+    e.g. someone tries a session JWT here instead) — same as decode_token,
+    caller maps it to a 401."""
+    settings = get_settings()
+    return jwt.decode(
+        token, settings.jwt_secret, algorithms=[_ALGORITHM],
+        issuer=settings.jwt_issuer, audience=_STREAM_AUDIENCE,
     )
 
 
@@ -127,14 +166,42 @@ class CurrentUser:
         self.user_id = user_id
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser:
-    """FastAPI dependency — require a valid `Authorization: Bearer <JWT>`
-    header (never an API key — see get_current_principal for endpoints
-    that accept both)."""
-    if not authorization or not authorization.startswith("Bearer "):
+def _bearer_or_cookie_token(request: Request, authorization: Optional[str]) -> Optional[str]:
+    """Every human-facing endpoint now accepts EITHER an `Authorization:
+    Bearer <JWT>` header (SDK/CLI, and any Bearer-based frontend caller —
+    unchanged) OR the browser's own `tc_access` session cookie (P1: cookie-
+    based auth — see refresh.py's module docstring). The header wins if
+    both are somehow present, matching how a caller who explicitly sets
+    Authorization is presumably choosing to authenticate that way rather
+    than implicitly via whatever cookie the browser happened to attach.
+
+    An Authorization header that IS present but malformed (no "Bearer "
+    prefix) returns None outright rather than falling through to the
+    cookie — a caller who set the header explicitly, however badly, gets
+    that failure surfaced, not a silent, confusing fallback to whatever
+    session cookie happens to be sitting in the browser's jar. Regression
+    test: test_auth.py::test_run_agent_rejects_missing_bearer_prefix,
+    which genuinely failed (200 instead of 401) before this distinction
+    existed — a signed-in browser's malformed-header request would have
+    silently succeeded via its own valid cookie instead of being rejected."""
+    if authorization is not None:
+        if authorization.startswith("Bearer "):
+            return authorization.removeprefix("Bearer ").strip()
+        return None
+
+    from refresh import ACCESS_COOKIE_NAME
+
+    return request.cookies.get(ACCESS_COOKIE_NAME)
+
+
+async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> CurrentUser:
+    """FastAPI dependency — require a valid session (Bearer JWT header or
+    tc_access cookie; never an API key — see get_current_principal for
+    endpoints that accept both)."""
+    token = _bearer_or_cookie_token(request, authorization)
+    if token is None:
         raise ApiError(401, "missing bearer token", ErrorCode.MISSING_BEARER_TOKEN)
 
-    token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = decode_token(token)
     except jwt.PyJWTError:
@@ -177,15 +244,16 @@ async def _check_membership_still_live(payload: dict) -> None:
         raise ApiError(401, "membership revoked or organization no longer accessible", ErrorCode.MEMBERSHIP_REVOKED)
 
 
-async def get_current_principal(authorization: Optional[str] = Header(None)) -> Principal:
-    """FastAPI dependency accepting EITHER a human JWT or a machine API
-    key (`tc_live_...` / `tc_test_...`) in the same Authorization header —
-    used by every endpoint an SDK consumer can also call (runs, audit-log,
-    scores), so a third-party agent never needs a human login."""
-    if not authorization or not authorization.startswith("Bearer "):
+async def get_current_principal(request: Request, authorization: Optional[str] = Header(None)) -> Principal:
+    """FastAPI dependency accepting a human JWT (Authorization header OR
+    tc_access cookie — see _bearer_or_cookie_token), a machine API key
+    (`tc_live_...` / `tc_test_...`, Authorization header only — a cookie
+    never carries a raw API key), used by every endpoint an SDK consumer
+    can also call (runs, audit-log, scores), so a third-party agent never
+    needs a human login."""
+    token = _bearer_or_cookie_token(request, authorization)
+    if token is None:
         raise ApiError(401, "missing bearer token", ErrorCode.MISSING_BEARER_TOKEN)
-
-    token = authorization.removeprefix("Bearer ").strip()
 
     if token.startswith("tc_live_") or token.startswith("tc_test_"):
         from db import tenancy

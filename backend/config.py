@@ -220,6 +220,40 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────────────────────
     frontend_url: Optional[str] = Field(default=None)
 
+    # ── Browser session cookies (P1: cookie-based auth, replacing the old
+    #    localStorage JWT) ────────────────────────────────────────────────
+    # None (default) sets a host-only cookie — correct for local dev
+    # (frontend/backend both on `localhost`, different ports) and for a
+    # single-domain production deployment (api.example.com fronted by the
+    # SAME site the frontend is served from). Set to a leading-dot parent
+    # domain (".example.com") only if the frontend and API are deliberately
+    # split across subdomains of one registrable domain — never hardcode a
+    # specific production domain in code, this is exactly why it's config.
+    cookie_domain: Optional[str] = Field(default=None)
+    # Modern browsers treat `localhost` as a secure context even over plain
+    # HTTP (Chrome/Firefox's "potentially trustworthy origin" exception),
+    # so this can safely default True for local dev too — a real production
+    # deployment MUST run HTTPS for these cookies to ever leave the browser
+    # at all otherwise.
+    cookie_secure: bool = Field(default=True)
+    # "lax" (default) is sent on same-site requests regardless of method —
+    # correct for frontend+API sharing a registrable domain (localhost:3000
+    # -> localhost:8000 IS same-site; only the port differs, which SameSite
+    # classification ignores). A deployment where frontend and API do NOT
+    # share a registrable domain (e.g. a Vercel default domain calling a
+    # separately-hosted API) needs either a shared parent domain (set
+    # cookie_domain above) or a same-origin BFF/proxy in the frontend app —
+    # setting this to "none" instead is a real security downgrade (CSRF
+    # exposure on the cookie itself), not a fix, and isn't done automatically.
+    cookie_samesite: str = Field(default="lax")
+
+    @field_validator("cookie_samesite")
+    @classmethod
+    def _validate_cookie_samesite(cls, v: str) -> str:
+        if v not in ("lax", "strict", "none"):
+            raise ValueError(f"cookie_samesite must be 'lax', 'strict', or 'none' (got {v!r})")
+        return v
+
     # ── Anchoring / outbox (Phase 2.1+, referenced here so config stays
     #    centralized even though the consumers land in later phases) ─────
     anchor_max_batch_size: int = Field(default=256, ge=1)
@@ -370,6 +404,19 @@ class Settings(BaseSettings):
     anchor_worker_metrics_port: int = Field(default=9101, ge=1, le=65535)
     indexer_metrics_port: int = Field(default=9102, ge=1, le=65535)
 
+    # Empty (default) leaves GET /metrics open with no credential check —
+    # today's behavior, and still fine for local dev / a compose topology
+    # where the port simply isn't published outside the host at all (see
+    # docker-compose.production.yml). Set this to require a matching
+    # `X-Metrics-Token` header before /metrics returns anything — a second,
+    # app-level layer independent of network exposure, same "don't rely on
+    # only one layer" reasoning as RLS backing up application-level
+    # project_id filtering (ADR-0006). No tenant identifier is ever in a
+    # metric label to begin with (see backend/observability.py's module
+    # docstring), so this guards operational data (RPC circuit-breaker
+    # state, the anchor wallet's live balance, request rates), not tenant data.
+    metrics_auth_token: str = Field(default="")
+
     # ── Phase 3: continuous integrity watchdog (integrity_watchdog/) ───────
     # Tiered scanning (plan §6.7): a HOT tier re-checks everything from the
     # last `watchdog_hot_window_seconds` on every cycle (small, catches
@@ -457,6 +504,31 @@ class Settings(BaseSettings):
 
     # ── Phase 4: password reset (db/password_reset.py) ─────────────────────
     password_reset_ttl_seconds: int = Field(default=3600, ge=1)  # 1 hour — a live account-takeover credential if intercepted, so short-lived even by this file's own standards
+
+    # ── Evidence publishing (evidence/, mirrors signer_backend/email_backend's
+    #    pluggable-implementation-keyed-by-config-string shape) ─────────────
+    # The V2 contract anchors a Merkle ROOT, not the underlying step content —
+    # AgentAuditLogV2.anchorBatch()'s metaURI param is how a batch can
+    # OPTIONALLY point at a durable, content-addressed copy of the batch's
+    # leaf hashes (never raw prompts/outputs/PII — see evidence/manifest.py),
+    # so an independent verifier isn't dependent on TrustChain's own database
+    # staying intact to reconstruct a proof. "disabled" (default) means
+    # metaURI stays empty, same as before this existed — anchoring itself
+    # never blocks or fails because of this. "pinata" publishes the manifest
+    # to IPFS via Pinata's pinning API — see evidence/backends/pinata.py.
+    evidence_publisher_backend: str = Field(default="disabled")
+    # Pinata's REST API auth — a JWT (not the older API-key/secret pair),
+    # from https://app.pinata.cloud/developers/api-keys. Only needed when
+    # evidence_publisher_backend=pinata.
+    pinata_jwt: str = Field(default="")
+    pinata_api_url: str = Field(default="https://api.pinata.cloud/pinning/pinJSONToIPFS")
+
+    @field_validator("evidence_publisher_backend")
+    @classmethod
+    def _validate_evidence_publisher_backend(cls, v: str) -> str:
+        if v not in ("disabled", "pinata"):
+            raise ValueError(f"evidence_publisher_backend must be 'disabled' or 'pinata' (got {v!r})")
+        return v
 
     @field_validator("database_url")
     @classmethod

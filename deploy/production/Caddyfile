@@ -1,0 +1,17 @@
+# TrustChain production reverse proxy. Caddy handles TLS (automatic
+# Let's Encrypt/ZeroSSL cert issuance + renewal for {$DOMAIN}) and is the
+# ONLY service docker-compose.production.yml publishes a host port for —
+# see that file's own header comment.
+
+{$DOMAIN} {
+	# /metrics stays internal-only — Alloy scrapes it directly over the
+	# compose network (http://api:8000/metrics), which never goes through
+	# this proxy at all, so blocking it here doesn't affect real metrics
+	# collection. This is the network-level half of the "protect /metrics"
+	# requirement; config.py's METRICS_AUTH_TOKEN is the app-level half,
+	# for defense-in-depth if this rule is ever misconfigured.
+	@metrics path /metrics /v1/metrics
+	respond @metrics 404
+
+	reverse_proxy api:8000
+}

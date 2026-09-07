@@ -49,13 +49,13 @@ async def write_score(agent_id: str, run_id: str, score: int, reason: str) -> st
         tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.raw_transaction)
 
         receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 60)
-        if receipt.status != 1:
+        if receipt["status"] != 1:
             span.set_attribute("error", "reverted")
             raise RuntimeError(f"TrustScoreRegistryV2.updateScore reverted for agent={agent_id} run={run_id}")
 
         tx_hash_hex = "0x" + tx_hash.hex()
         span.set_attribute("tx_hash", tx_hash_hex)
-        span.set_attribute("block_number", receipt.blockNumber)
+        span.set_attribute("block_number", receipt["blockNumber"])
 
     logger.info("score_written", agent_id=agent_id, run_id=run_id, score=score, tx_hash=tx_hash_hex)
     return tx_hash_hex

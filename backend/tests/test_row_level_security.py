@@ -123,6 +123,44 @@ def test_project_context_scopes_visible_runs(api_role_session_factory):
     assert visible_to_bob == ["rls_run_bob"]
 
 
+def test_get_run_requires_current_project_id_to_be_set(api_role_session_factory, monkeypatch):
+    """Regression test for a real bug in GET /stream/{run_id}: that
+    endpoint decodes and validates its own signed stream token instead of
+    using auth.get_current_principal (browser EventSource can't attach an
+    Authorization header — see main.py's own comment on stream_events),
+    which is the ONLY place that normally sets current_project_id for
+    RLS. Before the fix, it called db.get_run() straight after validating
+    the token, without ever setting that ContextVar — under the RLS-bound
+    trustchain_api role every real deployment's api service actually
+    connects as (this suite's default `client` fixture uses the superuser
+    connection and would never have caught this — see module docstring),
+    that meant db.get_run() saw zero rows for ANY run, always, so even a
+    correctly-signed, otherwise-valid stream token 403'd every time.
+    Confirmed against real CI (frontend/e2e/smoke.spec.ts's authorised-
+    stream assertion got a real 403, not the flaky rate-limit race
+    originally suspected) before being fixed in main.py's stream_events()
+    by setting current_project_id from the token's own already-verified
+    project_id claim, the same trust boundary get_current_principal
+    already uses for every other endpoint."""
+    alice, _ = _seed_two_projects()
+    monkeypatch.setattr(db, "get_sessionmaker", lambda: api_role_session_factory)
+
+    token = current_project_id.set(None)
+    try:
+        without_context = run(db.get_run("rls_run_alice", alice["projectId"]))
+    finally:
+        current_project_id.reset(token)
+    assert without_context is None  # the exact bug: a legitimate project_id, zero visibility
+
+    token = current_project_id.set(alice["projectId"])
+    try:
+        with_context = run(db.get_run("rls_run_alice", alice["projectId"]))
+    finally:
+        current_project_id.reset(token)
+    assert with_context is not None
+    assert with_context["runId"] == "rls_run_alice"
+
+
 def test_cross_tenant_update_affects_zero_rows(api_role_session_factory):
     """The stronger claim: RLS doesn't just hide rows from SELECT, it
     makes them invisible to UPDATE/DELETE too — a bug that skips a

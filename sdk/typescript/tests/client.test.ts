@@ -67,11 +67,22 @@ async function freshApiKey(): Promise<string> {
 const up = await stackIsUp();
 
 test("runAgent returns run_id and stream_url", { skip: !up }, async () => {
+  // stream_url carries a signed, single-run-scoped token as a query param
+  // (P1 hardening — see backend/main.py's GET /stream/{run_id} docstring):
+  // the bare `/stream/{run_id}` path with no token is the OLD, insecure
+  // contract this test used to assert. Parsed via URL rather than matched
+  // as a whole string so this only pins the path and "a token is present",
+  // not the token's own value (a live credential — never logged/asserted
+  // verbatim).
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
   const result = await client.runAgent(`ts sdk integration test task ${randomUUID()}`);
   assert.equal(result.status, "started");
   assert.ok(result.run_id);
-  assert.equal(result.stream_url, `/stream/${result.run_id}`);
+  assert.ok(result.stream_url);
+  const parsed = new URL(result.stream_url, BASE_URL);
+  assert.equal(parsed.pathname, `/stream/${result.run_id}`);
+  const token = parsed.searchParams.get("token");
+  assert.ok(token);
 });
 
 test("getRun for an unknown run_id raises NotFoundError", { skip: !up }, async () => {
@@ -95,7 +106,7 @@ test("stream yields events ending in the synthetic run_complete wrapper", { skip
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
   const started = await client.runAgent(`ts sdk integration test task ${randomUUID()}`);
   const events = [];
-  for await (const event of client.stream(started.run_id, 90_000)) {
+  for await (const event of client.stream(started.run_id, started.stream_url, 90_000)) {
     events.push(event);
   }
   assert.ok(events.length > 0, "expected at least one SSE event");
@@ -119,7 +130,7 @@ test("getRun is immediately queryable right after stream drains (no race)", { sk
   // purpose — if this flakes, the race is back.
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
   const started = await client.runAgent(`ts sdk integration test task ${randomUUID()}`);
-  for await (const _event of client.stream(started.run_id, 90_000)) {
+  for await (const _event of client.stream(started.run_id, started.stream_url, 90_000)) {
     // drain
   }
   await client.getRun(started.run_id); // must not throw NotFoundError

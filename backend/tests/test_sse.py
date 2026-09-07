@@ -58,14 +58,15 @@ def test_run_agent_then_stream_sees_all_events_via_redis(client_with_fake_bridge
     user = seed_user_and_token()
     r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
     assert r.status_code == 200
-    run_id = r.json()["run_id"]
+    stream_url = r.json()["stream_url"]
+    assert "token=" in stream_url, "stream_url must carry a signed stream token — see auth.create_stream_token"
 
     # The background task (asyncio.create_task) needs the event loop to
     # actually get a turn to run before we start reading — TestClient
     # shares the loop with the app here, so the GET below is what forces
     # that turn (Redis Streams doesn't care about ordering anyway; see
     # run_events.py's docstring on why a late reader still sees everything).
-    with client.stream("GET", f"/stream/{run_id}") as response:
+    with client.stream("GET", stream_url) as response:
         assert response.status_code == 200
         events = []
         for line in response.iter_lines():
@@ -118,8 +119,9 @@ def test_run_that_errors_internally_is_persisted_as_failed_not_stuck_running(
     r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
     assert r.status_code == 200
     run_id = r.json()["run_id"]
+    stream_url = r.json()["stream_url"]
 
-    with client.stream("GET", f"/stream/{run_id}") as response:
+    with client.stream("GET", stream_url) as response:
         for _ in response.iter_lines():
             pass  # drain to the stream's natural end, same reasoning as the SDK's stream()
 
@@ -134,9 +136,27 @@ def test_run_that_errors_internally_is_persisted_as_failed_not_stuck_running(
     assert r.json()["message"] == "simulated internal pipeline failure"
 
 
-def test_stream_of_unknown_run_id_eventually_times_out(client, monkeypatch):
+def test_stream_of_a_real_run_with_no_events_eventually_times_out(client, monkeypatch):
+    """A run that exists in the DB (so it passes the stream token's
+    run/project checks) but has nothing published to its Redis stream —
+    the Redis-silence timeout path, not a "run doesn't exist" rejection
+    (see the sibling 403 test below for that, now a SEPARATE case since
+    Phase 5's stream token requires the run to actually exist). Creates
+    the run directly via db.create_run rather than POST /run-agent
+    specifically so no pipeline ever runs and nothing is ever published —
+    genuine silence, not a race against how fast a real (here: instantly
+    failing, no PRIVATE_KEY) pipeline happens to emit its own events."""
+    import asyncio
+
+    import auth
+    import db
     import main
     import run_events as run_events_module
+
+    user = seed_user_and_token(email="stream_real_silence@example.com")
+    run_id = "run_test_no_events_ever_published"
+    asyncio.run(db.create_run(run_id, user["projectId"], "silent task", user["email"], 1_700_000_000))
+    token = auth.create_stream_token(run_id, user["projectId"], user["email"])
 
     # Patch the timeout to something the test can actually wait for.
     original_read_events = run_events_module.read_events
@@ -147,13 +167,110 @@ def test_stream_of_unknown_run_id_eventually_times_out(client, monkeypatch):
 
     monkeypatch.setattr(main.run_events, "read_events", _short_timeout_read_events)
 
-    with client.stream("GET", "/stream/run_that_was_never_created") as response:
+    with client.stream("GET", f"/stream/{run_id}?token={token}") as response:
         assert response.status_code == 200
         lines = [json.loads(l.removeprefix("data: ")) for l in response.iter_lines() if l.startswith("data: ")]
 
     assert len(lines) == 1
     assert lines[0]["type"] == "error"
     assert "timeout" in lines[0]["message"]
+
+
+def test_stream_rejects_missing_token(client):
+    user = seed_user_and_token()
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
+    run_id = r.json()["run_id"]
+
+    resp = client.get(f"/stream/{run_id}")
+    assert resp.status_code == 401
+
+
+def test_stream_rejects_a_run_id_that_does_not_exist(client):
+    """Phase 5: the stream token's project_id is cross-checked against the
+    run's ACTUAL project via db.get_run — a run_id that was never created
+    fails that check immediately (403) rather than opening a connection
+    that would just sit there until Redis-silence timeout. This replaces
+    the pre-Phase-5 "unknown run_id eventually times out" behavior for a
+    genuinely nonexistent run — a real run with no events yet (the sibling
+    test above) still times out exactly as before."""
+    import auth
+
+    user = seed_user_and_token(email="stream_unknown_run@example.com")
+    token = auth.create_stream_token("run_that_was_never_created", user["projectId"], user["email"])
+
+    resp = client.get(f"/stream/run_that_was_never_created?token={token}")
+    assert resp.status_code == 403
+
+
+def test_stream_rejects_a_token_minted_for_a_different_run(client):
+    import auth
+
+    user = seed_user_and_token(email="stream_wrong_run@example.com")
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
+    real_run_id = r.json()["run_id"]
+
+    wrong_token = auth.create_stream_token("some_other_run_id", user["projectId"], user["email"])
+    resp = client.get(f"/stream/{real_run_id}?token={wrong_token}")
+    assert resp.status_code == 403
+
+
+def test_stream_rejects_a_token_scoped_to_another_project(client):
+    """A token whose signature/claims are internally valid but whose
+    project_id doesn't own this run — db.get_run's cross-check (not just
+    trusting the token's own project_id claim) is what catches this."""
+    import auth
+
+    owner = seed_user_and_token(email="stream_owner@example.com")
+    other = seed_user_and_token(email="stream_other_project@example.com")
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(owner["token"]))
+    run_id = r.json()["run_id"]
+
+    forged_token = auth.create_stream_token(run_id, other["projectId"], other["email"])
+    resp = client.get(f"/stream/{run_id}?token={forged_token}")
+    assert resp.status_code == 403
+
+
+def test_stream_rejects_an_expired_token(client, monkeypatch):
+    import time
+
+    import auth
+
+    user = seed_user_and_token(email="stream_expired@example.com")
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
+    run_id = r.json()["run_id"]
+
+    # Mint as if 10 minutes ago — well past the 5-minute TTL.
+    real_time = time.time
+    monkeypatch.setattr(auth.time, "time", lambda: real_time() - 600)
+    expired_token = auth.create_stream_token(run_id, user["projectId"], user["email"])
+    monkeypatch.setattr(auth.time, "time", real_time)
+
+    resp = client.get(f"/stream/{run_id}?token={expired_token}")
+    assert resp.status_code == 401
+
+
+def test_stream_token_reconnect_endpoint_mints_a_working_replacement(client):
+    user = seed_user_and_token(email="stream_reconnect@example.com")
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(user["token"]))
+    run_id = r.json()["run_id"]
+
+    r2 = client.post(f"/runs/{run_id}/stream-token", headers=_auth_headers(user["token"]))
+    assert r2.status_code == 200
+    new_stream_url = r2.json()["stream_url"]
+    assert "token=" in new_stream_url
+
+    with client.stream("GET", new_stream_url) as response:
+        assert response.status_code == 200
+
+
+def test_stream_token_reconnect_endpoint_rejects_another_project(client):
+    owner = seed_user_and_token(email="stream_reconnect_owner@example.com")
+    other = seed_user_and_token(email="stream_reconnect_other@example.com")
+    r = client.post("/run-agent", json={"task": "test task"}, headers=_auth_headers(owner["token"]))
+    run_id = r.json()["run_id"]
+
+    resp = client.post(f"/runs/{run_id}/stream-token", headers=_auth_headers(other["token"]))
+    assert resp.status_code == 404
 
 
 def test_read_events_maps_redis_client_side_timeout_to_builtin_timeout_error():

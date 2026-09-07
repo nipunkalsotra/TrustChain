@@ -331,26 +331,43 @@ jobs:
         # something to silently widen here.
         run: ruff check .
         working-directory: backend
-      - name: ruff format --check (non-blocking)
-        # This codebase predates ruff/black — 52 files would need
-        # reformatting today (verified locally). That's a one-time,
-        # whole-repo formatting commit, not something to force as a side
-        # effect of adding a CI gap-check; stays visible-but-non-fatal
-        # until that commit happens, same pattern as npm audit/frontend
-        # lint below.
-        run: ruff format --check .
+      - name: ruff format --check (against a committed baseline)
+        # This codebase predates ruff/black — 117 files would need
+        # reformatting today (verified locally, up from 52 when this step
+        # was first added; codebase has grown). Reformatting all of them
+        # in one shot is a real, one-time, whole-repo formatting commit,
+        # deliberately kept SEPARATE from routine work (a 117-file
+        # mechanical diff bundled into an unrelated change makes that
+        # change much harder to review, even though ruff format is
+        # behavior-preserving) — not something to force as a side effect
+        # of making a CI gap-check blocking. Blocking NOW, but against
+        # backend/.ruff-format-baseline.txt (the exact 117 files, listed)
+        # rather than the raw check: any file already in that list may
+        # stay non-compliant, but a NEW violation — a new file, or an
+        # edit that de-formats an already-compliant one — fails CI
+        # immediately. See backend/scripts/check_ruff_format_baseline.py's
+        # own docstring for the exact mechanism; verified locally both
+        # ways (passes clean against the current baseline, fails loudly
+        # when a genuinely new unformatted file is introduced).
+        run: python3 scripts/check_ruff_format_baseline.py
         working-directory: backend
-        continue-on-error: true
-      - name: mypy (non-blocking)
-        # 40 pre-existing findings (verified locally) — mostly web3.py's
-        # TypedDict-vs-AttributeDict duality (`.status` access on a
-        # TypedDict that works at runtime via web3's AttributeDict but
-        # isn't visible to mypy's static view) plus a few genuinely
-        # loosely-typed dict/BaseModel union sites. Real signal, not yet
-        # a hard gate — same non-blocking pattern as ruff format above.
-        run: mypy --ignore-missing-imports --explicit-package-bases --exclude 'tests/' .
+      - name: mypy (against a committed baseline)
+        # 82 pre-existing (file, message) findings (103 raw occurrences —
+        # verified locally, up from "40" when this step was first added;
+        # codebase has grown) — mostly web3.py's TypedDict-vs-
+        # AttributeDict duality (`.status` access on a TypedDict that
+        # works at runtime via web3's AttributeDict but isn't visible to
+        # mypy's static view) plus a few genuinely loosely-typed
+        # dict/BaseModel union sites. Blocking NOW, but against
+        # backend/.mypy-baseline.txt rather than the raw run — same
+        # baseline mechanism as ruff format above (see
+        # backend/scripts/check_mypy_baseline.py's own docstring for why
+        # it's keyed on (file, message) without the line number).
+        # Verified locally both ways: passes clean against the current
+        # baseline, fails loudly on a genuinely new type error introduced
+        # in a throwaway test file.
+        run: python3 scripts/check_mypy_baseline.py
         working-directory: backend
-        continue-on-error: true
       - name: Bandit (Python static security analysis)
         # Verified locally: 0 findings at medium+ severity. The Low
         # findings below this threshold (12 as of this comment — grows
@@ -484,26 +501,40 @@ jobs:
         run: npx tsc --noEmit
         working-directory: frontend
       - name: Lint
-        # Non-blocking: pre-existing react-hooks/set-state-in-effect debt
-        # (localStorage/network sync-on-mount effects) not yet cleaned up.
-        # tsc + build above are the hard gates; this stays visible but non-fatal.
+        # Blocking. Was non-blocking for pre-existing react-hooks/
+        # set-state-in-effect warnings — those are still there (3, all
+        # react-hooks/exhaustive-deps), but `npm run lint` (bare eslint)
+        # exits 0 on warnings-only, it always has — verified locally, this
+        # step was never actually catching anything continue-on-error
+        # would matter for. No code changed here, just the gate.
         run: npm run lint
         working-directory: frontend
-        continue-on-error: true
+      - name: Unit tests (vitest — lib/auth.ts, lib/api.ts)
+        # P2: auth/session/CSRF-helper coverage (localStorage no longer
+        # holding a token, csrfHeader's double-submit read, apiFetch's
+        # credentials/CSRF-header/silent-refresh-and-retry contract, and
+        # the stream-token reconnect path) — see lib/auth.test.ts and
+        # lib/api.test.ts. First test suite this frontend has ever had;
+        # vitest chosen for minimal setup (no babel/webpack config of its
+        # own to fight with Next.js's).
+        run: npm run test
+        working-directory: frontend
       - name: Build
         run: npm run build
         working-directory: frontend
       - name: npm audit (JS dependency CVE scan)
-        # Non-blocking: 11 findings (1 low, 1 moderate, 9 high), all
-        # transitive via next -> postcss/sharp. The only fix (`npm audit
-        # fix --force`) installs next@16.3.1, which npm itself flags as
-        # "outside the stated dependency range" — a major-version Next.js
-        # upgrade, not something to force silently in a security-scan step.
-        # Stays visible-but-non-fatal here (same pattern as the Lint step
-        # above) until a deliberate, reviewed upgrade is scheduled.
+        # Blocking. Was non-blocking for 11-14 findings (next/postcss/
+        # sharp transitive, plus several unrelated ones) — resolved via a
+        # real, verified upgrade: `npm audit fix` (safe) + `npm audit fix
+        # --force` for the rest, which turned out to be next 16.2.7 ->
+        # 16.3.4, a MINOR version bump (npm's own audit data:
+        # isSemVerMajor: false) despite the exact "16.2.7" pin making npm
+        # describe it as "outside the stated dependency range" — not the
+        # major-version risk this step's comment used to warn about.
+        # Verified: tsc/lint/build all clean afterward, `npm audit` now
+        # reports 0 vulnerabilities.
         run: npm audit --audit-level=high
         working-directory: frontend
-        continue-on-error: true
 
   gitleaks:
     name: Secret scanning (gitleaks)
@@ -686,6 +717,20 @@ jobs:
           docker run --rm --network host -v "$GITHUB_WORKSPACE/k6:/scripts" \
             -e BASE_URL=http://localhost:8000 \
             grafana/k6 run /scripts/smoke-perf-test.js
+      - name: Playwright frontend smoke suite (P2)
+        # Same "reuse the already-live stack" reasoning as k6 above —
+        # frontend/e2e/smoke.spec.ts needs a real backend at :8000, which
+        # this job already has. --with-deps works here (GITHUB_WORKSPACE
+        # runners have real sudo, unlike a sandboxed dev machine — see
+        # frontend/e2e/README.md for that local caveat). Login, protected-
+        # route redirect, the P1 no-token-in-localStorage/HttpOnly-cookie
+        # property, logout, and the P1 stream-token authorised/
+        # unauthorised boundary — see that spec file for the full list.
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+        working-directory: frontend
       - name: Run Python SDK tests
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/pip_install_retry.sh" -e ".[dev]"

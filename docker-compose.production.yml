@@ -1,0 +1,199 @@
+# TrustChain PRODUCTION topology — a genuinely separate composition from
+# docker-compose.yml (that file is local-dev-only, see its own header
+# comment), not an override of it. Differences that matter:
+#
+#   - No host ports on anything except `caddy`. Postgres/Redis/both MCP
+#     servers/api/anchor-worker/indexer/integrity-watchdog/alloy are only
+#     reachable over the internal Docker network this compose file creates —
+#     `caddy` (a TLS reverse proxy) is the only public entry point.
+#   - No `anvil` service at all. Production anchors to a real chain
+#     (MONAD_RPC_URL/V2_RPC_URL in backend/.env.production point at real
+#     Monad, not a local chain) — running a local dev chain here would be
+#     meaningless at best and a correctness hazard at worst.
+#   - No hardcoded credentials. Every secret is required via a
+#     `${VAR:?message}` substitution — Docker Compose itself refuses to
+#     start ANY service if one of these is unset, before a single container
+#     runs, rather than silently falling back to docker-compose.yml's
+#     checked-in dev values (trustchain_api_dev_password, Anvil's
+#     well-known default key). See backend/.env.production.example for
+#     every variable this file needs and where to generate/obtain each one.
+#
+# Usage:
+#   cp backend/.env.production.example backend/.env.production   # then fill it in
+#   docker compose -f docker-compose.production.yml --env-file backend/.env.production up -d --build
+#
+# `alembic upgrade head` still needs to run once against this Postgres
+# before `api` can do anything useful (same as local dev — see
+# docker-compose.yml's own comment) — from a machine that can reach this
+# compose network, e.g. `docker compose -f docker-compose.production.yml
+# --env-file backend/.env.production run --rm api alembic upgrade head`.
+# The new e897e74cf66b migration is what makes POSTGRES_API_PASSWORD below
+# actually take effect on the `trustchain_api` role RLS binds to — see that
+# migration's own docstring.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: trustchain
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set — see backend/.env.production.example}
+      POSTGRES_DB: trustchain
+    volumes:
+      - trustchain_postgres_data_production:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustchain -d trustchain"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mcp-search:
+    build:
+      context: ./mcp_servers/web_search
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+
+  mcp-blockchain:
+    build:
+      context: .
+      dockerfile: mcp_servers/blockchain/Dockerfile
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD must be set — see backend/.env.production.example}@postgres:5432/trustchain
+      REDIS_URL: redis://redis:6379/0
+      MCP_SEARCH_URL: http://mcp-search:8001/mcp
+      MCP_BLOCKCHAIN_URL: http://mcp-blockchain:8002/mcp
+      ENVIRONMENT: production
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
+    # Same reasoning as docker-compose.yml's identical setting — see that
+    # file's F14 comment.
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mcp-search:
+        condition: service_started
+      mcp-blockchain:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  anchor-worker:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "anchor_worker.main"]
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set — see backend/.env.production.example}@postgres:5432/trustchain
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  integrity-watchdog:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "integrity_watchdog.main"]
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set — see backend/.env.production.example}@postgres:5432/trustchain
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  indexer:
+    build:
+      context: ./backend
+    command: ["python3", "-m", "indexer.main"]
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trustchain:${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set — see backend/.env.production.example}@postgres:5432/trustchain
+    volumes:
+      - ./backend/contracts/addresses_v2.json:/app/contracts/addresses_v2.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The only public entry point. Terminates TLS (auto-provisioned via Let's
+  # Encrypt/ZeroSSL for the real domain in DOMAIN, driven entirely by env —
+  # see deploy/production/Caddyfile) and reverse-proxies to `api`. Blocks
+  # /metrics at the edge — that endpoint stays internal-network-only, same
+  # reasoning as every other service here having no host port.
+  caddy:
+    image: caddy:2-alpine
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set — see backend/.env.production.example}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Same shipper as docker-compose.yml's `alloy` — see that file's own
+  # comment for what it does and the real measured cost. No host port here
+  # either (its own :12345 UI is a local-debugging convenience docker-compose.yml
+  # keeps, not something a production host needs reachable) — it pushes
+  # OUT to Grafana Cloud, nothing needs to reach IN to it.
+  alloy:
+    image: grafana/alloy:v1.5.1
+    profiles: ["observability"]
+    env_file:
+      - path: ./backend/.env.production
+        required: true
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./docker/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - api
+      - anchor-worker
+      - indexer
+
+volumes:
+  trustchain_postgres_data_production:
+  caddy_data:
+  caddy_config:

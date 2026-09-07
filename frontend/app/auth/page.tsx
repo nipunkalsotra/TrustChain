@@ -104,7 +104,7 @@ export default function AuthPage() {
                 ? await apiSignup(form.name.trim(), form.email.trim(), form.password)
                 : await apiLogin(form.email.trim(), form.password)
 
-            setSession({ name: auth.name, email: auth.email, token: auth.token })
+            setSession({ name: auth.name, email: auth.email })
             setStatus("success")
             setMessage(mode === "signup" ? "IDENTITY REGISTERED" : "ACCESS GRANTED")
             setTimeout(() => router.replace("/dashboard"), mode === "signup" ? 1200 : 1000)
@@ -228,7 +228,7 @@ export default function AuthPage() {
                 {/* Features below card */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 20 }}>
                     {[
-                        { icon: "◆", label: "IMMUTABLE AUDIT", sub: "Every step on-chain" },
+                        { icon: "◆", label: "IMMUTABLE AUDIT", sub: "Merkle-anchored on-chain" },
                         { icon: "◉", label: "AGENT IDENTITY", sub: "Cryptographic fingerprint" },
                         { icon: "◇", label: "TRUST SCORES", sub: "Per-run leaderboard" },
                     ].map(f => (

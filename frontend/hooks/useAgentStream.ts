@@ -4,7 +4,7 @@
 "use client"
 
 import { useState, useCallback, useRef } from "react"
-import { startRun, streamUrl } from "@/lib/api"
+import { startRun, resolveStreamUrl, refreshStreamToken } from "@/lib/api"
 import { SSEEvent, isStepEvent } from "@/lib/types"
 
 type Status = "idle" | "running" | "complete" | "error"
@@ -16,10 +16,13 @@ export function useAgentStream() {
     const [error, setError] = useState<string | null>(null)
     const [report, setReport] = useState<string>("")
     const esRef = useRef<EventSource | null>(null)
+    const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const reset = useCallback(() => {
         esRef.current?.close()
         esRef.current = null
+        if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+        refreshTimerRef.current = null
         setSteps([])
         setStatus("idle")
         setRunId(null)
@@ -31,15 +34,33 @@ export function useAgentStream() {
         reset()
         setStatus("running")
 
-        try {
-            // 1. POST /run-agent → get run_id
-            const { run_id } = await startRun(task)
-            setRunId(run_id)
-
-            // 2. Open SSE stream
-            const url = streamUrl(run_id)
-            const es = new EventSource(url)
+        // The stream token embedded in a stream_url expires after 5 minutes
+        // (backend/auth.py's create_stream_token) — openStream() is what
+        // actually opens the EventSource, factored out so a proactive
+        // refresh (below) can swap in a freshly-minted URL and reopen
+        // without duplicating the onmessage/onerror wiring.
+        const openStream = (run_id: string, url: string) => {
+            const es = new EventSource(resolveStreamUrl(url))
             esRef.current = es
+
+            // Refresh ~30s before the 5-minute token actually expires —
+            // proactive, not reactive: EventSource's onerror doesn't expose
+            // the HTTP status code a browser received, so there's no
+            // reliable way to detect "the token expired" versus "a normal
+            // network blip" from onerror alone. A run that's already
+            // finished by then just makes this a harmless no-op (the
+            // refresh endpoint 404s if the run doesn't exist under this
+            // project, but by that point status is already "complete").
+            if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+            refreshTimerRef.current = setTimeout(async () => {
+                try {
+                    const { stream_url } = await refreshStreamToken(run_id)
+                    es.close()
+                    openStream(run_id, stream_url)
+                } catch {
+                    // Run likely already completed — nothing to reconnect.
+                }
+            }, 4.5 * 60 * 1000)
 
             es.onmessage = (e) => {
                 // Guard against empty/malformed data
@@ -92,7 +113,17 @@ export function useAgentStream() {
                 })
                 es.close()
             }
+        }
 
+        try {
+            // 1. POST /run-agent → get run_id + a signed, run-scoped stream_url
+            const { run_id, stream_url } = await startRun(task)
+            setRunId(run_id)
+
+            // 2. Open SSE stream using ONLY the backend-returned URL — there
+            // is no other way to construct a valid one (see resolveStreamUrl's
+            // own comment in lib/api.ts).
+            openStream(run_id, stream_url)
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Failed to start run"
             setError(msg)

@@ -46,10 +46,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned to match test.yml's own pin — see that file's comment on
-          # the same line for why (unpinned "stable" drifted and broke the
-          # gas-snapshot check on a PR that never touched contracts/).
-          version: 1.7.1
+          # Pinned to match test.yml's own pin — see that file's "Foundry
+          # project" job's "Install Foundry" step for the full story
+          # (unpinned "stable" drifted and broke the gas-snapshot check on
+          # a PR that never touched contracts/).
+          version: v1.8.1
       - name: Cache Foundry build artifacts
         # Same cache as test.yml's jobs — see that file's comment.
         uses: actions/cache@v4
