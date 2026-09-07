@@ -9,6 +9,19 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 fs_permissions = [{ access = "read", path = "test/fixtures" }]
+# Foundry v1.8.0 flipped both --isolate (each top-level call gets its own EVM
+# sub-context) and dynamic test linking on by default. Both change exact gas
+# costs, which breaks `forge snapshot --check` against a snapshot committed
+# under the old (v1.7.1) defaults — not a contract or test bug, just two
+# unpinned CI behavior defaults drifting out from under a committed baseline
+# (CI's foundry-toolchain@v1 action has no version pin, so it always installs
+# whatever is currently latest). Pinned explicitly here so gas accounting
+# (and .gas-snapshot) stays reproducible regardless of which Foundry version
+# actually runs the suite. Confirmed empirically: forge v1.8.1 with these two
+# flags reproduces .gas-snapshot exactly (0 diffs); without them, 124 of the
+# suite's tests diverge.
+isolate = false
+dynamic_test_linking = false
 
 [rpc_endpoints]
 monad_testnet = "${MONAD_RPC_URL}"
