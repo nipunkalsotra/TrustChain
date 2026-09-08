@@ -25,6 +25,18 @@ const NAV_ITEMS = [
 // would double the navigation and drop the terminal theme on top of it.
 const MARKETING_PATHS = ["/", "/coming-soon", "/pricing"]
 
+// Same reasoning as MARKETING_PATHS, for the same reason: /dashboard ships
+// its own shell (components/dashboard/DashboardShell — its own sidebar/
+// topbar, its own landing-matched visual language), so wrapping it in this
+// old terminal-themed navbar would double the chrome. Real login/signup
+// doesn't exist yet (landing page's Login/Get Started both link straight
+// here — see components/marketing/content.ts) — prefix-matched, not just
+// the bare route, so /dashboard/runs/[runId] etc. get the same treatment.
+const DASHBOARD_PREFIX = "/dashboard"
+function isDashboardPath(pathname: string): boolean {
+    return pathname === DASHBOARD_PREFIX || pathname.startsWith(`${DASHBOARD_PREFIX}/`)
+}
+
 // Pages that don't require login
 const PUBLIC_PATHS = ["/auth", ...MARKETING_PATHS]
 
@@ -43,13 +55,17 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     // anonymous visitor's browser hammering the API with connection-refused
     // retries whenever the backend isn't running.
     const isMarketing = MARKETING_PATHS.includes(pathname)
+    // Marketing pages AND /dashboard both ship their own complete chrome —
+    // see DASHBOARD_PREFIX's comment above for why /dashboard joins the
+    // marketing bypass here.
+    const bypassProductChrome = isMarketing || isDashboardPath(pathname)
     useEffect(() => {
-        if (isMarketing) return
+        if (bypassProductChrome) return
         const poll = () => getChainStatus().then(setChain).catch(() => setChain(null))
         poll()
         const t = setInterval(poll, 5000)
         return () => clearInterval(t)
-    }, [isMarketing])
+    }, [bypassProductChrome])
 
     // ── Auth guard ────────────────────────────────────────────────────────
     // Tried the useSyncExternalStore rewrite this rule nudges toward — it
@@ -59,7 +75,7 @@ export default function ClientShell({ children }: { children: React.ReactNode })
     // Reading getSession() fresh inside a plain effect (below) doesn't have
     // that window — verified in a real browser — so this stays as-is.
     useEffect(() => {
-        if (isMarketing) return
+        if (bypassProductChrome) return
         const s = getSession()
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setLocalSession(s)
@@ -67,7 +83,7 @@ export default function ClientShell({ children }: { children: React.ReactNode })
             router.replace("/auth")
         }
         setReady(true)
-    }, [pathname, isMarketing])
+    }, [pathname, bypassProductChrome])
 
     const logout = () => {
         // Revokes the refresh-token family and clears the session cookies
@@ -82,11 +98,11 @@ export default function ClientShell({ children }: { children: React.ReactNode })
         router.replace("/auth")
     }
 
-    // Marketing routes render immediately and bare. Checked BEFORE the `ready`
-    // gate on purpose: the landing page is public, so making a visitor wait a
-    // commit for an auth check that cannot affect them would blank the first
-    // paint of the hero for no reason.
-    if (isMarketing) return <>{children}</>
+    // Marketing routes AND /dashboard render immediately and bare. Checked
+    // BEFORE the `ready` gate on purpose: both are public (no real auth yet),
+    // so making a visitor wait a commit for an auth check that cannot affect
+    // them would blank the first paint for no reason.
+    if (bypassProductChrome) return <>{children}</>
 
     // Don't render until auth check is done (prevents flash)
     if (!ready) return null

@@ -1,0 +1,298 @@
+/*
+ * Dashboard shell styling.
+ *
+ * Scoped under `.dash-shell` and built with the SAME palette as the plain
+ * marketing landing page (components/marketing/marketing.css's --mkt-*
+ * tokens, copied here rather than reached into from outside its own scope)
+ * so the authenticated product surface reads as a continuation of the
+ * public site, not a different app. Every rule here is either under
+ * `.dash-shell` or a `.dash-`-prefixed class used only by it — same
+ * scoping discipline marketing.css and the parked landing.css already use,
+ * so this app's three surfaces (marketing, dashboard, the older terminal
+ * theme in globals.css) never leak into each other.
+ */
+
+.dash-shell {
+  --dash-bg: #020711;
+  --dash-bg2: #050b16;
+  --dash-surface: #07111f;
+  --dash-surface-elevated: #0a1628;
+
+  --dash-cyan: #22d3ee;
+  --dash-cyan-bright: #38e8ff;
+  --dash-cyan-dim: rgba(34, 211, 238, 0.55);
+  --dash-blue: #2f80ff;
+
+  --dash-text: #d8e6ea;
+  --dash-text-secondary: #748a96;
+  --dash-text-muted: #536771;
+
+  --dash-border-subtle: rgba(34, 211, 238, 0.2);
+  --dash-border-strong: rgba(34, 211, 238, 0.38);
+  --dash-divider: rgba(34, 211, 238, 0.1);
+  --dash-glow-cyan: rgba(34, 211, 238, 0.25);
+  --dash-glow-blue: rgba(47, 128, 255, 0.3);
+
+  --dash-sidebar-w: 240px;
+  --dash-topbar-h: 60px;
+
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: var(--dash-sidebar-w) 1fr;
+  background: var(--dash-bg);
+  color: var(--dash-text);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+
+.dash-sidebar {
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 12px;
+  background: var(--dash-bg2);
+  border-right: 1px solid var(--dash-divider);
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+.dash-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 24px;
+}
+
+.dash-brand__name {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--dash-text);
+}
+
+.dash-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dash-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  color: var(--dash-text-secondary);
+  text-decoration: none;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.dash-nav__item:hover {
+  color: var(--dash-text);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.dash-nav__item[data-active="true"] {
+  color: var(--dash-cyan-bright);
+  background: rgba(34, 211, 238, 0.1);
+}
+
+.dash-nav__icon {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: currentColor;
+}
+
+/* ── Topbar ──────────────────────────────────────────────────────────────── */
+
+/* Mobile-only (see the media query below) — desktop has no topbar at all,
+   nothing in it but the sidebar's own off-canvas toggle needed there. */
+.dash-topbar {
+  display: none;
+}
+
+.dash-topbar__menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  border: 1px solid var(--dash-divider);
+  background: transparent;
+  color: var(--dash-text-secondary);
+}
+
+.dash-topbar__menu-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* ── Content area ────────────────────────────────────────────────────────── */
+
+.dash-main {
+  min-width: 0;
+}
+
+.dash-content {
+  max-width: 1100px;
+  padding: 32px 28px 64px;
+}
+
+.dash-page-header {
+  margin-bottom: 28px;
+}
+
+.dash-page-header__title {
+  font-size: clamp(22px, 2.6vw, 30px);
+  font-weight: 600;
+  color: var(--dash-text);
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.dash-page-header__sublabel {
+  display: inline-block;
+  margin-top: 10px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  color: var(--dash-cyan);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border-subtle);
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+
+/* ── Coming Soon modal ───────────────────────────────────────────────────── */
+/* Opened only by the sidebar's bottom logo button (see ComingSoonModal.tsx)
+   — the dashboard content area itself never renders this content directly. */
+
+.dash-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(2, 7, 17, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.dash-modal {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  padding: 40px 32px 32px;
+  border-radius: 14px;
+  border: 1px solid var(--dash-divider);
+  background: var(--dash-surface);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+
+.dash-modal__close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  border: 1px solid var(--dash-divider);
+  background: transparent;
+  color: var(--dash-text-secondary);
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.dash-modal__close:hover {
+  color: var(--dash-text);
+  border-color: var(--dash-border-strong);
+}
+
+.dash-modal__close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dash-modal__logo {
+  filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.3));
+}
+
+.dash-modal__badge {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dash-cyan);
+  border: 1px solid var(--dash-border-subtle);
+  border-radius: 20px;
+  padding: 4px 12px;
+}
+
+.dash-modal__message {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--dash-text-secondary);
+  margin: 0;
+}
+
+/* ── Responsive (spec: collapsible/clean mobile layout) ─────────────────── */
+
+@media (max-width: 900px) {
+  .dash-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-topbar {
+    display: flex;
+    align-items: center;
+    height: var(--dash-topbar-h);
+    padding: 0 18px;
+    background: rgba(2, 7, 17, 0.93);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--dash-divider);
+  }
+
+  .dash-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 260px;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform 0.28s ease;
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .dash-sidebar[data-open="true"] {
+    transform: none;
+  }
+
+  .dash-sidebar__scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(2, 7, 17, 0.6);
+  }
+
+  .dash-sidebar__scrim[data-open="true"] {
+    display: block;
+  }
+
+  .dash-content {
+    padding: 24px 18px 48px;
+  }
+}
