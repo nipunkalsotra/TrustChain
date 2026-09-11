@@ -2,7 +2,7 @@
 web3==7.16.0
 
 # core -packages
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 PyJWT==2.13.0
 pydantic-settings==2.15.0
 structlog==26.1.0
@@ -12,7 +12,7 @@ httpx==0.28.1
 # Database (Postgres, async)
 SQLAlchemy==2.0.52
 asyncpg==0.31.0
-alembic==1.19.1
+alembic==1.19.2
 
 # Redis (SSE pub/sub across replicas, rate limiting) — Phase 2.3
 redis==8.1.0
@@ -24,16 +24,16 @@ langgraph==1.2.11
 
 # FastApi Backend
 fastapi==0.141.1
-uvicorn==0.52.1
+uvicorn==0.52.4
 
 # MCP Servers
 fastmcp==3.4.7
 langchain-mcp-adapters==0.3.2
-tavily-python==0.7.27
+tavily-python==0.8.1
 
 # Observability (P2.6) — metrics, tracing, error reporting
 prometheus-client==0.26.0
-sentry-sdk==2.68.0
+sentry-sdk==2.68.1
 opentelemetry-api==1.44.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-grpc==1.44.0
@@ -42,4 +42,4 @@ opentelemetry-instrumentation-fastapi==0.65b0
 # Email delivery (Phase 3) — notifications/backends/ses.py, the production
 # choice for the EC2 deploy target (IAM instance role, no SMTP credentials
 # on the box). SMTP/console/memory backends use stdlib smtplib only.
-boto3==1.40.24
+boto3==1.43.89
