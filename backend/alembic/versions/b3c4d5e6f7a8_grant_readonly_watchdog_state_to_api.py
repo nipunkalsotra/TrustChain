@@ -25,13 +25,14 @@ still can't INSERT/UPDATE/DELETE it (what the security boundary was
 actually protecting against). integrity_watchdog itself keeps writing
 through its own separate `trustchain` superuser connection, unaffected.
 """
+
 from typing import Sequence, Union
 
 from alembic import op
 
 
-revision: str = 'b3c4d5e6f7a8'
-down_revision: Union[str, Sequence[str], None] = '9e7462593d21'
+revision: str = "b3c4d5e6f7a8"
+down_revision: Union[str, Sequence[str], None] = "9e7462593d21"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
