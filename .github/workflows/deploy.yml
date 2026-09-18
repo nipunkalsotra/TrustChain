@@ -82,7 +82,7 @@ jobs:
           version: v1.8.1
       - name: Cache Foundry build artifacts
         # Same cache as test.yml's jobs — see that file's comment.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             contracts/cache
@@ -186,7 +186,7 @@ jobs:
           version: v1.8.1
       - name: Cache Foundry build artifacts
         # Same cache as test.yml's jobs — see that file's comment.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             contracts/cache
