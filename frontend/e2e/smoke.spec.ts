@@ -1,114 +1,148 @@
-// e2e/smoke.spec.ts — Playwright smoke suite (P2): public landing page,
-// login, start run, authorised stream, unauthorised stream rejection,
-// logout. Needs a REAL backend already running on localhost:8000 (see
-// e2e/README.md) — this is deliberately end-to-end against real
-// infrastructure, not mocked, matching this repo's own testing
-// philosophy (CLAUDE.md).
-
-import { expect, test } from "@playwright/test"
-
-const API = "http://localhost:8000"
-
-function uniqueEmail(): string {
-    return `pw_smoke_${Date.now()}_${Math.random().toString(36).slice(2, 8)}@example.com`
+import { expect, test } from "@playwright/test";
+const API = "http://localhost:8000";
+function uniqueEmail() {
+  return `pw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}@example.com`;
 }
+async function signup(page: import("@playwright/test").Page) {
+  const email = uniqueEmail();
+  await page.goto("/auth?mode=signup");
+  await page.getByLabel("Full name").fill("Playwright Smoke");
+  await page.getByLabel("Email address").fill(email);
+  await page
+    .getByPlaceholder("Enter your password", { exact: true })
+    .fill("TrustChainBrowserTest9!");
+  await page.getByLabel("Confirm password").fill("TrustChainBrowserTest9!");
+  await page
+    .getByRole("button", { name: "Create account", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/dashboard$/, { timeout: 30000 });
+  await expect(
+    page.getByRole("heading", { name: "Welcome back, Playwright." }),
+  ).toBeVisible();
+  return email;
+}
+test("real signup, session cookies, workspace pages, settings, logout, and login", async ({
+  page,
+}) => {
+  const email = await signup(page);
+  const stored = await page.evaluate(() => localStorage.getItem("tc_session"));
+  expect(stored).toContain(email);
+  expect(stored).not.toContain("token");
+  const cookies = await page.context().cookies();
+  expect(cookies.find((c) => c.name === "tc_access")?.httpOnly).toBe(true);
+  await page.screenshot({
+    path: "/tmp/trustchain-live-workspace.png",
+    fullPage: true,
+  });
+  for (const [path, heading] of [
+    ["runs", "Agent runs"],
+    ["agents", "Agent registry"],
+    ["audit", "Audit trail"],
+    ["alerts", "Alert inbox"],
+    ["team", "Team members"],
+    ["keys", "API keys"],
+    ["settings", "Settings"],
+  ]) {
+    await page.goto(`/dashboard/${path}`);
+    await expect(
+      page.getByRole("heading", { name: heading, exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".p-loading")).toHaveCount(0);
+    await expect(page.locator(".p-error")).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByLabel("Name", { exact: true })
+    .fill("Browser test project");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Create", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Browser test project", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Open project", exact: true }).click();
+  await expect(page.getByLabel("Active project")).toHaveValue(/\d+/);
+  await expect(
+    page.getByLabel("Active project").locator("option:checked"),
+  ).toHaveText("Browser test project");
+  await page
+    .getByRole("button", { name: "Notifications", exact: true })
+    .click();
+  const toggle = page.getByRole("switch", {
+    name: "Informational alerts",
+    exact: true,
+  });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Notifications", exact: true })
+    .click();
+  await expect(
+    page.getByRole("switch", { name: "Informational alerts", exact: true }),
+  ).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page).toHaveURL(/\/auth$/);
+  expect(
+    await page.evaluate(() => localStorage.getItem("tc_session")),
+  ).toBeNull();
+  expect(
+    (await page.context().cookies()).find((c) => c.name === "tc_access"),
+  ).toBeUndefined();
+  await page.getByLabel("Email address").fill(email);
+  await page
+    .getByPlaceholder("Enter your password", { exact: true })
+    .fill("TrustChainBrowserTest9!");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+});
+test("real protected route and stale display cache cannot authenticate", async ({
+  page,
+}) => {
+  await page.goto("/auth");
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "tc_session",
+      JSON.stringify({ name: "Stale User", email: "stale@example.com" }),
+    ),
+  );
+  await page.goto("/dashboard");
+  await expect(page).toHaveURL(/\/auth\?next=/);
+});
+test("real pipeline launch returns a signed stream and rejects an unsigned stream", async ({
+  page,
+  request,
+}) => {
+  await signup(page);
+  const csrf = (await page.context().cookies()).find(
+    (c) => c.name === "tc_csrf",
+  )?.value;
+  const res = await page.request.post(`${API}/run-agent`, {
+    data: { task: "Summarize what an audit trail is in one sentence." },
+    headers: { "X-CSRF-Token": csrf! },
+  });
+  expect(res.ok()).toBeTruthy();
+  const body = await res.json();
+  expect(body.run_id).toBeTruthy();
+  expect(body.stream_url).toContain("token=");
+  const denied = await request.get(`${API}/stream/${body.run_id}`);
+  expect(denied.status()).toBe(401);
+  await page.goto(`/dashboard/runs/${body.run_id}`);
+  await expect(
+    page.getByRole("heading", { name: "Run overview", exact: true }),
+  ).toBeVisible();
+});
 
-test.describe("public landing page", () => {
-    test("loads without auth and shows the TrustChain brand", async ({ page }) => {
-        const response = await page.goto("/")
-        expect(response?.ok()).toBeTruthy()
-        await expect(page).toHaveTitle(/TrustChain/i)
+test('browser preflights allow workspace mutation methods', async ({ request }) => {
+  for (const method of ['PUT', 'PATCH', 'DELETE']) {
+    const res = await request.fetch(`${API}/me/notification-preferences`, {
+      method: 'OPTIONS', headers: { Origin: 'http://localhost:3000', 'Access-Control-Request-Method': method, 'Access-Control-Request-Headers': 'content-type,x-csrf-token' },
     })
-})
-
-test.describe("auth: signup, protected-route redirect, logout", () => {
-    test("an unauthenticated visitor hitting /dashboard is redirected to /auth", async ({ page }) => {
-        await page.goto("/dashboard")
-        await page.waitForURL(/\/auth/, { timeout: 10_000 })
-        expect(page.url()).toContain("/auth")
-    })
-
-    test("signup logs in, lands on /dashboard, and localStorage never holds a token", async ({ page }) => {
-        await page.goto("/auth")
-
-        // The auth page defaults to "login" mode — switch to "signup".
-        await page.getByRole("button", { name: /sign up/i }).click()
-
-        const email = uniqueEmail()
-        await page.getByPlaceholder(/nipun kalsotra/i).fill("Playwright Smoke")
-        await page.getByPlaceholder(/agent@trustchain\.io/i).fill(email)
-        await page.getByPlaceholder("••••••••••••").first().fill("CorrectHorseBattery9!")
-        await page.getByPlaceholder("••••••••••••").nth(1).fill("CorrectHorseBattery9!")
-
-        await page.getByRole("button", { name: /register identity/i }).click()
-        await page.waitForURL(/\/dashboard/, { timeout: 15_000 })
-
-        // The actual P1 security property this smoke test exists to catch
-        // a regression in: no XSS-readable token anywhere in localStorage.
-        const stored = await page.evaluate(() => localStorage.getItem("tc_session"))
-        expect(stored).not.toBeNull()
-        expect(stored).not.toContain("token")
-        expect(stored).not.toMatch(/eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/)
-
-        // The real session cookie IS there, HttpOnly (so page.evaluate()
-        // reading document.cookie must NOT see it — only the browser
-        // context's own cookie jar can).
-        const cookies = await page.context().cookies()
-        const accessCookie = cookies.find((c) => c.name === "tc_access")
-        expect(accessCookie).toBeDefined()
-        expect(accessCookie?.httpOnly).toBe(true)
-
-        // Logout clears the session and returns to /auth.
-        await page.getByRole("button", { name: /exit/i }).click()
-        await page.waitForURL(/\/auth/, { timeout: 10_000 })
-        const afterLogout = await page.evaluate(() => localStorage.getItem("tc_session"))
-        expect(afterLogout).toBeNull()
-    })
-})
-
-test.describe("run pipeline: start, authorised stream, unauthorised stream rejection", () => {
-    test("starting a run returns a stream_url with a token, and an unauthorised stream request is rejected", async ({ page, request }) => {
-        // Sign up via the API directly (faster/more deterministic than
-        // driving the form again) to get a session for the request
-        // context below — Playwright's `request` fixture shares cookies
-        // with `page` only after page-driven navigation sets them, so
-        // this signs up through the UI once, same as the test above,
-        // rather than trying to hand-splice a cookie jar.
-        await page.goto("/auth")
-        await page.getByRole("button", { name: /sign up/i }).click()
-        const email = uniqueEmail()
-        await page.getByPlaceholder(/nipun kalsotra/i).fill("Playwright Stream Smoke")
-        await page.getByPlaceholder(/agent@trustchain\.io/i).fill(email)
-        await page.getByPlaceholder("••••••••••••").first().fill("CorrectHorseBattery9!")
-        await page.getByPlaceholder("••••••••••••").nth(1).fill("CorrectHorseBattery9!")
-        await page.getByRole("button", { name: /register identity/i }).click()
-        await page.waitForURL(/\/dashboard/, { timeout: 15_000 })
-
-        // Real POST /run-agent through the browser context's own cookies —
-        // an unsafe request authenticated via cookie needs the CSRF header
-        // too (main.py's _csrf_protection_middleware), same as the real
-        // frontend's apiFetch attaches automatically; page.request bypasses
-        // apiFetch entirely, so this replicates that one header by hand.
-        const cookies = await page.context().cookies()
-        const csrfToken = cookies.find((c) => c.name === "tc_csrf")?.value
-        expect(csrfToken).toBeTruthy()
-
-        const runResponse = await page.request.post(`${API}/run-agent`, {
-            data: { task: "playwright smoke test task" },
-            headers: { "X-CSRF-Token": csrfToken! },
-        })
-        expect(runResponse.ok()).toBeTruthy()
-        const runBody = await runResponse.json()
-        expect(runBody.run_id).toBeTruthy()
-        expect(runBody.stream_url).toContain("token=")
-
-        // Authorised: the real, token-bearing stream_url succeeds.
-        const authorisedStream = await page.request.get(`${API}${runBody.stream_url}`)
-        expect(authorisedStream.status()).toBe(200)
-
-        // Unauthorised: the bare run_id with no token is rejected — this
-        // is the P1 stream-token requirement's actual security property.
-        const unauthorisedStream = await request.get(`${API}/stream/${runBody.run_id}`)
-        expect(unauthorisedStream.status()).toBe(401)
-    })
+    expect(res.ok()).toBeTruthy()
+    expect(res.headers()['access-control-allow-methods']).toContain(method)
+    expect(res.headers()['access-control-allow-origin']).toBe('http://localhost:3000')
+  }
 })

@@ -8,127 +8,211 @@
 // functions and asserts on how the mocked global fetch was actually
 // called, same as a real network inspector would see.
 
-import { beforeEach, describe, expect, it, vi } from "vitest"
-import { getRuns, refreshStreamToken, startRun } from "./api"
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getRuns, refreshStreamToken, startRun } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
-    return new Response(JSON.stringify(body), {
-        status,
-        headers: { "Content-Type": "application/json" },
-    })
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 beforeEach(() => {
-    document.cookie.split(";").forEach((c) => {
-        const name = c.split("=")[0]?.trim()
-        if (name) document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`
-    })
-})
+  document.cookie.split(";").forEach((c) => {
+    const name = c.split("=")[0]?.trim();
+    if (name)
+      document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
+  });
+});
 
 describe("apiFetch (via exported callers) — credentials + CSRF", () => {
-    it("always sends credentials: include, even for a safe GET", async () => {
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ runs: [], total: 0 }))
-        vi.stubGlobal("fetch", fetchMock)
+  it("always sends credentials: include, even for a safe GET", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ runs: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
 
-        await getRuns()
+    await getRuns();
 
-        expect(fetchMock).toHaveBeenCalledTimes(1)
-        const [, options] = fetchMock.mock.calls[0]
-        expect(options.credentials).toBe("include")
-    })
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options.credentials).toBe("include");
+  });
 
-    it("attaches X-CSRF-Token on an unsafe POST when tc_csrf is set", async () => {
-        document.cookie = "tc_csrf=real-csrf-value"
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ run_id: "r1", stream_url: "/stream/r1?token=x" }))
-        vi.stubGlobal("fetch", fetchMock)
+  it("attaches X-CSRF-Token on an unsafe POST when tc_csrf is set", async () => {
+    document.cookie = "tc_csrf=real-csrf-value";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ run_id: "r1", stream_url: "/stream/r1?token=x" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
 
-        await startRun("do the thing")
+    await startRun("do the thing");
 
-        const [, options] = fetchMock.mock.calls[0]
-        expect(options.headers["X-CSRF-Token"]).toBe("real-csrf-value")
-    })
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options.headers["X-CSRF-Token"]).toBe("real-csrf-value");
+  });
 
-    it("does NOT attach X-CSRF-Token on a safe GET even when tc_csrf is set", async () => {
-        document.cookie = "tc_csrf=real-csrf-value"
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ runs: [], total: 0 }))
-        vi.stubGlobal("fetch", fetchMock)
+  it("does NOT attach X-CSRF-Token on a safe GET even when tc_csrf is set", async () => {
+    document.cookie = "tc_csrf=real-csrf-value";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ runs: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
 
-        await getRuns()
+    await getRuns();
 
-        const [, options] = fetchMock.mock.calls[0]
-        expect(options.headers?.["X-CSRF-Token"]).toBeUndefined()
-    })
-})
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options.headers?.["X-CSRF-Token"]).toBeUndefined();
+  });
+});
 
 describe("apiFetch — silent refresh-and-retry on 401", () => {
-    it("on a 401, calls POST /auth/refresh once and retries the original request", async () => {
-        const calls: string[] = []
-        const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-            calls.push(`${options?.method ?? "GET"} ${url}`)
-            // getRuns() appends ?limit=50, so match by inclusion, not endsWith.
-            const runsCallsSoFar = calls.filter((c) => c.includes("/runs")).length
-            if (url.includes("/runs") && runsCallsSoFar === 1) {
-                return Promise.resolve(jsonResponse({ detail: "expired" }, 401))
-            }
-            if (url.endsWith("/auth/refresh")) {
-                return Promise.resolve(jsonResponse({ ok: true }, 200))
-            }
-            return Promise.resolve(jsonResponse({ runs: [], total: 0 }))
-        })
-        vi.stubGlobal("fetch", fetchMock)
+  it("on a 401, calls POST /auth/refresh once and retries the original request", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((url: string, options?: RequestInit) => {
+        calls.push(`${options?.method ?? "GET"} ${url}`);
+        // getRuns() appends ?limit=50, so match by inclusion, not endsWith.
+        const runsCallsSoFar = calls.filter((c) => c.includes("/runs")).length;
+        if (url.includes("/runs") && runsCallsSoFar === 1) {
+          return Promise.resolve(jsonResponse({ detail: "expired" }, 401));
+        }
+        if (url.endsWith("/auth/refresh")) {
+          return Promise.resolve(jsonResponse({ ok: true }, 200));
+        }
+        return Promise.resolve(jsonResponse({ runs: [], total: 0 }));
+      });
+    vi.stubGlobal("fetch", fetchMock);
 
-        const result = await getRuns()
+    const result = await getRuns();
 
-        expect(result).toEqual({ runs: [], total: 0 })
-        // GET /runs (401) -> POST /auth/refresh -> GET /runs (retry, succeeds)
-        expect(calls.filter((c) => c.includes("/runs")).length).toBe(2)
-        expect(calls.some((c) => c.startsWith("POST") && c.endsWith("/auth/refresh"))).toBe(true)
-    })
+    expect(result).toEqual({ runs: [], total: 0 });
+    // GET /runs (401) -> POST /auth/refresh -> GET /runs (retry, succeeds)
+    expect(calls.filter((c) => c.includes("/runs")).length).toBe(2);
+    expect(
+      calls.some((c) => c.startsWith("POST") && c.endsWith("/auth/refresh")),
+    ).toBe(true);
+  });
 
-    it("does not retry a second time if the retried request ALSO 401s (no infinite loop)", async () => {
-        const fetchMock = vi.fn().mockImplementation((url: string) => {
-            if (url.endsWith("/auth/refresh")) return Promise.resolve(jsonResponse({ ok: true }, 200))
-            return Promise.resolve(jsonResponse({ detail: "still expired" }, 401))
-        })
-        vi.stubGlobal("fetch", fetchMock)
+  it("does not retry a second time if the retried request ALSO 401s (no infinite loop)", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/auth/refresh"))
+        return Promise.resolve(jsonResponse({ ok: true }, 200));
+      return Promise.resolve(jsonResponse({ detail: "still expired" }, 401));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
-        await expect(getRuns()).rejects.toThrow("get runs failed")
-        // GET /runs, POST /auth/refresh, GET /runs (retry) — exactly 3, not more.
-        expect(fetchMock).toHaveBeenCalledTimes(3)
-    })
+    await expect(getRuns()).rejects.toThrow("still expired");
+    // GET /runs, POST /auth/refresh, GET /runs (retry) — exactly 3, not more.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 
-    it("does not attempt a refresh loop when the refresh call itself is what's calling apiFetch", async () => {
-        // login()/signup() are in the no-refresh-retry set — a failed
-        // login is the real answer, not a session to recover from.
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ detail: "invalid credentials" }, 401))
-        vi.stubGlobal("fetch", fetchMock)
+  it("does not attempt a refresh loop when the refresh call itself is what's calling apiFetch", async () => {
+    // login()/signup() are in the no-refresh-retry set — a failed
+    // login is the real answer, not a session to recover from.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ detail: "invalid credentials" }, 401));
+    vi.stubGlobal("fetch", fetchMock);
 
-        const { login } = await import("./api")
-        await expect(login("a@example.com", "wrong")).rejects.toThrow()
-        expect(fetchMock).toHaveBeenCalledTimes(1)
-    })
-})
+    const { login } = await import("./api");
+    await expect(login("a@example.com", "wrong")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("stream-token reconnect (POST /runs/{id}/stream-token)", () => {
-    it("returns a fresh stream_url for reconnecting after the original token expires", async () => {
-        const fetchMock = vi.fn().mockResolvedValue(
-            jsonResponse({ stream_url: "/stream/run_123?token=freshtoken" }),
-        )
-        vi.stubGlobal("fetch", fetchMock)
+  it("returns a fresh stream_url for reconnecting after the original token expires", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ stream_url: "/stream/run_123?token=freshtoken" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
 
-        const result = await refreshStreamToken("run_123")
+    const result = await refreshStreamToken("run_123");
 
-        expect(result.stream_url).toBe("/stream/run_123?token=freshtoken")
-        const [url, options] = fetchMock.mock.calls[0]
-        expect(url).toContain("/runs/run_123/stream-token")
-        expect(options.method).toBe("POST")
-        expect(options.credentials).toBe("include")
-    })
+    expect(result.stream_url).toBe("/stream/run_123?token=freshtoken");
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toContain("/runs/run_123/stream-token");
+    expect(options.method).toBe("POST");
+    expect(options.credentials).toBe("include");
+  });
 
-    it("throws when the reconnect endpoint rejects (e.g. another project's run)", async () => {
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ detail: "not found" }, 404))
-        vi.stubGlobal("fetch", fetchMock)
+  it("throws when the reconnect endpoint rejects (e.g. another project's run)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ detail: "not found" }, 404));
+    vi.stubGlobal("fetch", fetchMock);
 
-        await expect(refreshStreamToken("someone_elses_run")).rejects.toThrow("refresh stream token failed: 404")
-    })
-})
+    await expect(refreshStreamToken("someone_elses_run")).rejects.toThrow(
+      "not found",
+    );
+  });
+});
+
+describe("request failures and concurrent session recovery", () => {
+  it("shares one refresh across concurrent expired requests and reads the new CSRF cookie", async () => {
+    document.cookie = "tc_csrf=old-csrf";
+    let refreshed = false;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith("/auth/refresh")) {
+        await gate;
+        refreshed = true;
+        document.cookie = "tc_csrf=new-csrf";
+        return jsonResponse({ ok: true });
+      }
+      return refreshed
+        ? jsonResponse({ ok: true })
+        : jsonResponse({ detail: "expired" }, 401);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { request } = await import("./api");
+    const requests = [request("/one", "PUT", {}), request("/two", "DELETE")];
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url.endsWith("/auth/refresh")),
+      ).toHaveLength(1),
+    );
+    release();
+    await Promise.all(requests);
+    const retried = fetchMock.mock.calls
+      .filter(([url]) => !url.endsWith("/auth/refresh"))
+      .slice(-2);
+    expect(
+      retried.every(
+        ([, options]) => options.headers["X-CSRF-Token"] === "new-csrf",
+      ),
+    ).toBe(true);
+  });
+  it("preserves field-validation errors as readable messages", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ detail: [{ msg: "Password is too short" }] }, 422),
+        ),
+    );
+    const { signup } = await import("./api");
+    await expect(signup("Alex", "alex@example.com", "short")).rejects.toThrow(
+      "Password is too short",
+    );
+  });
+  it("rejects logout when the server did not revoke the session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "Try again" }, 503)),
+    );
+    const { logout } = await import("./api");
+    await expect(logout()).rejects.toThrow("Try again");
+  });
+});

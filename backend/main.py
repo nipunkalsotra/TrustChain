@@ -147,7 +147,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["Content-Type", "Cache-Control"],
 )
@@ -894,20 +894,25 @@ async def _run_pipeline_background(task: str, run_id: str, org_id: int):
     integration tests polling GET /runs/{run_id} right after a real
     pipeline run failed on a real Groq rate limit — not a hypothetical.
 
-    get_bridge() is called INSIDE the try block, not before it — a
-    second real bug found via real CI (not local dev, which always has a
-    real PRIVATE_KEY configured): blockchain/client.py's V1 bridge raises
-    ValueError("PRIVATE_KEY not set in .env") whenever that secret isn't
-    configured, which is exactly GitHub Actions' backend test job (it
-    correctly doesn't fabricate a real Monad testnet deployer key as a
-    secret). With get_bridge() unprotected before the try, that raise
-    killed this whole background task silently — before a single event
-    was ever published, before db.fail_run() ever ran — leaving the run
-    stuck at status='running' forever and the SSE stream's only signal a
-    120-second client-side timeout. Treating bridge-init failure as just
-    another pipeline failure (same error-event + db.fail_run() path any
-    other exception already gets) is both more correct AND is what
-    actually made the bug visible instead of silently hanging.
+    Does NOT resolve V1's get_bridge() — a prior version did, and called
+    it INSIDE this try block specifically because blockchain/client.py's
+    V1 bridge raises ValueError("PRIVATE_KEY not set in .env") whenever
+    that secret isn't configured (as in CI, which correctly doesn't
+    fabricate a real Monad testnet deployer key as a secret), and an
+    unprotected get_bridge() before the try killed this whole background
+    task silently — before a single event was published, before
+    db.fail_run() ever ran — leaving the run stuck at status='running'
+    forever with the SSE stream's only signal a 120-second client-side
+    timeout. Root cause turned out to be that the resolved bridge was
+    never actually used for anything: every node (agents/researcher.py,
+    validator.py, scorer.py, reporter.py) only ever passes it straight
+    through to log_step(), which V1→V2 migration left accepting but
+    ignoring it entirely (see its own docstring), and the pipeline's one
+    real on-chain write (scorer.py's write_score()) goes through V2's
+    Signer abstraction, not the bridge. So a run no longer needs a
+    configured V1 PRIVATE_KEY or live V1/Monad-testnet RPC connectivity
+    at all — removing the resolution fixes the same failure mode more
+    completely than moving it did.
     """
     bind_run_id(run_id)
     observability.PIPELINE_RUNS_TOTAL.labels(status="started").inc()
@@ -915,10 +920,9 @@ async def _run_pipeline_background(task: str, run_id: str, org_id: int):
     tracer = observability.get_tracer(__name__)
     succeeded = False
     try:
-        bridge = get_bridge()
         with tracer.start_as_current_span("pipeline_run") as span:
             span.set_attribute("run_id", run_id)
-            async for event in run_pipeline(task, run_id=run_id, bridge=bridge):
+            async for event in run_pipeline(task, run_id=run_id, bridge=None):
                 await run_events.publish_event(run_id, event)
                 if event.get("type") == "run_complete":
                     await db.complete_run(run_id, event, int(time.time()))

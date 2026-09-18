@@ -1,10 +1,4 @@
-import type { Metadata } from "next"
-
-export const metadata: Metadata = {
-  title: "Dashboard — TrustChain",
-}
-
-// Intentionally empty for now — no fake metrics/data, no placeholder card.
-export default function DashboardHomePage() {
-  return null
+import Overview from "@/components/product/Overview";
+export default function Page() {
+  return <Overview />;
 }

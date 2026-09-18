@@ -31,13 +31,9 @@ export const NAV_LINKS: NavLink[] = [
   { id: "pricing", label: "Pricing", kind: "route", href: "/pricing" },
 ]
 
-// Real login/signup doesn't exist yet — Log In and Get Started both go
-// straight to the dashboard shell (see components/dashboard/), which is
-// itself a "coming soon" placeholder for now. Not a fake auth flow: nothing
-// here pretends a session was created, it's just a direct link.
 export const NAV_ACTIONS = {
-  login: { label: "Log In", href: "/dashboard" },
-  getStarted: { label: "Get Started", href: "/dashboard" },
+  login: { label: "Log In", href: "/auth" },
+  getStarted: { label: "Get Started", href: "/auth?mode=signup" },
 } as const
 
 export const HERO = {
@@ -49,7 +45,7 @@ export const HERO = {
     "Tamper-proof provenance that meets global deployment needs.",
     "An immutable foundation for trust in AI systems.",
   ],
-  primaryCta: { label: "Get Started", href: "/dashboard" },
+  primaryCta: { label: "Get Started", href: "/auth?mode=signup" },
   secondaryCta: { label: "View Docs", href: "/coming-soon?from=docs" },
 } as const
 
@@ -214,7 +210,7 @@ export const PRODUCT_PANEL = {
 export const FINAL_CTA = {
   headline: "Stop asking people to trust your logs.",
   lead: "Give them a proof they can check themselves.",
-  primary: { label: "Get Started", href: "/dashboard" },
+  primary: { label: "Get Started", href: "/auth?mode=signup" },
   secondary: { label: "Read the Docs", href: "/coming-soon?from=docs" },
   footnote: "Anchored on Monad · Open verification format",
 } as const

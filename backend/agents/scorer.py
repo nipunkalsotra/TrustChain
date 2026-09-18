@@ -55,10 +55,14 @@ async def scorer_node(state: AgentState, bridge: Optional[Any] = None) -> AgentS
     llm        = get_llm()
     tracer     = observability.get_tracer(__name__)
 
-    # Resolve bridge early — scorer needs it for update_score calls
-    if bridge is None:
-        from blockchain.client import get_bridge
-        bridge = get_bridge()
+    # `bridge` is passed straight through to log_step (which ignores it —
+    # see its own docstring), never actually used to write anything —
+    # the real on-chain score write is write_score() below, via V2's
+    # Signer abstraction. Resolving V1's BlockchainBridge here was
+    # leftover from before that V2 retargeting (see score_writer.py's
+    # module docstring) and only added a hard, unnecessary dependency on
+    # a configured V1 PRIVATE_KEY / live V1 RPC connectivity — both
+    # deliberately unconfigured now that V1 is read-only (ADR-0003).
 
     tx_hashes:  list[str]  = list(state.get("tx_hashes",  []))
     sse_events: list[dict] = list(state.get("sse_events", []))
