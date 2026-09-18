@@ -26,11 +26,11 @@ export function getSession(): Session | null {
 }
 
 export function setSession(session: Session) {
-    localStorage.setItem(KEY, JSON.stringify(session))
+    try { localStorage.setItem(KEY, JSON.stringify({ name: session.name, email: session.email })) } catch {}
 }
 
 export function clearSession() {
-    localStorage.removeItem(KEY)
+    try { localStorage.removeItem(KEY) } catch {}
 }
 
 // The double-submit CSRF cookie (backend/refresh.py's tc_csrf) is the one

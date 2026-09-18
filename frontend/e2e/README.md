@@ -1,39 +1,18 @@
-# Playwright smoke suite
+# Browser checks
 
-End-to-end against real infrastructure, not mocked — matching this
-repo's own testing philosophy (see the root `CLAUDE.md`).
+Run from `frontend/`. Install Chromium with `npx playwright install chromium` if necessary.
 
-## Running locally
+- `npx playwright test e2e/product.spec.ts`: browser UI checks with explicit API fixtures. No live backend required.
+- `npx playwright test e2e/smoke.spec.ts`: real-backend integration at `http://localhost:8000`; requires PostgreSQL, Redis, migrations, and cookie/CORS configuration for `http://localhost:3000`.
 
-1. Start the real backend + Postgres/Redis/Anvil (repo root):
-   `./start.sh` (or `docker compose up --build`).
-2. From `frontend/`: `npx playwright test`
-   (`playwright.config.ts`'s `webServer` starts `npm run dev` for you if
-   it isn't already running; it does NOT start the backend).
+Playwright starts or reuses the frontend on port 3000. Run the suites sequentially, or give separate invocations distinct `--output` directories so their trace files do not overwrite one another. Integration tests create unique test accounts and projects. They verify run launch and stream authorization; external model and chain services govern pipeline completion.
 
-First run on a machine that's never used Playwright before also needs
-the browser binary: `npx playwright install chromium`.
+Screenshots from product tests are written to `/tmp/trustchain-*.png`. Failure traces are stored in `test-results/`.
 
-## What's covered
+For a complete workflow check with real model/search calls and chain writes:
 
-- The public landing page loads.
-- An unauthenticated visit to `/dashboard` redirects to `/auth`.
-- Signup → lands on `/dashboard` → `localStorage` never holds a token
-  (the actual P1 security property — see `lib/auth.ts`) → the real
-  `tc_access` session cookie is `HttpOnly` → logout clears local state
-  and returns to `/auth`.
-- Starting a real run (`POST /run-agent`) returns a `stream_url` with a
-  signed token; that URL's stream opens (200); the bare `run_id` with no
-  token is rejected (401) — the P1 stream-token requirement's actual
-  security property, not just its existence.
+```sh
+TRUSTCHAIN_FULL_PIPELINE=1 npx playwright test e2e/pipeline.spec.ts
+```
 
-## What's NOT covered here
-
-Waiting for a run to actually reach a terminal event (report generated,
-trust scores computed) needs real `GROQ_API_KEY`/`TAVILY_API_KEY` and can
-take anywhere from seconds to tens of seconds depending on the LLM
-provider — outside what a "smoke" suite should block on. The stream test
-above only proves the authorisation boundary (can you open the stream at
-all), not that a full pipeline run completes successfully end to end —
-that's `scripts/e2e_demo.py`'s job (backend-only, no browser), already
-covering it.
+This opt-in test signs up through the UI, launches a task from the dashboard, waits for the final report and score, checks that every recorded step is confirmed, exercises run verification and proof retrieval, and reopens the completed run. Without the environment flag, it is skipped. It requires the API, both MCP servers, deployed V2 contracts, anchor worker, and indexer, in addition to the standard database/Redis services.

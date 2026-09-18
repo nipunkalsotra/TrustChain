@@ -409,20 +409,38 @@ def test_notification_preferences_are_scoped_by_org(api_role_session_factory):
     assert visible == [alice["userId"]]
 
 
-def test_watchdog_tables_are_not_reachable_by_api_role(api_role_session_factory):
+def test_watchdog_tables_are_read_only_for_api_role(api_role_session_factory):
     """watchdog_cursor/batch_verifications are deliberately NOT tenant
     data (no org_id/project_id column to key an RLS policy on at all) —
-    migration d7e8f9a0b1c2 explicitly REVOKEs trustchain_api's access
-    rather than leaving it implicitly reachable via the blanket
-    default-privilege grant every other new table gets. This should fail
-    with a permission error, not just return zero rows — those are two
-    different guarantees (RLS hides ROWS; a REVOKE denies the query
-    outright, closer to 'this table doesn't exist' from api's perspective)."""
+    migration d7e8f9a0b1c2 REVOKEd trustchain_api's access entirely rather
+    than leaving it implicitly reachable via the blanket default-privilege
+    grant every other new table gets, and this test originally asserted
+    that full revoke.
+
+    Migration b3c4d5e6f7a8 loosened that to SELECT-only: GET
+    /integrity/status is itself written to read this exact state for a
+    tenant's "is everything OK right now" view (see its own docstring in
+    main.py), and the full revoke broke that read outright — confirmed via
+    a real authenticated request 500ing with InsufficientPrivilegeError,
+    not a hypothetical. SELECT-only satisfies both: the feature that needs
+    to read this state works, and the actual security property (the api
+    role can't tamper with the tamper-detector's own bookkeeping) still
+    holds, checked here via a real INSERT attempt failing with a
+    permission error rather than just asserting SELECT succeeds."""
     from sqlalchemy.exc import DBAPIError
 
     async def _try_read():
         async with api_role_session_factory() as session:
-            await session.execute(text("SELECT * FROM watchdog_cursor"))
+            return (await session.execute(text("SELECT * FROM watchdog_cursor"))).all()
+
+    async def _try_write():
+        async with api_role_session_factory() as session:
+            await session.execute(text(
+                "INSERT INTO watchdog_cursor (detector, last_id, last_run_at, updated_at) "
+                "VALUES ('rls_test_probe', 0, 0, 0)"
+            ))
+
+    run(_try_read())  # no permission error — SELECT is now granted
 
     with pytest.raises(DBAPIError):
-        run(_try_read())
+        run(_try_write())

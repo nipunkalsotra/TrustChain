@@ -29,8 +29,16 @@ from config import get_settings
 # The ONLY place these are allowed to be hardcoded — agents/base.py::get_llm
 # and blockchain/hashing_utils.py::AGENTS both import from here instead of
 # each carrying their own copy.
-MODEL_NAME = "llama-3.3-70b-versatile"
-MODEL_VERSION = "groq-v1"
+#
+# llama-3.3-70b-versatile was decommissioned from Groq's catalog (every
+# call now 404s "model does not exist") — confirmed against Groq's own
+# live /v1/models list, which no longer has any Llama-family chat model
+# at all. openai/gpt-oss-120b is its replacement: verified directly
+# against Groq's real chat/completions endpoint with a tool-calling
+# request (finish_reason="tool_calls", correct structured arguments) —
+# scorer_node's with_structured_output() call depends on that support.
+MODEL_NAME = "openai/gpt-oss-120b"
+MODEL_VERSION = "groq-v2"
 
 
 def build_chat_model(provider: Optional[str] = None) -> BaseChatModel:

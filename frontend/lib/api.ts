@@ -1,179 +1,159 @@
-import { csrfHeader } from "@/lib/auth"
+import { csrfHeader } from "@/lib/auth";
+import type { MeResponse } from "./product-types";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const PUBLIC_AUTH = new Set([
+  "/auth/login",
+  "/auth/signup",
+  "/auth/refresh",
+  "/auth/logout",
+  "/auth/forgot-password",
+]);
+let refreshRequest: Promise<Response> | null = null;
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
 
-const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"])
-// Endpoints excluded from the silent-refresh-and-retry loop below: a failed
-// login/signup IS the real answer, not an expired session to recover from,
-// and retrying /auth/refresh or /auth/logout against themselves after their
-// own 401 would either recurse or make no sense.
-const NO_REFRESH_RETRY = new Set(["/auth/login", "/auth/signup", "/auth/refresh", "/auth/logout"])
-
-// Every request now goes through here — `credentials: "include"` sends
-// the HttpOnly tc_access session cookie (and receives Set-Cookie back),
-// an unsafe method gets the CSRF header matched against tc_csrf (see
-// backend/main.py's _csrf_protection_middleware), and a 401 gets exactly
-// one silent POST /auth/refresh + retry before giving up — the tc_access
-// cookie is only 15 minutes, so this is the normal path for any session
-// that's been open a while, not an edge case.
-async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
-    const method = (options.method ?? "GET").toUpperCase()
-    const headers = { ...options.headers, ...(UNSAFE_METHODS.has(method) ? csrfHeader() : {}) }
-    const doFetch = () => fetch(`${API}${path}`, { ...options, headers, credentials: "include" })
-
-    let res = await doFetch()
-    if (res.status === 401 && !NO_REFRESH_RETRY.has(path)) {
-        const refreshed = await fetch(`${API}/auth/refresh`, {
-            method: "POST", credentials: "include", headers: csrfHeader(),
-        })
-        if (refreshed.ok) res = await doFetch()
+export async function request<T>(
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<T> {
+  const send = () =>
+    fetch(`${API}${path}`, {
+      method,
+      credentials: "include",
+      signal: AbortSignal.timeout(60000),
+      headers: {
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(method === "GET" ? {} : csrfHeader()),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  let res: Response;
+  try {
+    res = await send();
+    if (
+      res.status === 401 &&
+      !PUBLIC_AUTH.has(path) &&
+      !path.startsWith("/auth/reset-password/") &&
+      !path.startsWith("/auth/verify-email/")
+    ) {
+      if (!refreshRequest)
+        refreshRequest = fetch(`${API}/auth/refresh`, {
+          method: "POST",
+          credentials: "include",
+          headers: csrfHeader(),
+          signal: AbortSignal.timeout(15000),
+        }).finally(() => {
+          refreshRequest = null;
+        });
+      const refreshed = await refreshRequest;
+      if (refreshed.ok) res = await send();
+      if (res.status === 401 && typeof window !== "undefined")
+        window.dispatchEvent(new Event("tc:session-expired"));
     }
-    return res
+  } catch {
+    throw new ApiRequestError(
+      "Unable to reach TrustChain. Check your connection and try again.",
+      0,
+    );
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = data?.detail ?? data?.error?.message ?? data?.message;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((e: { msg: string }) => e.msg).join(". ")
+          : `Request failed (${res.status}). Please try again.`;
+    throw new ApiRequestError(message, res.status);
+  }
+  return data as T;
 }
-
-// ── POST /auth/signup, POST /auth/login ───────────────────────────────────────
-// Both still return {token, name, email} in the body (SDK/CLI compatibility
-// — see backend/main.py's own comment on that route) but the frontend now
-// ignores `token` entirely; credentials:"include" (via apiFetch) is what
-// actually establishes the session, through the Set-Cookie headers riding
-// alongside that body.
-export async function signup(name: string, email: string, password: string) {
-    const res = await apiFetch("/auth/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
-    })
-    if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail ?? `signup failed: ${res.status}`)
-    }
-    return res.json()
-}
-
-export async function login(email: string, password: string) {
-    const res = await apiFetch("/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-    })
-    if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail ?? `login failed: ${res.status}`)
-    }
-    return res.json()
-}
-
-// ── POST /auth/logout ─────────────────────────────────────────────────────────
-export async function logout() {
-    await apiFetch("/auth/logout", { method: "POST" })
-}
-
-// ── POST /run-agent ───────────────────────────────────────────────────────────
-export async function startRun(task: string): Promise<{ run_id: string; stream_url: string }> {
-    const res = await apiFetch("/run-agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task }),
-    })
-    if (res.status === 401) throw new Error("Please log in again — your session expired.")
-    if (!res.ok) throw new Error(`start run failed: ${res.status}`)
-    return res.json()
-}
-
-// ── GET /chain-status ─────────────────────────────────────────────────────────
-export async function getChainStatus() {
-    const res = await apiFetch("/chain-status")
-    if (!res.ok) throw new Error("chain status failed")
-    return res.json()
-}
-
-// ── GET /trust-scores ─────────────────────────────────────────────────────────
-export async function getTrustScores(runId: string) {
-    const res = await apiFetch(`/trust-scores?run_id=${runId}`)
-    if (!res.ok) throw new Error("trust scores failed")
-    return res.json()  // { runId, scores: TrustScore[] }
-}
-
-// ── GET /trust-scores/history ─────────────────────────────────────────────────
-export async function getTrustScoreHistory(runId: string) {
-    const res = await apiFetch(`/trust-scores/history?run_id=${runId}`)
-    if (!res.ok) throw new Error("trust score history failed")
-    return res.json()  // { runId, history: Record<agentId, ScoreHistoryPoint[]> }
-}
-
-// ── GET /audit-log ────────────────────────────────────────────────────────────
-export async function getAuditLog(runId?: string) {
-    const url = runId ? `/audit-log?run_id=${runId}` : "/audit-log"
-    const res = await apiFetch(url)
-    if (!res.ok) throw new Error("audit log failed")
-    return res.json()  // { entries, total }
-}
-
-// ── POST /verify — check all 4 agent code hashes ─────────────────────────────
-// OLD: verifyIntegrity(agentId, codeHashHex)  ← WRONG, backend expects { runId }
-// NEW: verifyRun(runId) sends { runId } matching backend VerifyRequest model
-export async function verifyRun(runId: string) {
-    const res = await apiFetch("/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId }),
-    })
-    if (!res.ok) throw new Error(`verify failed: ${res.status}`)
-    return res.json()
-    // { runId, allMatch, agents: [{ agentId, exists, matches, verified, registeredHash }] }
-}
-
-// ── GET /verify/tamper-demo — read-only, no gas ───────────────────────────────
-export async function tamperDemo(agentId: string) {
-    const res = await apiFetch(`/verify/tamper-demo?agent_id=${agentId}`)
-    if (!res.ok) throw new Error(`tamper demo failed: ${res.status}`)
-    return res.json()
-    // { agentId, real: {matches,exists,verified,hash,simulatedModel}, tampered: {...} }
-}
-
-// ── GET /verify-audit — check all audit entries for a run ────────────────────
-export async function verifyAudit(runId: string) {
-    const res = await apiFetch(`/verify-audit?run_id=${runId}`)
-    if (!res.ok) throw new Error(`verify audit failed: ${res.status}`)
-    return res.json()
-    // { runId, allMatch, entries: [{ entryId, agentId, action, actionMatch, inputMatch, outputMatch, txHash }] }
-}
-
-// ── GET /runs/{runId} ─────────────────────────────────────────────────────────
-export async function getRun(runId: string) {
-    const res = await apiFetch(`/runs/${runId}`)
-    if (!res.ok) throw new Error("get run failed")
-    return res.json()
-}
-
-// ── GET /runs — run history, persisted in SQLite (survives restarts) ─────────
-export async function getRuns(limit = 50) {
-    const res = await apiFetch(`/runs?limit=${limit}`)
-    if (!res.ok) throw new Error("get runs failed")
-    return res.json()  // { runs: RunRecord[], total }
-}
-
-// ── GET /leaderboard ──────────────────────────────────────────────────────────
-export async function getLeaderboard(maxRuns = 50) {
-    const res = await apiFetch(`/leaderboard?max_runs=${maxRuns}`)
-    if (!res.ok) throw new Error("leaderboard failed")
-    return res.json()  // { agents: [{agentId, avgScore, bestScore, runsCount}], totalRuns, runsConsidered }
-}
-
-// ── SSE stream URL ────────────────────────────────────────────────────────────
-// GET /stream/{run_id} requires a short-lived signed token (browser
-// EventSource can't set an Authorization header — see backend/main.py's
-// comment on that endpoint). There is no way to build a valid stream URL
-// from just a run_id anymore — the only source of one is startRun()'s own
-// `stream_url` field (POST /run-agent) or POST /runs/{runId}/stream-token
-// (reconnecting after the original token expires) — this just resolves
-// whichever relative URL one of those returned against the API host.
-export const resolveStreamUrl = (relativeStreamUrl: string) => `${API}${relativeStreamUrl}`
-
-// ── POST /runs/{runId}/stream-token — reconnect after the stream token in
-// startRun()'s original stream_url has expired (5 minutes) ─────────────────
-export async function refreshStreamToken(runId: string): Promise<{ stream_url: string }> {
-    const res = await apiFetch(`/runs/${runId}/stream-token`, { method: "POST" })
-    if (!res.ok) throw new Error(`refresh stream token failed: ${res.status}`)
-    return res.json()
-}
+export const getMe = () => request<MeResponse>("/me");
+export const switchProject = (id: number) =>
+  request("/auth/switch-project", "POST", { project_id: id });
+export const signup = (
+  name: string,
+  email: string,
+  password: string,
+  invite_token?: string,
+) =>
+  request<{ name: string; email: string }>("/auth/signup", "POST", {
+    name,
+    email,
+    password,
+    ...(invite_token ? { invite_token } : {}),
+  });
+export const login = (email: string, password: string) =>
+  request<{ name: string; email: string }>("/auth/login", "POST", {
+    email,
+    password,
+  });
+export const logout = () => request("/auth/logout", "POST");
+export const forgotPassword = (email: string) =>
+  request("/auth/forgot-password", "POST", { email });
+export const resetPassword = (token: string, new_password: string) =>
+  request(`/auth/reset-password/${encodeURIComponent(token)}`, "POST", {
+    new_password,
+  });
+export const verifyEmail = (token: string) =>
+  request(`/auth/verify-email/${encodeURIComponent(token)}`, "POST");
+export const resendVerification = () =>
+  request("/auth/resend-verification", "POST");
+export const startRun = (task: string) =>
+  request<{ run_id: string; stream_url: string }>("/run-agent", "POST", {
+    task,
+  });
+export const getRuns = (limit = 50) =>
+  request<{ runs: import("./types").RunRecord[]; total: number }>(
+    `/runs?limit=${limit}`,
+  );
+export const getRun = (id: string) =>
+  request<Record<string, unknown>>(`/runs/${encodeURIComponent(id)}`);
+export const getChainStatus = () =>
+  request<import("./types").ChainStatus>("/chain-status");
+export const getTrustScores = (id: string) =>
+  request<{ scores: import("./types").TrustScore[] }>(
+    `/trust-scores?run_id=${encodeURIComponent(id)}`,
+  );
+export const getTrustScoreHistory = (id: string) =>
+  request<{ history: Record<string, import("./types").ScoreHistoryPoint[]> }>(
+    `/trust-scores/history?run_id=${encodeURIComponent(id)}`,
+  );
+export const getAuditLog = (id?: string) =>
+  request<{ entries: import("./product-types").Entry[]; total: number }>(
+    `/audit-log${id ? `?run_id=${encodeURIComponent(id)}` : ""}`,
+  );
+export const getLeaderboard = (limit = 50) =>
+  request<{
+    agents: import("./types").LeaderboardEntry[];
+    totalRuns: number;
+    runsConsidered: number;
+  }>(`/leaderboard?max_runs=${limit}`);
+export const verifyRun = (id: string) =>
+  request<import("./types").IdentityVerifyResult>("/verify", "POST", {
+    runId: id,
+  });
+export const verifyAudit = (id: string) =>
+  request<import("./types").AuditVerifyResult>(
+    `/verify-audit?run_id=${encodeURIComponent(id)}`,
+  );
+export const tamperDemo = (id: string) =>
+  request<import("./types").TamperDemoResult>(
+    `/verify/tamper-demo?agent_id=${encodeURIComponent(id)}`,
+  );
+export const refreshStreamToken = (id: string) =>
+  request<{ stream_url: string }>(
+    `/runs/${encodeURIComponent(id)}/stream-token`,
+    "POST",
+  );
+export const resolveStreamUrl = (url: string) => `${API}${url}`;
