@@ -1,0 +1,211 @@
+{
+  "date": "2026-11-11",
+  "commit": "0f81c27b0ebc71b8847eccb3e6aa1a69308c73c7",
+  "git_remote_ahead_behind": [
+    0,
+    0
+  ],
+  "environment": {
+    "node": "26.7.0",
+    "python": "3.14.7",
+    "next": "16.3.4",
+    "playwright": "1.63.0",
+    "chain": 31337,
+    "email": "console"
+  },
+  "playwright": {
+    "fixture_scenarios_passed": 6,
+    "real_service_scenarios": [
+      {
+        "title": "real signup, session cookies, workspace pages, settings, logout, and login",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "real protected route and stale display cache cannot authenticate",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "real pipeline launch returns a signed stream and rejects an unsigned stream",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "browser preflights allow workspace mutation methods",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "a dashboard-launched pipeline completes with a report and confirmed evidence",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "verification email opens a working verification page",
+        "status": "failed",
+        "errors": [
+          "Error: The link actually sent in the email must work\n\nexpect(received).toBe(expected) // Object.is equality\n\nExpected: 200\nReceived: 404\n\n  69 |   const message = await mail(email, \"verify-email\");\n  70 |   const response = await page.goto(message.url);\n> 71 |   expect(response!.status(), \"The link actually sent in the email must work\").toBe(200);\n     |                                                                               ^\n  72 |   await expect(page.getByText(\"Your email is verified.\", { exact: false })).toBeVisible();\n  73 | });\n  74 |\n    at /home/nipun/Documents/Projects/TrustChain/frontend/e2e/audit.spec.ts:71:79"
+        ]
+      },
+      {
+        "title": "password reset email opens a working reset form",
+        "status": "failed",
+        "errors": [
+          "Error: The link actually sent in the email must work\n\nexpect(received).toBe(expected) // Object.is equality\n\nExpected: 200\nReceived: 404\n\n  82 |   const message = await mail(email, \"reset-password\");\n  83 |   const response = await page.goto(message.url);\n> 84 |   expect(response!.status(), \"The link actually sent in the email must work\").toBe(200);\n     |                                                                               ^\n  85 |   await expect(page.getByLabel(\"New password\", { exact: true })).toBeVisible();\n  86 | });\n  87 |\n    at /home/nipun/Documents/Projects/TrustChain/frontend/e2e/audit.spec.ts:84:79"
+        ]
+      },
+      {
+        "title": "implemented verification and reset forms enforce token use and allow new-password login",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "organization and project create, rename, switch, and persistence",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "UI-created API key drives SDK logging, chain proof, browser evidence, export, and revocation",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "agent UI registration and real on-chain fingerprint match and mismatch",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "SDK identity drift reaches the alert inbox and supports acknowledge, resolve, and reopen",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "invite acceptance, role changes, viewer restrictions, and member removal",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "invalid tokens, unknown run, and automatic access-cookie refresh",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "run and audit filtering, pagination, and real JSON downloads",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "all notification preferences persist, and invitations resend and revoke",
+        "status": "passed",
+        "errors": []
+      },
+      {
+        "title": "concurrent SDK registrations return a receipt for each independent agent",
+        "status": "failed",
+        "errors": [
+          "Error: Independent concurrent registrations must not collide on signer nonces\n\nexpect(received).toEqual(expected) // deep equality\n\n- Expected  - 3\n+ Received  + 3\n\n  Array [\n    \"confirmed\",\n-   \"confirmed\",\n-   \"confirmed\",\n-   \"confirmed\",\n+   \"failed: 502\",\n+   \"failed: 502\",\n+   \"failed: 502\",\n  ]\n\n  372 |   const keys = await (await page.request.get(`${API}/api-keys`)).json();\n  373 |   for (const entry of keys.keys) await page.request.delete(`${API}/api-keys/${entry.id}`, { headers: await csrf(page) });\n> 374 |   expect(statuses, \"Independent concurrent registrations must not collide on signer nonces\").toEqual(Array(4).fill(\"confirmed\"));\n      |                                                                                              ^\n  375 | });\n  376 |\n    at /home/nipun/Documents/Projects/TrustChain/frontend/e2e/audit.spec.ts:374:94"
+        ]
+      },
+      {
+        "title": "completed pipeline workspace pages work on mobile and show the active evidence chain",
+        "status": "failed",
+        "errors": [
+          "Error: anchors\n\nexpect(received).toBeLessThanOrEqual(expected)\n\nExpected: <= 390\nReceived:    411\n\n  394 |     await expect(page.locator(\".p-loading\")).toHaveCount(0);\n  395 |     await expect(page.locator(\".p-error\")).toHaveCount(0);\n> 396 |     expect.soft(await page.evaluate(() => document.documentElement.scrollWidth), path).toBeLessThanOrEqual(390);\n      |                                                                                        ^\n  397 |   }\n  398 |   expect(errors).toEqual([]);\n  399 |   await page.goto(\"/dashboard/anchors\");\n    at /home/nipun/Documents/Projects/TrustChain/frontend/e2e/audit.spec.ts:396:88",
+          "Error: expect(locator).toHaveText(expected) failed\n\nLocator:  locator('.p-stat').filter({ hasText: 'Pipeline chain' }).locator('.p-stat-value')\nExpected: \"#31337\"\nReceived: \"Unavailable\"\nTimeout:  5000ms\n\nCall log:\n  - Expect \"toHaveText\" locator('.p-stat').filter({ hasText: 'Pipeline chain' }).locator('.p-stat-value') with timeout 5000ms\n  - waiting for locator('.p-stat').filter({ hasText: 'Pipeline chain' }).locator('.p-stat-value')\n    14 \u00d7 locator resolved to <div class=\"p-stat-value\">Unavailable</div>\n       - unexpected value \"Unavailable\"\n\n\n  402 |   const chainId = parseInt((await rpc.json()).result, 16);\n  403 |   await page.screenshot({ path: \"/tmp/trustchain-audit/live-mobile-anchors.png\", fullPage: true });\n> 404 |   await expect(page.locator(\".p-stat\").filter({ hasText: \"Pipeline chain\" }).locator(\".p-stat-value\")).toHaveText(`#${chainId}`);\n      |                                                                                                        ^\n  405 | });\n  406 |\n    at /home/nipun/Documents/Projects/TrustChain/frontend/e2e/audit.spec.ts:404:104"
+        ]
+      }
+    ],
+    "unique_scenarios_total": 24,
+    "passed": 20,
+    "failed": 4
+  },
+  "backend": {
+    "total": 412,
+    "passed": 409,
+    "skipped": [
+      {
+        "name": "test_chaos_postgres_outage_ready_degrades_and_recovers",
+        "reason": "Postgres is self-provisioned via Testcontainers this session (see conftest.py's _TC_POSTGRES_SELF_PROVISIONED) \u2014 those containers aren't designed to survive an out-of-band docker stop/start the way this test needs; run against the docker-compose-managed instance (DATABASE_URL set) to exercise this scenario"
+      },
+      {
+        "name": "test_onchain_root_mismatch_is_detected",
+        "reason": "integration point \u2014 build on tests/test_anchor_worker.py's real anchoring flow"
+      },
+      {
+        "name": "test_aws_kms_signer_requires_boto3_when_no_client_given",
+        "reason": "boto3 is installed in this environment \u2014 nothing to assert here"
+      }
+    ]
+  },
+  "python_sdk_and_cli": {
+    "total": 49,
+    "passed": 48,
+    "skipped": [
+      {
+        "name": "test_trust_scores_after_a_completed_run",
+        "reason": "run did not complete successfully \u2014 nothing to check scores for: {'message': \"Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kpr33641ezfrhyr5d2pzzp1z` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7045, Requested 4018. Please try again in 22.9725s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}\"}"
+      }
+    ]
+  },
+  "typescript_sdk": {
+    "passed": 30,
+    "failed": 1,
+    "skipped": 0,
+    "isolated_registration_retry_passed": true,
+    "concurrent_registration": {
+      "attempted": 4,
+      "succeeded": 1,
+      "http_502": 3
+    }
+  },
+  "frontend_unit_tests": {
+    "passed": 20
+  },
+  "frontend_build": "passed",
+  "contracts_forge_test": "passed",
+  "pipeline": {
+    "run_id": "run_20261111_095907_d20d29e3",
+    "score": 60,
+    "report_characters": 2016,
+    "confirmed_audit_steps": 10,
+    "duration_seconds": 22.2
+  },
+  "dependency_audit": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 1,
+      "moderate": 16,
+      "high": 9,
+      "critical": 2,
+      "total": 28
+    },
+    "dependencies": {
+      "prod": 494,
+      "dev": 371,
+      "optional": 115,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 902
+    }
+  },
+  "production_dependency_audit": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 1,
+      "moderate": 8,
+      "high": 7,
+      "critical": 2,
+      "total": 18
+    },
+    "dependencies": {
+      "prod": 494,
+      "dev": 371,
+      "optional": 115,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 902
+    }
+  },
+  "outdated_frontend_direct_dependencies": 20
+}

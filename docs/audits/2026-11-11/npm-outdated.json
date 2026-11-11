@@ -1,0 +1,142 @@
+{
+  "@playwright/test": {
+    "current": "1.63.0",
+    "wanted": "1.65.0",
+    "latest": "1.65.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/@playwright/test"
+  },
+  "@tailwindcss/postcss": {
+    "current": "4.3.0",
+    "wanted": "4.3.5",
+    "latest": "4.3.5",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/@tailwindcss/postcss"
+  },
+  "@types/node": {
+    "current": "20.19.42",
+    "wanted": "20.19.43",
+    "latest": "26.6.6",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/@types/node"
+  },
+  "@types/react": {
+    "current": "19.2.17",
+    "wanted": "19.3.0",
+    "latest": "19.3.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/@types/react"
+  },
+  "@types/react-dom": {
+    "current": "19.2.3",
+    "wanted": "19.3.0",
+    "latest": "19.3.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/@types/react-dom"
+  },
+  "eslint": {
+    "current": "9.39.4",
+    "wanted": "9.39.5",
+    "latest": "10.14.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/eslint"
+  },
+  "eslint-config-next": {
+    "current": "16.2.7",
+    "wanted": "16.2.7",
+    "latest": "16.4.6",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/eslint-config-next"
+  },
+  "framer-motion": {
+    "current": "12.40.0",
+    "wanted": "12.43.0",
+    "latest": "14.12.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/framer-motion"
+  },
+  "jsdom": {
+    "current": "29.1.1",
+    "wanted": "29.1.1",
+    "latest": "31.0.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/jsdom"
+  },
+  "lucide-react": {
+    "current": "1.17.0",
+    "wanted": "1.72.0",
+    "latest": "1.72.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/lucide-react"
+  },
+  "next": {
+    "current": "16.3.4",
+    "wanted": "16.4.6",
+    "latest": "16.4.6",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/next"
+  },
+  "radix-ui": {
+    "current": "1.5.0",
+    "wanted": "1.8.1",
+    "latest": "1.8.1",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/radix-ui"
+  },
+  "react": {
+    "current": "19.2.4",
+    "wanted": "19.2.4",
+    "latest": "19.3.1",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/react"
+  },
+  "react-dom": {
+    "current": "19.2.4",
+    "wanted": "19.2.4",
+    "latest": "19.3.1",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/react-dom"
+  },
+  "recharts": {
+    "current": "3.8.1",
+    "wanted": "3.10.1",
+    "latest": "3.10.1",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/recharts"
+  },
+  "shadcn": {
+    "current": "4.10.0",
+    "wanted": "4.23.0",
+    "latest": "4.23.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/shadcn"
+  },
+  "tailwind-merge": {
+    "current": "3.6.0",
+    "wanted": "3.7.0",
+    "latest": "3.7.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/tailwind-merge"
+  },
+  "tailwindcss": {
+    "current": "4.3.0",
+    "wanted": "4.3.5",
+    "latest": "4.3.5",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/tailwindcss"
+  },
+  "typescript": {
+    "current": "5.9.3",
+    "wanted": "5.9.3",
+    "latest": "7.0.2",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/typescript"
+  },
+  "vitest": {
+    "current": "4.1.11",
+    "wanted": "4.1.12",
+    "latest": "5.1.0",
+    "dependent": "frontend",
+    "location": "/home/nipun/Documents/Projects/TrustChain/frontend/node_modules/vitest"
+  }
+}

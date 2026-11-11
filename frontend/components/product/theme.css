@@ -783,3 +783,7 @@
 .p-table-wrap {
   position: relative;
 }
+
+/* Stat grids must shrink within narrow evidence views. */
+.p-stat { min-width: 0; }
+.p-stat-value { overflow-wrap: anywhere; }

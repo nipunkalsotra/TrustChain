@@ -1,0 +1,29 @@
+{
+  "source": "artifacts/demo/q.mp4",
+  "sha256": "2279cda76d870031bb4c70fcb019238c223cd1b882e49b08d1df762bf6d58593",
+  "screenshots_seconds": {
+    "overview": 255,
+    "completed-run": 114,
+    "trust-scores": 133,
+    "audit-trail": 142,
+    "proof": 157,
+    "agent-identity": 198,
+    "integrity-alert": 214,
+    "notifications": 237
+  },
+  "clip_ranges_seconds": {
+    "run-to-evidence": [
+      122,
+      131
+    ],
+    "proof-in-action": [
+      154,
+      163
+    ],
+    "identity-to-alert": [
+      202,
+      217
+    ]
+  },
+  "processing": "Top 1600x900 crop removes recording chapter overlay; GIF previews downscaled to 720px at 8fps. Product content is not replaced."
+}

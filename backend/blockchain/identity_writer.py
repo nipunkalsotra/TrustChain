@@ -17,6 +17,7 @@ role distinct from both DEFAULT_ADMIN_ROLE and ANCHOR_ROLE.
 import asyncio
 
 import observability
+from blockchain.transaction_lock import serialized_transaction
 from anchor_worker.chain import get_identity_registry_contract, get_signer, get_w3
 from blockchain.gas import build_fee_params, estimate_gas_with_margin
 from logging_config import get_logger
@@ -24,6 +25,7 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 
+@serialized_transaction
 async def register_agent(project_id: int, agent_id: str, code_hash: str, model: str, version: str) -> str:
     """Signs, sends, and waits for confirmation of one registerAgent()
     call. Returns the tx hash. Raises on revert or confirmation timeout —
@@ -66,6 +68,7 @@ async def register_agent(project_id: int, agent_id: str, code_hash: str, model: 
     return tx_hash_hex
 
 
+@serialized_transaction
 async def revoke_agent(project_id: int, agent_id: str) -> str:
     tracer = observability.get_tracer(__name__)
     with tracer.start_as_current_span("rpc_call.revoke_agent") as span:

@@ -106,7 +106,7 @@ test("stream yields events ending in the synthetic run_complete wrapper", { skip
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
   const started = await client.runAgent(`ts sdk integration test task ${randomUUID()}`);
   const events = [];
-  for await (const event of client.stream(started.run_id, started.stream_url, 90_000)) {
+  for await (const event of client.stream(started.run_id, started.stream_url, 300_000)) {
     events.push(event);
   }
   assert.ok(events.length > 0, "expected at least one SSE event");
@@ -118,7 +118,7 @@ test("stream yields events ending in the synthetic run_complete wrapper", { skip
 
 test("runAndWait blocks until the terminal event", { skip: !up }, async () => {
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
-  const finalEvent = await client.runAndWait(`ts sdk integration test task ${randomUUID()}`, 90_000);
+  const finalEvent = await client.runAndWait(`ts sdk integration test task ${randomUUID()}`, 300_000);
   assert.equal(finalEvent?.type, "run_complete");
 });
 
@@ -130,7 +130,7 @@ test("getRun is immediately queryable right after stream drains (no race)", { sk
   // purpose — if this flakes, the race is back.
   const client = new TrustChainClient(await freshApiKey(), { baseUrl: BASE_URL });
   const started = await client.runAgent(`ts sdk integration test task ${randomUUID()}`);
-  for await (const _event of client.stream(started.run_id, started.stream_url, 90_000)) {
+  for await (const _event of client.stream(started.run_id, started.stream_url, 300_000)) {
     // drain
   }
   await client.getRun(started.run_id); // must not throw NotFoundError

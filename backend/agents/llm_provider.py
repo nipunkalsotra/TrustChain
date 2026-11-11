@@ -37,7 +37,7 @@ from config import get_settings
 # against Groq's real chat/completions endpoint with a tool-calling
 # request (finish_reason="tool_calls", correct structured arguments) —
 # scorer_node's with_structured_output() call depends on that support.
-MODEL_NAME = "openai/gpt-oss-120b"
+MODEL_NAME = get_settings().groq_model
 MODEL_VERSION = "groq-v2"
 
 
@@ -54,6 +54,10 @@ def build_chat_model(provider: Optional[str] = None) -> BaseChatModel:
         api_key = get_settings().groq_api_key
         if not api_key:
             raise ValueError("GROQ_API_KEY not set in .env")
-        return ChatGroq(model=MODEL_NAME, temperature=0.3, max_tokens=2048, api_key=api_key)
+        return ChatGroq(
+            model=MODEL_NAME, temperature=0.3, max_tokens=2048, max_retries=2,
+            reasoning_effort="low" if MODEL_NAME.startswith("openai/gpt-oss") else None,
+            api_key=api_key,
+        )
 
     raise ValueError(f"unknown LLM provider: {provider!r}")

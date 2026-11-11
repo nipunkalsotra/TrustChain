@@ -1,0 +1,164 @@
+{
+  "programs": [],
+  "stream_groups": [],
+  "streams": [
+    {
+      "codec_name": "h264",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "30/1"
+    }
+  ],
+  "format": {
+    "duration": "309.800000",
+    "size": "18799466"
+  },
+  "sha256": "a352080e7fc8edf7d49a53d9ec64c6dfbc218d006c917a435bc8c398e011bf68",
+  "fast_start": true,
+  "audio_tracks": 0,
+  "run_id": "run_20261111_163017_24efde79",
+  "confirmed_pipeline_steps": 10,
+  "presentation": "real UI with animated cursor, click indicators, and temporary callouts",
+  "theme": "native dark",
+  "chapters": [
+    {
+      "title": "Your project workspace",
+      "start": 0.001,
+      "end": 10.002
+    },
+    {
+      "title": "Create a project",
+      "start": 10.002,
+      "end": 26.002
+    },
+    {
+      "title": "Launch a real research run",
+      "start": 26.003,
+      "end": 48.001
+    },
+    {
+      "title": "Follow live agent activity",
+      "start": 48.001,
+      "end": 76.001
+    },
+    {
+      "title": "Read the final report",
+      "start": 76.001,
+      "end": 94.001
+    },
+    {
+      "title": "Compare agent performance",
+      "start": 94.002,
+      "end": 108
+    },
+    {
+      "title": "Search and export the audit trail",
+      "start": 108.001,
+      "end": 126.001
+    },
+    {
+      "title": "Inspect confirmed transactions",
+      "start": 126.002,
+      "end": 140.001
+    },
+    {
+      "title": "Retrieve a confirmed Merkle proof",
+      "start": 140.001,
+      "end": 162.004
+    },
+    {
+      "title": "Verify the whole run",
+      "start": 162.005,
+      "end": 178.006
+    },
+    {
+      "title": "Create a scoped SDK key",
+      "start": 178.007,
+      "end": 196.001
+    },
+    {
+      "title": "Send activity through the real SDK",
+      "start": 196.001,
+      "end": 218.005
+    },
+    {
+      "title": "Check the registered fingerprint",
+      "start": 218.006,
+      "end": 234.832
+    },
+    {
+      "title": "Check the original content",
+      "start": 234.832,
+      "end": 245.663
+    },
+    {
+      "title": "Investigate and resolve identity drift",
+      "start": 245.663,
+      "end": 272.99
+    },
+    {
+      "title": "Invite teammates and set preferences",
+      "start": 272.99,
+      "end": 292.429
+    },
+    {
+      "title": "Revoke the integration key",
+      "start": 292.43,
+      "end": 302.268
+    },
+    {
+      "title": "Return to the project overview",
+      "start": 302.268,
+      "end": 309.781
+    }
+  ],
+  "verified_events": [
+    {
+      "type": "project_created_and_selected",
+      "project": "Research Lab"
+    },
+    {
+      "type": "pipeline_started",
+      "runId": "run_20261111_163017_24efde79"
+    },
+    {
+      "type": "pipeline_completed",
+      "runId": "run_20261111_163017_24efde79",
+      "score": 70,
+      "reportCharacters": 1325
+    },
+    {
+      "type": "all_steps_confirmed",
+      "count": 10
+    },
+    {
+      "type": "run_verification_passed",
+      "runId": "run_20261111_163017_24efde79"
+    },
+    {
+      "type": "sdk_registered_and_logged",
+      "agentId": "support-assistant",
+      "stepId": 469
+    },
+    {
+      "type": "intentional_sdk_identity_drift"
+    },
+    {
+      "type": "content_verification_passed",
+      "stepId": 469
+    },
+    {
+      "type": "alert_acknowledged_and_resolved"
+    },
+    {
+      "type": "viewer_invitation_and_preferences_saved"
+    },
+    {
+      "type": "key_revoked",
+      "status": 401
+    }
+  ],
+  "conditions": "Real local application, real model/search calls, Anvil chain 31337, console email. No fabricated application results.",
+  "editing": "Initial loading frames trimmed; no application action speed-up."
+}

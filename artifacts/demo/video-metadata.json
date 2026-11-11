@@ -1,0 +1,25 @@
+{
+  "programs": [],
+  "stream_groups": [],
+  "streams": [
+    {
+      "codec_name": "h264",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "codec_name": "aac",
+      "sample_rate": "48000",
+      "channels": 1
+    }
+  ],
+  "format": {
+    "duration": "263.455958",
+    "size": "9420388"
+  },
+  "sha256": "2279cda76d870031bb4c70fcb019238c223cd1b882e49b08d1df762bf6d58593",
+  "model": "openai/gpt-oss-20b",
+  "confirmedPipelineSteps": 10,
+  "recording": "live local browser; synthetic narration",
+  "fastStart": true
+}

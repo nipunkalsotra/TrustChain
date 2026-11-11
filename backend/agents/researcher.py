@@ -12,6 +12,7 @@ import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import observability
+from agents.mcp_result import tool_payload
 from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
         with tracer.start_as_current_span("mcp_tool_call.search_web") as span:
             span.set_attribute("run_id", run_id)
             result = await search_tool.ainvoke({"query": task, "max_results": 5})
+        result = tool_payload(result)
         # MCP tool returns dict: { query, results: [{title, url, content, score}], answer }
         if isinstance(result, dict):
             items = result.get("results", [])

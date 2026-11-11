@@ -17,9 +17,9 @@ import {
   Status,
   useResource,
 } from "./ui";
-export default function Settings() {
+export default function Settings({ initialTab = "workspace" }: { initialTab?: string }) {
   const { me } = useSession();
-  const [tab, setTab] = useState("workspace");
+  const [tab, setTab] = useState(initialTab);
   return (
     <>
       <PageTitle

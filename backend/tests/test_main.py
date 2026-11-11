@@ -389,11 +389,14 @@ def test_tamper_demo_unknown_agent_is_404(client_with_fake_bridge):
     assert r.status_code == 404
 
 
-def test_chain_status_connected(client_with_fake_bridge):
+def test_chain_status_connected(client_with_fake_bridge, monkeypatch):
+    import anchor_worker.chain
+    from types import SimpleNamespace
+    monkeypatch.setattr(anchor_worker.chain, "get_w3", lambda: SimpleNamespace(eth=SimpleNamespace(chain_id=31337, block_number=42)))
     r = client_with_fake_bridge.get("/chain-status")
     assert r.status_code == 200
     assert r.json()["connected"] is True
-    assert r.json()["chainId"] == 10143
+    assert r.json()["chainId"] == 31337
 
 
 def test_health(client_with_fake_bridge):

@@ -1,7 +1,11 @@
 """
-anchor_worker/nonce_lock.py — enforces F6's "sole nonce authority" for
+anchor_worker/nonce_lock.py — enforces a single anchor-worker leader for
 real: a Postgres advisory lock held on a dedicated connection for this
 process's entire lifetime.
+
+API identity and score writers share the per-transaction signer lock in
+blockchain/transaction_lock.py with batch submission. This lifetime lock
+prevents duplicate worker leaders; it is separate from nonce allocation.
 
 WHY THIS IS NEEDED ON TOP OF claim_batch's `FOR UPDATE SKIP LOCKED`
 (anchor_worker/claim.py): SKIP LOCKED makes it safe for two anchor-worker

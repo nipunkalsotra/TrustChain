@@ -22,7 +22,7 @@ test("a dashboard-launched pipeline completes with a report and confirmed eviden
     .getByRole("button", { name: "Create account", exact: true })
     .click();
   await expect(page).toHaveURL(/\/dashboard$/, { timeout: 30000 });
-  await page.getByRole("button", { name: "New run", exact: true }).click();
+  await page.locator(".p-heading").getByRole("button", { name: "New run", exact: true }).click();
   await page
     .getByLabel("What would you like to investigate?", { exact: false })
     .fill(

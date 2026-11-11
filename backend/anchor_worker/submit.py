@@ -22,6 +22,7 @@ from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
 import observability
+from blockchain.transaction_lock import serialized_transaction
 from blockchain.gas import estimate_gas_with_margin
 from logging_config import get_logger
 
@@ -37,6 +38,7 @@ class SubmitError(Exception):
     requeued, to be rebatched fresh next round."""
 
 
+@serialized_transaction
 async def submit_batch(
     session: AsyncSession,
     batch: dict,

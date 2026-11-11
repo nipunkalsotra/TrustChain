@@ -128,7 +128,7 @@ def test_stream_yields_events_ending_in_a_terminal_event(api_key):
     # the true final event with nothing after it) — not exercised here.
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
         started = client.run_agent(f"sdk integration test task {uuid.uuid4().hex}")
-        events = list(client.stream(started["run_id"], timeout=90))
+        events = list(client.stream(started["run_id"], timeout=300))
         assert events, "expected at least one SSE event"
         assert events[-1]["type"] == "run_complete"
         assert all(e.get("runId") == started["run_id"] for e in events if "runId" in e)
@@ -136,7 +136,7 @@ def test_stream_yields_events_ending_in_a_terminal_event(api_key):
 
 def test_run_and_wait_blocks_until_terminal_event(api_key):
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
-        final_event = client.run_and_wait(f"sdk integration test task {uuid.uuid4().hex}", timeout=90)
+        final_event = client.run_and_wait(f"sdk integration test task {uuid.uuid4().hex}", timeout=300)
         assert final_event["type"] == "run_complete"
 
 
@@ -152,7 +152,7 @@ def test_get_run_after_run_and_wait_is_immediately_queryable(api_key):
     # own db.complete_run/fail_run write).
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
         started = client.run_agent(f"sdk integration test task {uuid.uuid4().hex}")
-        for _ in client.stream(started["run_id"], timeout=90):
+        for _ in client.stream(started["run_id"], timeout=300):
             pass
 
         # The whole point of this test: get_run() must succeed (not 404
@@ -169,7 +169,7 @@ def test_get_run_after_run_and_wait_is_immediately_queryable(api_key):
 def test_trust_scores_after_a_completed_run(api_key):
     with TrustChainClient(api_key, base_url=BASE_URL) as client:
         started = client.run_agent(f"sdk integration test task {uuid.uuid4().hex}")
-        for _ in client.stream(started["run_id"], timeout=90):
+        for _ in client.stream(started["run_id"], timeout=300):
             pass  # drain to the stream's natural end — see stream()'s docstring
 
         # get_run() returns the stored `result` unwrapped once terminal

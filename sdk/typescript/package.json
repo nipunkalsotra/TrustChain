@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test --test-isolation=none tests/*.test.ts",
     "cli": "tsx src/cli.ts"
   },
   "engines": {

@@ -17,6 +17,7 @@ docstring.
 import asyncio
 
 import observability
+from blockchain.transaction_lock import serialized_transaction
 from anchor_worker.chain import get_signer, get_trust_score_contract, get_w3
 from blockchain.gas import build_fee_params, estimate_gas_with_margin
 from logging_config import get_logger
@@ -24,6 +25,7 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 
+@serialized_transaction
 async def write_score(agent_id: str, run_id: str, score: int, reason: str) -> str:
     """Signs, sends, and waits for confirmation of one updateScore() call.
     Returns the tx hash. Raises on revert or confirmation timeout — the

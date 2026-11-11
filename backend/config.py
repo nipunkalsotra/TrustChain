@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     # interface.
     llm_provider: str = Field(default="groq")
     groq_api_key: str = Field(default="")
+    groq_model: str = Field(default="openai/gpt-oss-120b", min_length=1)
     tavily_api_key: str = Field(default="")
     # Per-run safety valve (plan O10: "LLM token budgets ... are what
     # actually bound worst-case spend") — NOT the billing decision (that's

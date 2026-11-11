@@ -14,6 +14,7 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import observability
+from agents.mcp_result import tool_payload
 from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ async def validator_node(state: AgentState, bridge: Optional[Any] = None, tools:
                 "claim":   primary_claim,
                 "context": task,
             })
+        result = tool_payload(result)
         # MCP tool returns: { claim, verdict, confidence, evidence, summary }
         verdict    = result.get("verdict", "unverified")
         confidence = result.get("confidence", 0.5)

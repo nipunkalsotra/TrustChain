@@ -84,6 +84,8 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
             )),
         ])
     report_output = report_response.content
+    if not isinstance(report_output, str) or not report_output.strip():
+        raise ValueError("Reporter model returned an empty report; the run cannot be marked complete")
     tokens_used = track_token_usage(state.get("tokens_used", 0), report_response, run_id)
 
     # ── Step 2: log completion ────────────────────────────────────────────

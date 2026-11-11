@@ -54,8 +54,8 @@ def render_alert_email(
     scope = f"{org_name} / {project_name}" if project_name else org_name
     subject = f"[TrustChain {severity.upper()}] {title} — {scope}"
     recur = f" (occurrence #{occurrence_count})" if occurrence_count > 1 else ""
-    link = _frontend_url(f"/alerts/{alert_id}")
-    prefs_link = _frontend_url("/settings/notifications")
+    link = _frontend_url(f"/dashboard/alerts?alert={alert_id}")
+    prefs_link = _frontend_url("/dashboard/settings?tab=notifications")
 
     text_body = (
         f"{summary}{recur}\n\n"
@@ -85,7 +85,7 @@ def render_alert_email(
 
 def render_alert_digest_email(*, org_name: str, alerts: list[dict]) -> tuple[str, str, str]:
     subject = f"[TrustChain] Daily digest — {len(alerts)} warning alert(s) for {org_name}"
-    prefs_link = _frontend_url("/settings/notifications")
+    prefs_link = _frontend_url("/dashboard/settings?tab=notifications")
 
     lines = "\n".join(f"  - [{a['severity']}] {a['title']} (x{a['occurrenceCount']})" for a in alerts)
     text_body = f"{len(alerts)} alert(s) for {org_name} in the last 24 hours:\n\n{lines}\n\n  Manage preferences: {prefs_link}\n"
@@ -128,14 +128,9 @@ def render_invitation_email(*, org_name: str, role: str, invited_by_name: str, r
 
 
 def render_verification_email(*, name: str, raw_token: str, ttl_seconds: int) -> tuple[str, str, str]:
-    """Same stated exception as the invitation email above: the token IS
-    the payload. The raw token is surfaced as plain text too, not only
-    inside the link — there is no frontend route to consume it yet
-    (Phase 4 is backend-only; Phase 5 adds one), so `POST
-    /auth/verify-email/{token}` is what a caller actually hits today,
-    exactly as docs/e2e-walkthrough.md's Stage 1 does."""
+    """Render the single-use token into the implemented frontend auth route."""
     subject = "Verify your email address for TrustChain"
-    link = _frontend_url(f"/verify-email/{raw_token}")
+    link = _frontend_url(f"/auth/verify-email/{raw_token}")
     hours = ttl_seconds // 3600
 
     text_body = (
@@ -168,7 +163,7 @@ def render_password_reset_email(*, name: str, raw_token: str, ttl_seconds: int) 
     account-takeover credential if intercepted, same class of secret as
     the invitation/verification tokens above, surfaced the same way."""
     subject = "Reset your TrustChain password"
-    link = _frontend_url(f"/reset-password/{raw_token}")
+    link = _frontend_url(f"/auth/reset-password/{raw_token}")
     minutes = ttl_seconds // 60
 
     text_body = (

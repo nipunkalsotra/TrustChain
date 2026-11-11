@@ -1382,15 +1382,16 @@ async def chain_status(request: Request):
     # indicator (it never rendered the full URL either — see
     # frontend/lib/types.ts's ChainStatus type) without leaking whatever
     # credential a real deployment's provider URL might carry.
-    rpc_host = urllib.parse.urlparse(settings.monad_rpc_url).hostname or "unknown"
+    rpc_host = urllib.parse.urlparse(settings.resolved_v2_rpc_url).hostname or "unknown"
     try:
-        bridge = get_bridge()
-        # FIX 6: bridge.w3.eth.block_number and chain_id are SYNCHRONOUS.
+        from anchor_worker.chain import get_w3
+        w3 = get_w3()
+        # FIX 6: w3.eth.block_number and chain_id are SYNCHRONOUS.
         # Calling them directly in an async function blocks the uvicorn
         # event loop — other requests hang until it returns.
         # Wrap in asyncio.to_thread so they run in a thread pool instead.
-        block_number = await asyncio.to_thread(lambda: bridge.w3.eth.block_number)
-        chain_id     = await asyncio.to_thread(lambda: bridge.w3.eth.chain_id)
+        block_number = await asyncio.to_thread(lambda: w3.eth.block_number)
+        chain_id     = await asyncio.to_thread(lambda: w3.eth.chain_id)
         return {
             "connected":         True,
             "chainId":           chain_id,

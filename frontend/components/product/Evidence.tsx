@@ -543,7 +543,7 @@ export function Anchors() {
       </PageTitle>
       <div
         className="p-stats"
-        style={{ gridTemplateColumns: "repeat(3, 1fr)" }}
+        style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}
       >
         {[
           {
