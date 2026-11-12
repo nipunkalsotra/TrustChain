@@ -497,6 +497,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
         working-directory: frontend
+      - name: Build TypeScript SDK for frontend type-check
+        run: |
+          npm ci
+          npm run build
+        working-directory: sdk/typescript
       - name: Type-check
         run: npx tsc --noEmit
         working-directory: frontend
@@ -717,6 +722,11 @@ jobs:
           docker run --rm --network host -v "$GITHUB_WORKSPACE/k6:/scripts" \
             -e BASE_URL=http://localhost:8000 \
             grafana/k6 run /scripts/smoke-perf-test.js
+      - name: Build TypeScript SDK for browser E2E tests
+        run: |
+          npm ci
+          npm run build
+        working-directory: sdk/typescript
       - name: Playwright frontend smoke suite (P2)
         # Same "reuse the already-live stack" reasoning as k6 above —
         # frontend/e2e/smoke.spec.ts needs a real backend at :8000, which
