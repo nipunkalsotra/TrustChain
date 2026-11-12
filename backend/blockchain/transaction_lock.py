@@ -1,4 +1,5 @@
 """Serialize nonce allocation through confirmation across processes sharing a signer."""
+
 import asyncio
 import hashlib
 import inspect

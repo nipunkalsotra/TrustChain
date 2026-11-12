@@ -55,7 +55,10 @@ def build_chat_model(provider: Optional[str] = None) -> BaseChatModel:
         if not api_key:
             raise ValueError("GROQ_API_KEY not set in .env")
         return ChatGroq(
-            model=MODEL_NAME, temperature=0.3, max_tokens=2048, max_retries=2,
+            model=MODEL_NAME,
+            temperature=0.3,
+            max_tokens=2048,
+            max_retries=2,
             reasoning_effort="low" if MODEL_NAME.startswith("openai/gpt-oss") else None,
             api_key=api_key,
         )
