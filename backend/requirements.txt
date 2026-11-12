@@ -1,5 +1,5 @@
 # Blockchain
-web3==7.16.0
+web3==8.0.0
 
 # core -packages
 python-dotenv==1.2.2
