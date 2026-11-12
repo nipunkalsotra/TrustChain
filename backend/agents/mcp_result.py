@@ -1,4 +1,5 @@
 """Normalize MCP adapter text content blocks into the tool's structured payload."""
+
 import json
 
 
