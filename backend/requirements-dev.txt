@@ -1,6 +1,6 @@
 # Test-only dependencies — not needed to run the app, only to run pytest.
 -r requirements.txt
-pytest==9.1.1
+pytest==9.2.0
 
 # Self-provisions real ephemeral Postgres/Redis containers for the test
 # session when DATABASE_URL/REDIS_URL aren't already set in the
@@ -14,8 +14,8 @@ slither-analyzer==0.11.6
 
 # Static analysis (P2.5/audit follow-up) — see .github/workflows/test.yml
 # and ruff.toml for what's actually gated vs informational.
-ruff==0.16.3
-mypy==2.3.0
+ruff==0.17.4
+mypy==2.4.1
 
 # Real in-process SMTP server for notifications/ tests (Phase 3) — this
 # repo's own testing philosophy is "verify against real infrastructure,
