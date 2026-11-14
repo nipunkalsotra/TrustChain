@@ -57,7 +57,19 @@ test("every workspace route fits 320, 768, and 1600 pixels without runtime error
 
 test("keyboard search, dialog escape, and reduced motion remain usable",async({page})=>{
   await workspace(page);await page.emulateMedia({reducedMotion:"reduce"});await page.goto("/");await expect(page.getByRole("button",{name:"Resume animations"})).toBeVisible();await expect(page.locator(".m-hero h1")).toBeVisible();
-  await page.goto("/dashboard");await page.keyboard.press("Control+k");await expect(page.getByRole("dialog")).toBeVisible();await page.getByLabel("Search workspace pages").fill("no matching route");await expect(page.getByText("No matching pages.")).toBeVisible();await page.keyboard.press("Escape");await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.goto("/dashboard");
+  // Wait for the authenticated, hydrated dashboard before dispatching a global
+  // shortcut. page.goto() alone can finish before SessionProvider mounts Shell's
+  // window keydown listener, especially in cold CI runs.
+  const commandButton = page.getByRole("button", {name:"Find a page"});
+  await expect(commandButton).toBeVisible();
+  await commandButton.click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.keyboard.press("Control+k");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByLabel("Search workspace pages").fill("no matching route");await expect(page.getByText("No matching pages.")).toBeVisible();await page.keyboard.press("Escape");await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.goto("/dashboard/keys");await page.getByRole("button",{name:"Create API key",exact:true}).click();await page.keyboard.press("Escape");await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.setViewportSize({width:390,height:844});await page.getByRole("button",{name:"Open navigation"}).click();await page.keyboard.press("Escape");await expect(page.getByRole("button",{name:"Open navigation"})).toHaveAttribute("aria-expanded","false");
 });

@@ -124,6 +124,7 @@ async def run_pipeline(
         "task":       task,
         "run_id":     run_id,
         "research":   "",
+        "source_urls": [],
         "validation": "",
         "score":      0,
         "report":     "",

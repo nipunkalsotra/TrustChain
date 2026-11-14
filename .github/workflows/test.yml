@@ -678,14 +678,6 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://trustchain:trustchain@localhost:5432/trustchain
-      - name: Start api/anchor-worker/indexer
-        run: docker compose up -d --build api anchor-worker indexer
-      - name: Wait for API readiness
-        run: |
-          for i in $(seq 1 60); do
-            curl -sf http://localhost:8000/health && break
-            sleep 2
-          done
       - name: Build contracts
         run: forge build
         working-directory: contracts
@@ -698,14 +690,12 @@ jobs:
           PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
       - name: Record deployed V2 addresses
         run: python3 backend/scripts/write_v2_addresses.py --chain-id 31337
-      - name: Restart api/anchor-worker/indexer with fresh contract addresses
-        # addresses_v2.json is baked into each image at build time (see
-        # backend/Dockerfile's `COPY . .`), so the containers built above
-        # — before the addresses file existed — need rebuilding now that
-        # it does, not just restarting. This exact gotcha (and the fix)
-        # was hit repeatedly during local development — see
-        # sdk/python/README.md.
-        run: docker compose up -d --build api anchor-worker indexer
+      - name: Start API and V2 workers after contract deployment
+        # Build these services ONLY after V2 contracts and addresses exist.
+        # --no-deps preserves the ephemeral Anvil chain: dependency
+        # reconciliation must not recreate Anvil and erase deployed bytecode.
+        # The backend mounts addresses_v2.json directly from the workspace.
+        run: docker compose up -d --no-deps --build api anchor-worker indexer
       - name: Wait for API readiness (post-redeploy)
         run: |
           for i in $(seq 1 60); do
