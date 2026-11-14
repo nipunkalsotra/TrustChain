@@ -50,14 +50,34 @@ export async function verifiedSignup(
   email: string,
   password: string,
 ): Promise<string> {
-  const signupRes = await fetch(`${baseUrl}/auth/signup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email, password }),
-  });
-  const signupBody = await signupRes.text();
-  assert.equal(signupRes.status, 200, signupBody);
-  const { token } = JSON.parse(signupBody) as { token: string };
+  // SDK integration suites create many real accounts from one CI runner IP.
+  // Signup correctly applies a shared IP token bucket, independent of the
+  // per-project rate-limit tests. Respect its Retry-After instead of failing
+  // unrelated SDK assertions when earlier tests have exhausted that bucket.
+  // Only 429 responses are retried; all other failures still fail immediately.
+  let token: string | undefined;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const signupRes = await fetch(`${baseUrl}/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const signupBody = await signupRes.text();
+    if (signupRes.status === 200) {
+      token = (JSON.parse(signupBody) as { token: string }).token;
+      break;
+    }
+    if (signupRes.status !== 429 || attempt === 9) {
+      assert.equal(signupRes.status, 200, signupBody);
+    }
+    const retryAfter = Number(signupRes.headers.get("Retry-After"));
+    // Retry-After is the API contract; bound invalid/missing values.
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 10_000)
+      : 2_000;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  assert.ok(token, "signup did not succeed within the bounded rate-limit retries");
 
   await markVerified(email);
   return token;
