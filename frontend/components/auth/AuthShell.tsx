@@ -2,8 +2,6 @@
 import Link from "next/link";
 import {
   ArrowUpRight,
-  Blocks,
-  Fingerprint,
   ShieldCheck,
   Sun,
   Moon,
@@ -11,6 +9,8 @@ import {
 import { ThemeProvider, useTheme } from "@/lib/theme";
 import "@/components/product/theme.css";
 import "./auth.css";
+import { ProofSculpture } from "@/components/ui/ProofSculpture";
+import { MotionControl } from "@/components/ui/MotionControl";
 export function AuthShell({
   tagline,
   children,
@@ -37,7 +37,7 @@ function Frame({
       <aside className="a-story">
         <Link href="/" className="a-brand">
           <ShieldCheck size={29} />
-          TrustChain
+          trustchain.
         </Link>
         <div className="a-story-content">
           <div className="a-eyebrow">
@@ -52,25 +52,7 @@ function Frame({
             One workspace to observe your agents, verify every action, and build
             with confidence.
           </p>
-          <div className="a-visual" aria-hidden="true">
-            <div className="a-orbit orbit-one" />
-            <div className="a-orbit orbit-two" />
-            <div className="a-visual-core">
-              <ShieldCheck size={48} strokeWidth={1} />
-            </div>
-            <span className="a-node n1">
-              <Fingerprint size={22} />
-            </span>
-            <span className="a-node n2">
-              <Blocks size={22} />
-            </span>
-            <span className="a-node n3">
-              <ShieldCheck size={22} />
-            </span>
-            <div className="a-visual-label">
-              <i /> Every action. A verifiable record.
-            </div>
-          </div>
+          <div className="a-visual" aria-hidden="true"><ProofSculpture compact /></div>
           <div className="a-story-note">
             <ShieldCheck size={18} />
             <span>
@@ -106,7 +88,7 @@ function Frame({
           {children}
         </div>
         <footer>
-          <ShieldCheck size={13} /> Protected sessions. Private by default.
+          <MotionControl /> <ShieldCheck size={13} /> Protected sessions. Private by default.
         </footer>
       </main>
     </div>

@@ -1,461 +1,89 @@
-import Link from "next/link"
-import { NavCapsule } from "./NavCapsule"
-import {
-  BRAND,
-  NAV_LINKS,
-  NAV_ACTIONS,
-  HERO,
-  SECTIONS,
-  PIPELINE_STAGES,
-  SECURITY_LAYERS,
-  PRODUCT_PANEL,
-  FINAL_CTA,
-} from "./content"
-import "./marketing.css"
+"use client";
 
-const MAX_W = 1100
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowRight, ArrowUpRight, Blocks, Check, CheckCheck, Code2, Fingerprint, GitBranch, LockKeyhole, Menu, ShieldCheck, X } from "lucide-react";
+import { MotionControl } from "@/components/ui/MotionControl";
+import { ProofSculpture } from "@/components/ui/ProofSculpture";
+import "./marketing.css";
 
-// Shared visual treatment for the two CTA "weights" used across Nav/Hero/
-// FinalCta — kept here once so the three instances can't drift apart.
-const PRIMARY_BTN_STYLE = {
-  background: "linear-gradient(135deg, var(--mkt-cyan-bright), var(--mkt-blue))",
-  color: "var(--mkt-bg)",
-  border: "1px solid var(--mkt-border-subtle)",
-  fontWeight: 700,
-  borderRadius: 8,
-  letterSpacing: "0.02em",
-} as const
+const stages = [
+  { name: "Researcher", verb: "Find the signal.", copy: "Gather source material and context. Record the inputs behind the answer, before it moves downstream.", action: "collect_sources", icon: GitBranch },
+  { name: "Validator", verb: "Question the output.", copy: "Check the research against the available evidence. Keep the validation activity attached to the same run.", action: "validate_research", icon: ShieldCheck },
+  { name: "Scorer", verb: "Measure the outcome.", copy: "Turn observed agent performance into a trust score. Compare results across runs without losing the underlying trace.", action: "score_results", icon: CheckCheck },
+  { name: "Reporter", verb: "Make it accountable.", copy: "Bring the final answer and its evidence together. Reopen the report, inspect its steps, and retrieve the proof.", action: "publish_report", icon: Blocks },
+];
 
-const SECONDARY_BTN_STYLE = {
-  border: "1px solid var(--mkt-border-subtle)",
-  color: "var(--mkt-text-secondary)",
-  borderRadius: 8,
-  letterSpacing: "0.02em",
-} as const
-
-function Nav() {
-  return (
-    <nav
-      style={{
-        position: "sticky",
-        top: 0,
-        zIndex: 50,
-        background: "rgba(2, 7, 17, 0.93)",
-        backdropFilter: "blur(6px)",
-        borderBottom: "1px solid var(--mkt-divider)",
-      }}
-    >
-      <div
-        className="mkt-nav-row"
-        style={{
-          maxWidth: MAX_W,
-          margin: "0 auto",
-          padding: "0 24px",
-          height: 60,
-          display: "flex",
-          alignItems: "center",
-          gap: 32,
-        }}
-      >
-        <Link href="/" style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
-          <span
-            style={{
-              fontFamily: "'Share Tech Mono',monospace",
-              fontSize: 16,
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-            }}
-          >
-            <span style={{ color: "var(--mkt-cyan-bright)", textShadow: "0 0 16px var(--mkt-glow-cyan)" }}>◈ </span>
-            <span style={{ color: "var(--mkt-text)" }}>TRUST</span>
-            <span style={{ color: "var(--mkt-cyan-bright)" }}>CHAIN</span>
-          </span>
-          <span style={{ fontSize: 9, letterSpacing: "0.2em", color: "var(--mkt-cyan-dim)" }}>{BRAND.subtitle}</span>
-        </Link>
-
-        <div className="mkt-nav-capsule-slot" style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "center" }}>
-          <NavCapsule />
-        </div>
-
-        <Link
-          href={NAV_ACTIONS.login.href}
-          className="mkt-nav-link"
-          style={{ fontSize: 12, flexShrink: 0 }}
-        >
-          {NAV_ACTIONS.login.label}
-        </Link>
-        <Link
-          href={NAV_ACTIONS.getStarted.href}
-          className="mkt-btn-primary"
-          style={{
-            ...PRIMARY_BTN_STYLE,
-            fontSize: 12,
-            padding: "8px 16px",
-            borderRadius: 6,
-            flexShrink: 0,
-          }}
-        >
-          {NAV_ACTIONS.getStarted.label}
-        </Link>
-      </div>
-    </nav>
-  )
+function EvidenceLab() {
+  const [changed, setChanged] = useState(false);
+  const [hashes, setHashes] = useState({ original: "", current: "" });
+  useEffect(() => {
+    let active = true;
+    async function hash(text: string) {
+      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
+    }
+    void Promise.all([hash("Agent output: sources verified."), hash(changed ? "Agent output: sources changed." : "Agent output: sources verified.")]).then(([original, current]) => { if (active) setHashes({ original, current }); });
+    return () => { active = false; };
+  }, [changed]);
+  return <div className={`m-lab ${changed ? "altered" : ""}`}>
+    <div className="m-window-bar"><span><i /> INTEGRITY LAB</span><span>INTERACTIVE EXAMPLE</span></div>
+    <div className="m-lab-content"><div className="m-code-label">01 / RECORDED OUTPUT</div><div className="m-lab-text">Sources <span>{changed ? "changed" : "verified"}</span>.</div>
+      <div className="m-hash-row"><span>Original SHA-256</span><code>{hashes.original ? `${hashes.original.slice(0, 18)}…${hashes.original.slice(-8)}` : "Computing…"}</code></div>
+      <div className="m-hash-row"><span>Current SHA-256</span><code>{hashes.current ? `${hashes.current.slice(0, 18)}…${hashes.current.slice(-8)}` : "Computing…"}</code></div>
+      <div className="m-lab-result" role="status"><ShieldCheck size={19} /><div><strong>{changed ? "The record changed. The hash did too." : "Same content. Same fingerprint."}</strong><p>{changed ? "A changed record cannot match its original fingerprint." : "Edit the example to see tampering become visible."}</p></div></div>
+      <button className="m-button m-button-outline" onClick={() => setChanged(v => !v)}>{changed ? "Restore original" : "Alter the record"}<ArrowRight size={15} /></button>
+    </div>
+  </div>;
 }
-
-function Hero() {
-  return (
-    <header style={{ padding: "88px 24px 96px", textAlign: "center" }}>
-      <div style={{ maxWidth: 760, margin: "0 auto" }}>
-        <div
-          style={{
-            display: "inline-block",
-            fontSize: 10,
-            letterSpacing: "0.25em",
-            color: "var(--mkt-cyan)",
-            border: "1px solid var(--mkt-border-subtle)",
-            background: "rgba(7, 17, 31, 0.6)",
-            borderRadius: 20,
-            padding: "5px 14px",
-            marginBottom: 28,
-          }}
-        >
-          ◈ MONAD TESTNET · MERKLE-ANCHORED AUDIT TRAILS
-        </div>
-
-        <h1
-          className="mkt-hero-title"
-          style={{
-            fontSize: "clamp(2.6rem, 6vw, 4.2rem)",
-            lineHeight: 1.08,
-            fontWeight: 700,
-            color: "var(--mkt-text)",
-            marginBottom: 24,
-          }}
-        >
-          {HERO.titleTop}
-          <br />
-          <span style={{ color: "var(--mkt-text-secondary)" }}>{HERO.titleAccent} </span>
-          <span
-            style={{
-              backgroundImage: "linear-gradient(135deg, var(--mkt-cyan-bright), var(--mkt-blue))",
-              WebkitBackgroundClip: "text",
-              backgroundClip: "text",
-              color: "transparent",
-              WebkitTextFillColor: "transparent",
-              textShadow: "0 0 20px rgba(34, 211, 238, 0.12)",
-            }}
-          >
-            {HERO.titleRest}
-          </span>
-        </h1>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 40 }}>
-          {HERO.lines.map((line) => (
-            <p key={line} style={{ fontSize: 14, color: "var(--mkt-text-secondary)", letterSpacing: "0.01em" }}>
-              {line}
-            </p>
-          ))}
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "center", gap: 14, flexWrap: "wrap" }}>
-          <Link
-            href={HERO.primaryCta.href}
-            className="mkt-btn-primary"
-            style={{ ...PRIMARY_BTN_STYLE, fontSize: 13, padding: "13px 26px" }}
-          >
-            {HERO.primaryCta.label}
-          </Link>
-          <Link
-            href={HERO.secondaryCta.href}
-            className="mkt-btn-secondary"
-            style={{ ...SECONDARY_BTN_STYLE, fontSize: 13, padding: "13px 26px" }}
-          >
-            {HERO.secondaryCta.label}
-          </Link>
-        </div>
-      </div>
-    </header>
-  )
-}
-
-function FeatureSection({
-  section,
-  bg,
-}: {
-  section: (typeof SECTIONS)[keyof typeof SECTIONS]
-  bg: string
-}) {
-  return (
-    <section id={section.id} style={{ background: bg, borderTop: "1px solid var(--mkt-divider)", padding: "72px 24px" }}>
-      <div style={{ maxWidth: MAX_W, margin: "0 auto" }}>
-        <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--mkt-cyan)", marginBottom: 14 }}>
-          {section.eyebrow.toUpperCase()}
-        </div>
-        <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2.1rem)", color: "var(--mkt-text)", marginBottom: 18, maxWidth: 640 }}>
-          {section.headline}
-        </h2>
-        <p
-          style={{
-            fontSize: 14,
-            lineHeight: 1.7,
-            color: "var(--mkt-text-secondary)",
-            maxWidth: 680,
-            marginBottom: section.points.length ? 28 : 0,
-          }}
-        >
-          {section.lead}
-        </p>
-        {section.points.length > 0 && (
-          <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 12, maxWidth: 680 }}>
-            {section.points.map((p) => (
-              <li key={p} style={{ display: "flex", gap: 10, fontSize: 13, color: "var(--mkt-text-secondary)", lineHeight: 1.6 }}>
-                <span style={{ color: "var(--mkt-cyan)", flexShrink: 0 }}>▸</span>
-                {p}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function ProductPipeline() {
-  const section = SECTIONS.product
-  return (
-    <section id="product" style={{ background: "var(--mkt-bg2)", borderTop: "1px solid var(--mkt-divider)", padding: "72px 24px" }}>
-      <div style={{ maxWidth: MAX_W, margin: "0 auto" }}>
-        <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--mkt-cyan)", marginBottom: 14 }}>
-          {section.eyebrow.toUpperCase()}
-        </div>
-        <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2.1rem)", color: "var(--mkt-text)", marginBottom: 18, maxWidth: 640 }}>
-          {section.headline}
-        </h2>
-        <p style={{ fontSize: 14, lineHeight: 1.7, color: "var(--mkt-text-secondary)", maxWidth: 680, marginBottom: 40 }}>
-          {section.lead}
-        </p>
-
-        <div className="mkt-pipeline-grid">
-          {PIPELINE_STAGES.map((stage) => (
-            <div key={stage.name} className="mkt-card" style={{ padding: 22 }}>
-              <div style={{ fontSize: 11, color: "var(--mkt-text-muted)", letterSpacing: "0.15em", marginBottom: 10 }}>
-                {stage.index}
-              </div>
-              <div
-                style={{
-                  fontSize: 14,
-                  fontFamily: "'Share Tech Mono',monospace",
-                  color: "var(--mkt-cyan)",
-                  letterSpacing: "0.08em",
-                  marginBottom: 10,
-                }}
-              >
-                {stage.name.toUpperCase()}
-              </div>
-              <p style={{ fontSize: 12.5, lineHeight: 1.6, color: "var(--mkt-text-secondary)" }}>{stage.body}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function RealProduct() {
-  const section = SECTIONS.realproduct
-  return (
-    <section
-      id="realproduct"
-      style={{ background: "var(--mkt-bg)", borderTop: "1px solid var(--mkt-divider)", padding: "72px 24px" }}
-    >
-      <div
-        style={{
-          maxWidth: MAX_W,
-          margin: "0 auto",
-          display: "flex",
-          gap: 48,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
-        <div style={{ flex: "1 1 360px" }}>
-          <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--mkt-cyan)", marginBottom: 14 }}>
-            {section.eyebrow.toUpperCase()}
-          </div>
-          <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2.1rem)", color: "var(--mkt-text)", marginBottom: 18 }}>
-            {section.headline}
-          </h2>
-          <p style={{ fontSize: 14, lineHeight: 1.7, color: "var(--mkt-text-secondary)" }}>{section.lead}</p>
-        </div>
-
-        <div className="mkt-card" style={{ flex: "1 1 340px", padding: 20 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-            <span style={{ fontSize: 13, color: "var(--mkt-text)", fontFamily: "'Share Tech Mono',monospace" }}>
-              {PRODUCT_PANEL.title}
-            </span>
-            <span style={{ fontSize: 10, color: "var(--mkt-text-muted)", letterSpacing: "0.08em" }}>
-              {PRODUCT_PANEL.subtitle}
-            </span>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-            {PRODUCT_PANEL.rows.map((row) => (
-              <div
-                key={row.step}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  fontSize: 11.5,
-                  padding: "8px 10px",
-                  background: "var(--mkt-surface-elevated)",
-                  borderRadius: 5,
-                }}
-              >
-                <span style={{ color: "var(--mkt-text-secondary)", letterSpacing: "0.05em" }}>{row.step}</span>
-                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: "var(--mkt-text-muted)" }}>{row.detail}</span>
-                  <span
-                    style={{
-                      color: "var(--mkt-cyan)",
-                      fontSize: 9,
-                      letterSpacing: "0.1em",
-                      border: "1px solid var(--mkt-border-subtle)",
-                      borderRadius: 3,
-                      padding: "2px 6px",
-                    }}
-                  >
-                    {row.status.toUpperCase()}
-                  </span>
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <div style={{ borderTop: "1px solid var(--mkt-divider)", paddingTop: 14, fontSize: 11 }}>
-            <div style={{ color: "var(--mkt-text-muted)", letterSpacing: "0.1em", marginBottom: 4 }}>
-              {PRODUCT_PANEL.proof.label.toUpperCase()}
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--mkt-text-secondary)" }}>
-              <span style={{ fontFamily: "'Share Tech Mono',monospace" }}>{PRODUCT_PANEL.proof.root}</span>
-              <span>{PRODUCT_PANEL.proof.depth}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function Security() {
-  const section = SECTIONS.security
-  return (
-    <section id="security" style={{ background: "var(--mkt-bg2)", borderTop: "1px solid var(--mkt-divider)", padding: "72px 24px" }}>
-      <div style={{ maxWidth: MAX_W, margin: "0 auto" }}>
-        <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--mkt-cyan)", marginBottom: 14 }}>
-          {section.eyebrow.toUpperCase()}
-        </div>
-        <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2.1rem)", color: "var(--mkt-text)", marginBottom: 18, maxWidth: 640 }}>
-          {section.headline}
-        </h2>
-        <p style={{ fontSize: 14, lineHeight: 1.7, color: "var(--mkt-text-secondary)", maxWidth: 680, marginBottom: 40 }}>
-          {section.lead}
-        </p>
-
-        <div className="mkt-security-grid">
-          {SECURITY_LAYERS.map((layer) => (
-            <div key={layer.id} className="mkt-card" style={{ padding: 22 }}>
-              <div style={{ fontSize: 13, color: "var(--mkt-text)", fontWeight: 600, marginBottom: 10 }}>{layer.title}</div>
-              <p style={{ fontSize: 12.5, lineHeight: 1.6, color: "var(--mkt-text-secondary)" }}>{layer.body}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function FinalCta() {
-  return (
-    <section style={{ background: "var(--mkt-bg)", borderTop: "1px solid var(--mkt-divider)", padding: "96px 24px", textAlign: "center" }}>
-      <div style={{ maxWidth: 620, margin: "0 auto" }}>
-        <h2 style={{ fontSize: "clamp(1.7rem, 4vw, 2.4rem)", color: "var(--mkt-text)", marginBottom: 14 }}>
-          {FINAL_CTA.headline}
-        </h2>
-        <p style={{ fontSize: 15, color: "var(--mkt-text-secondary)", marginBottom: 36 }}>{FINAL_CTA.lead}</p>
-
-        <div style={{ display: "flex", justifyContent: "center", gap: 14, flexWrap: "wrap", marginBottom: 24 }}>
-          <Link
-            href={FINAL_CTA.primary.href}
-            className="mkt-btn-primary"
-            style={{ ...PRIMARY_BTN_STYLE, fontSize: 13, padding: "13px 26px" }}
-          >
-            {FINAL_CTA.primary.label}
-          </Link>
-          <Link
-            href={FINAL_CTA.secondary.href}
-            className="mkt-btn-secondary"
-            style={{ ...SECONDARY_BTN_STYLE, fontSize: 13, padding: "13px 26px" }}
-          >
-            {FINAL_CTA.secondary.label}
-          </Link>
-        </div>
-
-        <div style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--mkt-text-muted)" }}>{FINAL_CTA.footnote}</div>
-      </div>
-    </section>
-  )
-}
-
-function Footer() {
-  return (
-    <footer style={{ borderTop: "1px solid var(--mkt-divider)", padding: "28px 24px" }}>
-      <div
-        style={{
-          maxWidth: MAX_W,
-          margin: "0 auto",
-          display: "flex",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: 12,
-          fontSize: 11,
-          color: "var(--mkt-text-muted)",
-        }}
-      >
-        <span>◈ {BRAND.wordmark.toUpperCase()} — {new Date().getFullYear()}</span>
-        <div style={{ display: "flex", gap: 20 }}>
-          {NAV_LINKS.map((n) => (
-            <Link
-              key={n.id}
-              href={n.kind === "route" ? n.href! : `#${n.sectionId}`}
-              className="mkt-nav-link"
-              style={{ fontSize: 11 }}
-            >
-              {n.label}
-            </Link>
-          ))}
-        </div>
-      </div>
-    </footer>
-  )
-}
-
-const FEATURE_ORDER = ["immutable", "merkle", "blockchain", "verification"] as const
-const FEATURE_BG = ["var(--mkt-bg)", "var(--mkt-bg2)", "var(--mkt-bg)", "var(--mkt-bg2)"]
 
 export function LandingPage() {
-  return (
-    <div className="mkt-page" style={{ background: "var(--mkt-bg)", minHeight: "100dvh" }}>
-      <Nav />
-      <Hero />
-      <ProductPipeline />
-      {FEATURE_ORDER.map((id, i) => (
-        <FeatureSection key={id} section={SECTIONS[id]} bg={FEATURE_BG[i]} />
-      ))}
-      <RealProduct />
-      <Security />
-      <FinalCta />
-      <Footer />
-    </div>
-  )
+  const root = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState(false);
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add("is-visible"); observer.unobserve(entry.target); } }), { threshold: 0.12 });
+    root.current?.querySelectorAll("[data-reveal]").forEach(el => observer.observe(el));
+    return () => observer.disconnect();
+  }, []);
+  const StageIcon = stages[stage].icon;
+  return <div className="mkt-page" ref={root}>
+    <a href="#main" className="m-skip">Skip to content</a>
+    <nav className="m-nav" aria-label="Main navigation">
+      <Link href="/" className="m-brand"><span className="m-brand-mark"><ShieldCheck size={24} strokeWidth={1.6} /></span>trustchain<span className="m-brand-period">.</span></Link>
+      <div className={`m-nav-links ${menu ? "open" : ""}`}>
+        <a href="#product" onClick={() => setMenu(false)}>The platform</a><a href="#security" onClick={() => setMenu(false)}>Why trust us</a><a href="#developers" onClick={() => setMenu(false)}>Developers</a><Link href="/pricing">Pricing<ArrowUpRight size={12} /></Link>
+      </div>
+      <div className="m-nav-actions"><Link className="m-login" href="/auth">Log In</Link><Link className="m-button m-button-green m-nav-cta" href="/auth?mode=signup">Get Started<ArrowUpRight size={14} /></Link><button className="m-menu" aria-label={menu ? "Close menu" : "Open menu"} aria-expanded={menu} onClick={() => setMenu(v => !v)}>{menu ? <X /> : <Menu />}</button></div>
+    </nav>
+    <main id="main">
+      <header className="m-hero">
+        <div className="m-hero-grid" aria-hidden="true" />
+        <div className="m-hero-copy"><div className="m-eyebrow"><i /> THE EVIDENCE LAYER FOR AI</div>
+          <h1>Intelligence,<br />with a <em>proof.</em></h1>
+          <p>Your agents move fast. Know what they did.<br className="m-desktop-break" /> Trace every action, anchor the evidence, and turn<br className="m-desktop-break" /> “trust me” into something you can verify.</p>
+          <div className="m-hero-actions"><Link className="m-button m-button-green" href="/auth?mode=signup">Build on trust<ArrowUpRight size={18} /></Link><a className="m-button m-button-quiet" href="#product"><span className="m-play"><ArrowDown size={14} /></span>Explore the platform</a></div>
+          <div className="m-hero-foot"><span><Check size={13} /> Traceable actions</span><span><Check size={13} /> Independent proofs</span></div>
+        </div>
+        <div className="m-hero-art"><ProofSculpture /><div className="m-art-coordinate">EVIDENCE OBJECT / 001<br />CRYPTOGRAPHIC PROVENANCE</div><div className="m-art-status"><span className="m-status-dot" /><span>Built to be verified</span><ShieldCheck size={16} /></div></div>
+        <div className="m-hero-bottom"><span>LESS BLIND TRUST. MORE VISIBLE TRUTH.</span><a href="#product">SCROLL TO DISCOVER<ArrowDown size={13} /></a><MotionControl /></div>
+      </header>
+      <div className="m-principles"><span>One continuous chain of evidence.</span><div><Fingerprint size={18} />Identify</div><ArrowRight /><div><GitBranch size={18} />Observe</div><ArrowRight /><div><Blocks size={18} />Anchor</div><ArrowRight /><div><ShieldCheck size={18} />Verify</div></div>
+      <section className="m-section m-product" id="product">
+        <div className="m-section-head" data-reveal><div><div className="m-eyebrow">01 / THE PLATFORM</div><h2>Every action has a story.<br /><em>Keep the whole chain.</em></h2></div><p>From the first query to the final report, see how a four-agent workflow becomes a record you can inspect.</p></div>
+        <div className="m-pipeline" data-reveal>
+          <div className="m-stage-tabs" role="tablist" aria-label="Explore pipeline stages">{stages.map((s, i) => <button key={s.name} id={`stage-${i}`} role="tab" aria-selected={stage === i} aria-controls="pipeline-panel" tabIndex={stage === i ? 0 : -1} onKeyDown={e => { const next = e.key === "ArrowRight" ? (i + 1) % 4 : e.key === "ArrowLeft" ? (i + 3) % 4 : e.key === "Home" ? 0 : e.key === "End" ? 3 : null; if (next !== null) { e.preventDefault(); setStage(next); document.getElementById(`stage-${next}`)?.focus(); } }} onClick={() => setStage(i)}><span>0{i + 1}</span><s.icon size={18} />{s.name}<ArrowRight size={16} /></button>)}</div>
+          <div id="pipeline-panel" role="tabpanel" aria-labelledby={`stage-${stage}`} className="m-stage-panel"><div key={stage} className="m-stage-detail"><span className="m-large-icon"><StageIcon size={29} strokeWidth={1.3} /></span><div className="m-code-label">{stages[stage].name.toUpperCase()} / AGENT 0{stage + 1}</div><h3>{stages[stage].verb}</h3><p>{stages[stage].copy}</p><Link href="/auth?mode=signup">Run your first workflow<ArrowUpRight size={16} /></Link></div>
+            <div className="m-trace"><div className="m-window-bar"><span><i /> WORKFLOW TRACE</span><span>ILLUSTRATIVE</span></div>{stages.map((s, i) => <div className={`m-trace-step ${i === stage ? "current" : ""}`} key={s.name}><span className="m-trace-number">0{i + 1}</span><div><strong>{s.name.toLowerCase()}</strong><code>{s.action}</code></div><span className="m-trace-check"><Check size={14} /></span></div>)}<div className="m-trace-root"><GitBranch size={17} /><span>Steps → Merkle root → Chain receipt</span></div></div>
+          </div>
+        </div>
+      </section>
+      <section className="m-manifesto" data-reveal><div className="m-eyebrow">TRUST IS AN OUTPUT. NOT AN ASSUMPTION.</div><h2>A log tells you what happened.<br /><span>A proof lets you check.</span></h2><div className="m-manifesto-line"><span /><ShieldCheck size={27} strokeWidth={1.2} /><span /></div></section>
+      <section className="m-section m-security" id="security"><div className="m-security-copy" data-reveal><div className="m-eyebrow">02 / VERIFICATION, BY DESIGN</div><h2>Change a word.<br /><em>Leave a trace.</em></h2><p>Content hashes make changes visible. Merkle proofs connect individual records to a root anchored on-chain. The evidence can be checked against that root.</p><div className="m-security-points"><div><LockKeyhole size={20} /><span><strong>Recorded atomically</strong><small>Steps and their anchor queue entries commit together.</small></span></div><div><GitBranch size={20} /><span><strong>Anchored in batches</strong><small>One Merkle root. An inclusion proof for each step.</small></span></div><div><Fingerprint size={20} /><span><strong>Identity attached</strong><small>Inspect the registered fingerprint behind an agent.</small></span></div></div></div><div data-reveal><EvidenceLab /><p className="m-example-note">A local SHA-256 demonstration. Live chain proofs are available in your workspace.</p></div></section>
+      <section className="m-section m-workspace" data-reveal><div className="m-section-head"><div><div className="m-eyebrow">03 / YOUR EVIDENCE, IN FOCUS</div><h2>The full picture.<br /><em>Without the blind spots.</em></h2></div><Link className="m-button m-button-outline" href="/auth">Open your workspace<ArrowUpRight size={16} /></Link></div><div className="m-workspace-grid">{[{ icon: Fingerprint, n: "01", title: "Know your agents.", text: "Registered identities, configuration fingerprints, and observed trust scores.", href: "/dashboard/agents", label: "Explore agent identities" }, { icon: GitBranch, n: "02", title: "Follow the work.", text: "Run reports, recorded actions, audit filters, and exportable evidence.", href: "/dashboard/runs", label: "Explore agent runs" }, { icon: ShieldCheck, n: "03", title: "Check the evidence.", text: "Step proofs, content checks, on-chain receipts, and integrity alerts.", href: "/dashboard/proofs", label: "Explore verification" }].map(c => <Link href={c.href} className="m-workspace-card" key={c.n} aria-label={c.label}><div><c.icon size={30} strokeWidth={1.2} /><span>{c.n}</span></div><h3>{c.title}</h3><p>{c.text}</p><ArrowUpRight size={21} /></Link>)}</div></section>
+      <section className="m-section m-developers" id="developers"><div data-reveal><div className="m-eyebrow">04 / BUILT FOR BUILDERS</div><h2>Your stack.<br /><em>A stronger foundation.</em></h2><p>Keep your agent runtime. Add verifiable activity with the Python or TypeScript SDK, then inspect the resulting evidence in one workspace.</p><div className="m-sdk-tags"><span>Python</span><span>TypeScript</span><span>HTTP API</span></div><Link className="m-button m-button-outline" href="/dashboard/help">View integration guide<ArrowUpRight size={16} /></Link></div><div className="m-code-window" data-reveal><div className="m-window-bar"><span><Code2 size={15} /> YOUR FIRST AUDIT TRAIL</span><span>TYPESCRIPT</span></div><pre><code><span className="m-code-comment">{"// Connect your runtime to the evidence layer."}</span>{"\n"}<span className="m-code-green">const</span>{" tc = new TrustChain(apiKey);\n\n"}<span className="m-code-green">await</span>{" tc.registerAgent({\n  agentId: "}<span className="m-code-string">&quot;research-assistant&quot;</span>{",\n  model: "}<span className="m-code-string">&quot;your-model&quot;</span>{",\n  version: "}<span className="m-code-string">&quot;1.0.0&quot;</span>{",\n  systemPrompt: "}<span className="m-code-string">&quot;Research carefully.&quot;</span>{"\n});\n\n"}<span className="m-code-green">await</span>{" tc.logAndWait({\n  agentId: "}<span className="m-code-string">&quot;research-assistant&quot;</span>{",\n  action: "}<span className="m-code-string">&quot;answer_question&quot;</span>{",\n  input: question,\n  output: answer\n});"}</code></pre><div className="m-code-bottom"><ShieldCheck size={15} /> One identity. A verifiable record.</div></div></section>
+      <section className="m-final" data-reveal><div className="m-eyebrow"><i /> THE NEXT GENERATION OF ACCOUNTABLE AI</div><h2>Build something<br /><em>worth trusting.</em></h2><Link className="m-button m-button-green" href="/auth?mode=signup">Get Started<ArrowUpRight size={19} /></Link><p>Your agents. Your evidence. Your confidence.</p><div className="m-final-watermark" aria-hidden="true">trustchain.</div></section>
+    </main>
+    <footer className="m-footer"><Link href="/" className="m-brand"><ShieldCheck size={22} />trustchain.</Link><span>VERIFIABLE BY DESIGN. © {new Date().getFullYear()}</span><div><Link href="/dashboard/help">Docs</Link><Link href="/pricing">Pricing</Link><a href="#main">Back to top ↑</a></div></footer>
+  </div>;
 }

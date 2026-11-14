@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import { ProofSculpture } from "@/components/ui/ProofSculpture";
 import { getRuns, request } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import type { Agent, Integrity } from "@/lib/product-types";
@@ -67,20 +68,20 @@ export default function Overview() {
       <PageTitle
         eyebrow="YOUR COMMAND CENTER"
         title={`Welcome back, ${me?.user.name.split(" ")[0] ?? "there"}.`}
-        description="A clear view of your agents. Confidence in every action."
+        description="Your evidence observatory. Every agent, action, and proof in one place."
       >
         <NewRunButton />
       </PageTitle>
       <div className="o-banner">
-        <ShieldCheck size={180} strokeWidth={0.5} className="o-banner-icon" />
+        <div className="o-banner-art"><ProofSculpture compact /></div>
         <div>
           <div
             className="p-eyebrow"
-            style={{ color: "#94a8de", marginBottom: 10 }}
+            style={{ color: "#b3ef69", marginBottom: 12 }}
           >
             OBSERVE. VERIFY. TRUST.
           </div>
-          <h2>Your AI, with a trail you can trust.</h2>
+          <h2>Intelligence in motion. Evidence in focus.</h2>
           <p>
             Track every agent action and independently verify the evidence. Your
             workspace brings it all together.

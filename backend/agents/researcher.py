@@ -61,6 +61,7 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
 
     # ── Step 1: web search via MCP ─────────────────────────────────────────
     logger.info("[Researcher] Running web_search via MCP...")
+    source_urls: list[str] = []
     try:
         with tracer.start_as_current_span("mcp_tool_call.search_web") as span:
             span.set_attribute("run_id", run_id)
@@ -69,6 +70,13 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
         # MCP tool returns dict: { query, results: [{title, url, content, score}], answer }
         if isinstance(result, dict):
             items = result.get("results", [])
+            # Preserve the tool's URLs independently of model synthesis.
+            source_urls = list(dict.fromkeys(
+                item["url"] for item in items[:5]
+                if isinstance(item, dict)
+                and isinstance(item.get("url"), str)
+                and item["url"].startswith(("https://", "http://"))
+            ))
             raw_search = "\n\n".join(
                 f"Source: {r.get('url', 'unknown')}\n{r.get('content', '')}"
                 for r in items[:5]
@@ -135,6 +143,7 @@ async def researcher_node(state: AgentState, bridge=None, tools: list = None) ->
     return {
         **state,
         "research":   research_output,
+        "source_urls": source_urls,
         "tx_hashes":  tx_hashes,
         "sse_events": sse_events,
         "tokens_used": tokens_used,

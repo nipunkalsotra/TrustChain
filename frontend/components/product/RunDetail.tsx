@@ -29,6 +29,7 @@ import {
   useResource,
 } from "./ui";
 import type { SSEEvent } from "@/lib/types";
+import { ReportContent } from "./ReportContent";
 export default function RunDetail({ id }: { id: string }) {
   const [events, setEvents] = useState<SSEEvent[]>([]),
     [state, setState] = useState("connecting"),
@@ -319,7 +320,7 @@ export default function RunDetail({ id }: { id: string }) {
           description="The output produced by the agent workflow"
         >
           {report ? (
-            <div className="p-pad p-report">{report}</div>
+            <ReportContent text={report} />
           ) : (
             <Empty
               title={

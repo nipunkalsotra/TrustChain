@@ -32,6 +32,7 @@ class AgentState(TypedDict):
 
     # Agent outputs — filled in as pipeline runs
     research:   str
+    source_urls: list[str]
     validation: str
     score:      int
     report:     str

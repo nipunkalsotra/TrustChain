@@ -1,0 +1,213 @@
+{
+  "date": "2026-11-14",
+  "environment": "Local production Next.js build; Chromium; real PostgreSQL, Redis, FastAPI, MCP search, Groq model, local Anvil 31337, anchor worker, indexer, integrity watchdog; console email",
+  "browser_scenarios": 30,
+  "passed": 30,
+  "failed": 0,
+  "skipped": 0,
+  "frontend_unit_tests": 20,
+  "backend_source_and_report_regressions": 7,
+  "production_build": "passed",
+  "eslint": "passed",
+  "diff_check": "passed",
+  "execution_note": "The consolidated production run passed 28/29. Its source-link failure was corrected by preserving the original search URLs through AgentState and the report. The affected pipeline passed its focused rerun. The secondary-controls scenario also passed. Counts use the latest applicable result for each unique scenario. Earlier attempts are not additional tests.",
+  "scenarios": [
+    {
+      "file": "audit.spec.ts",
+      "scenario": "verification email opens a working verification page",
+      "status": "passed",
+      "duration_ms": 3697
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "password reset email opens a working reset form",
+      "status": "passed",
+      "duration_ms": 4196
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "implemented verification and reset forms enforce token use and allow new-password login",
+      "status": "passed",
+      "duration_ms": 9511
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "organization and project create, rename, switch, and persistence",
+      "status": "passed",
+      "duration_ms": 11935
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "UI-created API key drives SDK logging, chain proof, browser evidence, export, and revocation",
+      "status": "passed",
+      "duration_ms": 15450
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "agent UI registration and real on-chain fingerprint match and mismatch",
+      "status": "passed",
+      "duration_ms": 26762
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "SDK identity drift reaches the alert inbox and supports acknowledge, resolve, and reopen",
+      "status": "passed",
+      "duration_ms": 11900
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "invite acceptance, role changes, viewer restrictions, and member removal",
+      "status": "passed",
+      "duration_ms": 12228
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "invalid tokens, unknown run, and automatic access-cookie refresh",
+      "status": "passed",
+      "duration_ms": 4598
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "run and audit filtering, pagination, and real JSON downloads",
+      "status": "passed",
+      "duration_ms": 12524
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "all notification preferences persist, and invitations resend and revoke",
+      "status": "passed",
+      "duration_ms": 9475
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "concurrent SDK registrations return a receipt for each independent agent",
+      "status": "passed",
+      "duration_ms": 5552
+    },
+    {
+      "file": "audit.spec.ts",
+      "scenario": "completed pipeline workspace pages work on mobile and show the active evidence chain",
+      "status": "passed",
+      "duration_ms": 4332
+    },
+    {
+      "file": "pipeline.spec.ts",
+      "scenario": "a dashboard-launched pipeline completes with a report and confirmed evidence",
+      "status": "passed",
+      "duration_ms": 21156
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "landing actions, protected session, and failed recovery are honest",
+      "status": "passed",
+      "duration_ms": 1523
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "all workspace pages, theme, search, and mobile navigation",
+      "status": "passed",
+      "duration_ms": 4344
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "key creation, proof inspection, content verification, agents, and run launch",
+      "status": "passed",
+      "duration_ms": 7175
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "authentication layout is responsive",
+      "status": "passed",
+      "duration_ms": 422
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "every workspace page fits a phone viewport",
+      "status": "passed",
+      "duration_ms": 1662
+    },
+    {
+      "file": "product.spec.ts",
+      "scenario": "persisted failed runs stay failed and show the backend reason",
+      "status": "passed",
+      "duration_ms": 395
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "landing pipeline, hash demonstration, links, and motion persistence",
+      "status": "passed",
+      "duration_ms": 5427
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "public pages fit phones and tablets with working mobile menus and return links",
+      "status": "passed",
+      "duration_ms": 11320
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "every workspace route fits 320, 768, and 1600 pixels without runtime errors",
+      "status": "passed",
+      "duration_ms": 7998
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "keyboard search, dialog escape, and reduced motion remain usable",
+      "status": "passed",
+      "duration_ms": 781
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "signup validation, password visibility, and legacy route redirects",
+      "status": "passed",
+      "duration_ms": 2171
+    },
+    {
+      "file": "smoke.spec.ts",
+      "scenario": "real signup, session cookies, workspace pages, settings, logout, and login",
+      "status": "passed",
+      "duration_ms": 13357
+    },
+    {
+      "file": "smoke.spec.ts",
+      "scenario": "real protected route and stale display cache cannot authenticate",
+      "status": "passed",
+      "duration_ms": 291
+    },
+    {
+      "file": "smoke.spec.ts",
+      "scenario": "real pipeline launch returns a signed stream and rejects an unsigned stream",
+      "status": "passed",
+      "duration_ms": 2773
+    },
+    {
+      "file": "smoke.spec.ts",
+      "scenario": "browser preflights allow workspace mutation methods",
+      "status": "passed",
+      "duration_ms": 14
+    },
+    {
+      "file": "redesign.spec.ts",
+      "scenario": "secondary controls: account appearance, scoped keys, searches, refreshes, and score export",
+      "status": "passed",
+      "duration_ms": 7371
+    }
+  ],
+  "pipeline_evidence": {
+    "run_id": "run_20261114_120724_cc77ccd2",
+    "score": 85,
+    "report_characters": 2128,
+    "confirmed_steps": 10,
+    "proof_step": 94,
+    "block": 96,
+    "tx_hash": "0xb33702d2a5b35619d87e7bc0bdff7ce59a1b336c874b6e457bd57444fcbfb15d"
+  },
+  "limits": [
+    "Chromium only; Firefox and WebKit were not exercised.",
+    "Local integration, not a production deployment certification.",
+    "Console email tokens were followed; external email delivery was not tested.",
+    "Local Anvil receipts were verified; public-network reliability was not tested.",
+    "Optional external evidence publishing was disabled.",
+    "Model output correctness is not guaranteed by a cryptographic proof."
+  ]
+}

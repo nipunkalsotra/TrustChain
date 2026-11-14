@@ -29,6 +29,7 @@ import { logout, resendVerification } from "@/lib/api";
 import { ErrorBox, Loading, message, Modal } from "@/components/product/ui";
 import "@/components/product/theme.css";
 import "./dashboard.css";
+import { MotionControl } from "@/components/ui/MotionControl";
 const navigation = [
   {
     title: "WORKSPACE",
@@ -154,7 +155,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <span className="d-brand-icon">
             <ShieldCheck size={23} />
           </span>
-          TrustChain
+          trustchain.
           <span className="d-brand-dot" />
         </Link>
         <div className="d-project">
@@ -265,11 +266,11 @@ function Shell({ children }: { children: React.ReactNode }) {
               <Menu size={20} />
             </button>
             <span className="d-breadcrumb">
-              Workspace <span>/</span> <b>{current}</b>
+              Observatory <span>/</span> <b>{current}</b>
             </span>
           </div>
           <div className="p-actions">
-            <button className="d-command" onClick={() => setSearch(true)}>
+            <button className="d-command" aria-label="Find a page" onClick={() => setSearch(true)}>
               <Search size={15} />
               <span>Find a page…</span>
               <kbd>⌘ K</kbd>
@@ -331,11 +332,11 @@ function Shell({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           )}
-          {children}
+          <div className="d-page-enter" key={pathname}>{children}</div>
         </main>
         <footer className="d-footer">
           <span>
-            TrustChain <span> / </span> Verifiable by design.
+            TrustChain <span> / </span> Verifiable by design. <MotionControl />
           </span>
           <span>
             <ShieldCheck size={12} /> Your workspace. Your evidence.

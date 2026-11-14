@@ -8,6 +8,7 @@ Responsibilities:
 """
 
 import logging
+import re
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -16,6 +17,28 @@ import observability
 from agents.base import AgentState, get_llm, log_step, track_token_usage
 
 logger = logging.getLogger(__name__)
+
+
+def finalize_report(report: str, research: str, source_urls: list[str] | None = None) -> str:
+    """Keep source URLs and audit state factual even when the model omits them."""
+    # These two sections describe recorded evidence, rather than model opinion.
+    report = re.sub(
+        r"(?ms)^## (?:Blockchain Audit|Sources)[^\n]*\n.*?(?=^## |\Z)",
+        "",
+        report,
+    ).strip()
+    sources = list(dict.fromkeys(source_urls)) if source_urls is not None else list(dict.fromkeys(
+        url.rstrip(".,;:)") for url in re.findall(r'https?://[^\s<>"\]]+', research)
+    ))
+    if sources:
+        report += "\n\n## Sources\n" + "\n".join(f"- {url}" for url in sources)
+    report += (
+        "\n\n## Blockchain Audit\n"
+        "Agent steps are durably recorded and queued for asynchronous Merkle anchoring. "
+        "Check each step’s anchor status and chain receipt in the workspace; "
+        "a recorded step is not yet a confirmed on-chain proof."
+    )
+    return report
 
 
 async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> AgentState:
@@ -73,8 +96,10 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
                 f"Pipeline trust score: {score}/100\n"
                 "<one sentence on what this score means>\n\n"
                 "## Blockchain Audit\n"
-                "All agent steps are permanently recorded on Monad testnet. "
-                "Every action is immutably logged and verifiable via transaction hash."
+                "Steps are durably recorded and queued for asynchronous Merkle anchoring. "
+                "Confirmation and network must be checked in the workspace; do not assume a network.\n\n"
+                "## Sources\n"
+                "Include the actual source URLs from the research. Do not invent links."
             )),
             HumanMessage(content=(
                 f"Task: {task}\n\n"
@@ -86,6 +111,7 @@ async def reporter_node(state: AgentState, bridge: Optional[Any] = None) -> Agen
     report_output = report_response.content
     if not isinstance(report_output, str) or not report_output.strip():
         raise ValueError("Reporter model returned an empty report; the run cannot be marked complete")
+    report_output = finalize_report(report_output, research, state.get("source_urls"))
     tokens_used = track_token_usage(state.get("tokens_used", 0), report_response, run_id)
 
     # ── Step 2: log completion ────────────────────────────────────────────

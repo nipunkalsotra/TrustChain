@@ -111,7 +111,7 @@ test("a dashboard-launched pipeline completes with a report and confirmed eviden
   });
   await page.goto(`/dashboard/runs/${encodeURIComponent(runId)}`);
   await expect(page.locator(".p-report")).toContainText(
-    result.report.slice(0, 80),
+    result.report.split("\n").find((line: string) => line.trim() && !line.startsWith("#"))!.replace(/\*\*/g, "").slice(0, 80),
   );
   await expect(page.locator(".p-error")).toHaveCount(0);
 });

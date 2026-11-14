@@ -1,47 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1080" viewBox="0 0 1280 1080" role="img"><title>One system. Three paths to trust.</title><desc>Execute a workflow, instrument your own agent, or independently verify recorded evidence.</desc><style>text{font-family:Arial,Helvetica,sans-serif}.title{font-size:35px;font-weight:700;fill:#eef4ff}.label{font-size:21px;font-weight:700;fill:#eef4ff}.body{font-size:17px;fill:#a4b5d0}.micro{font-size:13px;fill:#40e8ed;letter-spacing:2px}.edge{fill:none;stroke:#40e8ed;stroke-width:2;marker-end:url(#arrow)}.secondary{fill:none;stroke:#a995ff;stroke-width:2;stroke-dasharray:6 5;marker-end:url(#purple)}</style><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#40e8ed"/></marker><marker id="purple" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#a995ff"/></marker></defs><rect width="1280" height="1080" rx="20" fill="#080e20"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1080" viewBox="0 0 1280 1080" role="img"><title>One system. Three paths to trust.</title><desc>Execute a workflow, instrument your own agent, or independently verify recorded evidence.</desc><style>text{font-family:Arial,Helvetica,sans-serif}.title{font-size:35px;font-weight:700;fill:#f5f1e9}.label{font-size:21px;font-weight:700;fill:#f5f1e9}.body{font-size:17px;fill:#c1b29e}.micro{font-size:13px;fill:#b3ef69;letter-spacing:2px}.edge{fill:none;stroke:#b3ef69;stroke-width:2;marker-end:url(#arrow)}.secondary{fill:none;stroke:#dcc8a5;stroke-width:2;stroke-dasharray:6 5;marker-end:url(#purple)}</style><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#b3ef69"/></marker><marker id="purple" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#dcc8a5"/></marker></defs><rect width="1280" height="1080" rx="20" fill="#1c1511"/>
 <text x="48" y="63" class="title">One system. Three paths to trust.</text>
 <text x="48" y="99" class="body">Execute a workflow, instrument your own agent, or independently verify recorded evidence.</text>
-<rect x="48" y="140" width="360" height="120" rx="14" fill="#101b32" stroke="#263853"/><rect x="48" y="158" width="3" height="84" rx="1" fill="#40e8ed"/><text x="70" y="169" class="micro" style="fill:#40e8ed">01 / HUMAN</text><text x="70" y="200" class="label">Next.js workspace</text>
+<rect x="48" y="140" width="360" height="120" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="48" y="158" width="3" height="84" rx="1" fill="#b3ef69"/><text x="70" y="169" class="micro" style="fill:#b3ef69">01 / HUMAN</text><text x="70" y="200" class="label">Next.js workspace</text>
 <text x="70" y="229" class="body">Runs · scores · evidence · team</text>
-<rect x="460" y="140" width="360" height="120" rx="14" fill="#101b32" stroke="#263853"/><rect x="460" y="158" width="3" height="84" rx="1" fill="#40e8ed"/><text x="482" y="169" class="micro" style="fill:#40e8ed">02 / MACHINE</text><text x="482" y="200" class="label">Python + TypeScript SDKs</text>
+<rect x="460" y="140" width="360" height="120" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="460" y="158" width="3" height="84" rx="1" fill="#b3ef69"/><text x="482" y="169" class="micro" style="fill:#b3ef69">02 / MACHINE</text><text x="482" y="200" class="label">Python + TypeScript SDKs</text>
 <text x="482" y="229" class="body">Register · instrument · inspect</text>
-<rect x="872" y="140" width="360" height="120" rx="14" fill="#101b32" stroke="#263853"/><rect x="872" y="158" width="3" height="84" rx="1" fill="#72efb0"/><text x="894" y="169" class="micro" style="fill:#72efb0">03 / VERIFIER</text><text x="894" y="200" class="label">Local + on-chain checks</text>
+<rect x="872" y="140" width="360" height="120" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="872" y="158" width="3" height="84" rx="1" fill="#92c952"/><text x="894" y="169" class="micro" style="fill:#92c952">03 / VERIFIER</text><text x="894" y="200" class="label">Local + on-chain checks</text>
 <text x="894" y="229" class="body">Proofs · roots · transaction receipts</text>
 <path d="M228 260 V310" class="edge"/>
 <path d="M640 260 V310" class="edge"/>
 <path d="M1052 260 V310" class="edge"/>
-<rect x="48" y="310" width="1184" height="120" rx="14" fill="#101b32" stroke="#263853"/><rect x="48" y="328" width="3" height="84" rx="1" fill="#40e8ed"/><text x="70" y="339" class="micro" style="fill:#40e8ed">CONTROL PLANE</text><text x="70" y="370" class="label">FastAPI · scoped access · organization / project boundaries</text>
+<rect x="48" y="310" width="1184" height="120" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="48" y="328" width="3" height="84" rx="1" fill="#b3ef69"/><text x="70" y="339" class="micro" style="fill:#b3ef69">CONTROL PLANE</text><text x="70" y="370" class="label">FastAPI · scoped access · organization / project boundaries</text>
 <text x="70" y="399" class="body">Cookie sessions + CSRF · API key scopes · authorization · signed run streams · verification endpoints</text>
 <path d="M350 430 V490" class="edge"/>
 <path d="M825 430 V490" class="edge"/>
 <path d="M1115 430 V490" class="edge"/>
-<rect x="48" y="490" width="610" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="48" y="508" width="3" height="104" rx="1" fill="#40e8ed"/><text x="70" y="519" class="micro" style="fill:#40e8ed">EXECUTION</text><text x="70" y="550" class="label">Researcher → Validator → Scorer → Reporter</text>
+<rect x="48" y="490" width="610" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="48" y="508" width="3" height="104" rx="1" fill="#b3ef69"/><text x="70" y="519" class="micro" style="fill:#b3ef69">EXECUTION</text><text x="70" y="550" class="label">Researcher → Validator → Scorer → Reporter</text>
 <text x="70" y="579" class="body">LangGraph orchestration · Groq model calls</text>
 <text x="70" y="604" class="body">Tavily search / fact-check tools through MCP</text>
-<rect x="710" y="490" width="230" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="710" y="508" width="3" height="104" rx="1" fill="#a995ff"/><text x="732" y="519" class="micro" style="fill:#a995ff">LIVE SIGNAL</text><text x="732" y="550" class="label">Redis</text>
+<rect x="710" y="490" width="230" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="710" y="508" width="3" height="104" rx="1" fill="#dcc8a5"/><text x="732" y="519" class="micro" style="fill:#dcc8a5">LIVE SIGNAL</text><text x="732" y="550" class="label">Redis</text>
 <text x="732" y="579" class="body">SSE event bus</text>
 <text x="732" y="604" class="body">Rate limits</text>
-<rect x="990" y="490" width="242" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="990" y="508" width="3" height="104" rx="1" fill="#a995ff"/><text x="1012" y="519" class="micro" style="fill:#a995ff">OBSERVATION</text><text x="1012" y="550" class="label">Watchdog</text>
+<rect x="990" y="490" width="242" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="990" y="508" width="3" height="104" rx="1" fill="#dcc8a5"/><text x="1012" y="519" class="micro" style="fill:#dcc8a5">OBSERVATION</text><text x="1012" y="550" class="label">Watchdog</text>
 <text x="1012" y="579" class="body">Integrity sweeps</text>
 <text x="1012" y="604" class="body">Alert deliveries</text>
 <path d="M350 630 V695" class="edge"/>
 <path d="M825 490 V455 H1260 V370 H1238" class="secondary"/>
-<rect x="48" y="695" width="610" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="48" y="713" width="3" height="104" rx="1" fill="#40e8ed"/><text x="70" y="724" class="micro" style="fill:#40e8ed">DURABLE RECORD</text><text x="70" y="755" class="label">PostgreSQL</text>
+<rect x="48" y="695" width="610" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="48" y="713" width="3" height="104" rx="1" fill="#b3ef69"/><text x="70" y="724" class="micro" style="fill:#b3ef69">DURABLE RECORD</text><text x="70" y="755" class="label">PostgreSQL</text>
 <text x="70" y="784" class="body">steps + anchor_outbox commit together</text>
 <text x="70" y="809" class="body">Runs · batches · tenancy · alerts · read models</text>
 <path d="M658 760 H710" class="edge"/>
 <path d="M1115 630 V660 H610 V690" class="secondary"/>
-<rect x="710" y="695" width="522" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="710" y="713" width="3" height="104" rx="1" fill="#40e8ed"/><text x="732" y="724" class="micro" style="fill:#40e8ed">ASYNC WRITE</text><text x="732" y="755" class="label">Anchor worker</text>
+<rect x="710" y="695" width="522" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="710" y="713" width="3" height="104" rx="1" fill="#b3ef69"/><text x="732" y="724" class="micro" style="fill:#b3ef69">ASYNC WRITE</text><text x="732" y="755" class="label">Anchor worker</text>
 <text x="732" y="784" class="body">Claim outbox → Merkle batch → submit root</text>
 <text x="732" y="809" class="body">Signer transaction lock coordinates nonce use</text>
 <path d="M970 835 V900" class="edge"/>
-<rect x="710" y="900" width="522" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="710" y="918" width="3" height="104" rx="1" fill="#72efb0"/><text x="732" y="929" class="micro" style="fill:#72efb0">EVIDENCE CHAIN</text><text x="732" y="960" class="label">V2 Solidity contracts</text>
+<rect x="710" y="900" width="522" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="710" y="918" width="3" height="104" rx="1" fill="#92c952"/><text x="732" y="929" class="micro" style="fill:#92c952">EVIDENCE CHAIN</text><text x="732" y="960" class="label">V2 Solidity contracts</text>
 <text x="732" y="989" class="body">Audit roots · trust scores · agent identities</text>
 <text x="732" y="1014" class="body">Deployment registry · Anvil locally / Monad target</text>
-<rect x="48" y="900" width="610" height="140" rx="14" fill="#101b32" stroke="#263853"/><rect x="48" y="918" width="3" height="104" rx="1" fill="#40e8ed"/><text x="70" y="929" class="micro" style="fill:#40e8ed">READ / RECONCILE</text><text x="70" y="960" class="label">Chain indexer</text>
+<rect x="48" y="900" width="610" height="140" rx="14" fill="#2a2119" stroke="#55432e"/><rect x="48" y="918" width="3" height="104" rx="1" fill="#b3ef69"/><text x="70" y="929" class="micro" style="fill:#b3ef69">READ / RECONCILE</text><text x="70" y="960" class="label">Chain indexer</text>
 <text x="70" y="989" class="body">Events → scores / identities / confirmed evidence</text>
 <text x="70" y="1014" class="body">Read models are derived from chain events</text>
 <path d="M710 970 H658" class="edge"/>
 <path d="M350 900 V840" class="edge"/>
-<path d="M1232 200 H1268 V970 H1238" fill="none" stroke="#72efb0" stroke-width="2" marker-end="url(#arrow)"/><path d="M1232 410 H1268" fill="none" stroke="#72efb0" stroke-width="2"/><text x="48" y="1064" style="font:13px Arial;fill:#a4b5d0">Cyan: primary evidence path · Purple: streaming / monitoring · Green outer path: direct V2 contract operations</text>
+<path d="M1232 200 H1268 V970 H1238" fill="none" stroke="#92c952" stroke-width="2" marker-end="url(#arrow)"/><path d="M1232 410 H1268" fill="none" stroke="#92c952" stroke-width="2"/><text x="48" y="1064" style="font:13px Arial;fill:#c1b29e">Green: primary evidence path · Chalk: streaming / monitoring · Outer path: direct contract operations</text>
 </svg>

@@ -1,38 +1,6 @@
 import Link from "next/link";
+import { ArrowUpRight, ShieldCheck } from "lucide-react";
+import "@/components/marketing/marketing.css";
 export default function NotFound() {
-  return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "grid",
-        placeItems: "center",
-        background: "#171c29",
-        color: "#e8ecff",
-        fontFamily: "Arial, sans-serif",
-        padding: 30,
-      }}
-    >
-      <div>
-        <p style={{ color: "#a6b3ff", fontSize: 12, marginBottom: 15 }}>
-          404 / PAGE NOT FOUND
-        </p>
-        <h1 style={{ fontSize: 36, marginBottom: 16 }}>
-          Let’s get you back on track.
-        </h1>
-        <p style={{ color: "#a1aac0", marginBottom: 30 }}>
-          This page may have moved or the address may be incorrect.
-        </p>
-        <Link
-          href="/dashboard"
-          style={{
-            padding: "12px 20px",
-            background: "#5368d8",
-            borderRadius: 7,
-          }}
-        >
-          Open your workspace →
-        </Link>
-      </div>
-    </main>
-  );
+  return <main className="mkt-page m-standalone"><Link className="m-brand" href="/"><ShieldCheck size={25} />trustchain.</Link><div className="m-standalone-content"><div className="m-eyebrow">404 / OFF THE RECORD</div><h1>Let’s get you<br /><em>back on track.</em></h1><p>This page may have moved or the address may be incorrect. Your workspace is a good place to start again.</p><div className="m-hero-actions"><Link href="/dashboard" className="m-button m-button-green">Open your workspace<ArrowUpRight size={17} /></Link><Link href="/" className="m-button m-button-outline">Return to TrustChain</Link></div></div></main>;
 }

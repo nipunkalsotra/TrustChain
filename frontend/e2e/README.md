@@ -39,3 +39,7 @@ The audit deliberately asserts correct behavior for known defects; failures
 must remain visible until the underlying functionality is corrected. Results
 and scope from the November 11, 2026 audit are in
 [`docs/e2e-audit-2026-11-11.md`](../../docs/e2e-audit-2026-11-11.md).
+
+The espresso/white/green redesign is covered by `redesign.spec.ts`. It exercises the landing pipeline and live browser SHA-256 example, motion preferences, public routes, keyboard interactions, all workspace layouts at 320/768/1600 pixels, account appearance, scope validation, searches, refreshes, cancellation, and score export. It uses the explicit API fixture in `e2e/fixtures/workspace.ts`; live workflows remain in the audit, smoke, and pipeline suites.
+
+The November 14 redesign report and silent cinematic walkthrough are in [`artifacts/redesign/`](../../artifacts/redesign/README.md). The report preserves the test execution history and distinguishes repeatable fixture screenshots from live-service evidence.

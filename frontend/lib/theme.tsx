@@ -1,14 +1,14 @@
 "use client";
 import { createContext, useContext, useEffect, useState } from "react";
 type Theme = "light" | "dark";
-const Context = createContext({ theme: "light" as Theme, toggle: () => {} });
+const Context = createContext({ theme: "dark" as Theme, toggle: () => {} });
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>("dark");
   // localStorage is external state and must be read after hydration.
   useEffect(() => {
     try {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (localStorage.getItem("tc_theme") === "dark") setTheme("dark");
+      if (localStorage.getItem("tc_theme") === "light") setTheme("light");
     } catch {}
   }, []);
   function toggle() {

@@ -1,7 +1,10 @@
 import type { Metadata } from "next"
-import { Geist_Mono } from "next/font/google"
+import { Geist, Geist_Mono } from "next/font/google"
 import "./globals.css"
-import ClientShell from "@/components/ui/ClientShell"  // ← add this
+import "@/components/ui/brand.css"
+import ClientShell from "@/components/ui/ClientShell"
+
+const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"], display: "swap" })
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
@@ -10,14 +13,14 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "TrustChain — Immutable Agent Audit",
-  description: "Multi-agent AI with tamper-proof blockchain audit trail on Monad",
+  description: "Observe AI agents, anchor their evidence, and independently verify every recorded action.",
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={geistMono.variable}>
+    <html lang="en" className={`${geistMono.variable} ${geistSans.variable}`}>
       <body suppressHydrationWarning>
-        <ClientShell>{children}</ClientShell>  {/* ← wrap children */}
+        <ClientShell>{children}</ClientShell>
       </body>
     </html>
   )

@@ -1,0 +1,182 @@
+{
+  "programs": [],
+  "stream_groups": [],
+  "streams": [
+    {
+      "codec_name": "h264",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "30/1"
+    }
+  ],
+  "format": {
+    "duration": "325.700000",
+    "size": "34137539"
+  },
+  "sha256": "90c62ef2b94ad685717bb22168b7e8c5ffdda9d9c88a8f9466267fb894a77f63",
+  "fast_start": true,
+  "audio_tracks": 0,
+  "run_id": "run_20261114_121055_c4f828d4",
+  "confirmed_pipeline_steps": 10,
+  "presentation": "real redesigned UI with animated evidence sculpture, chapter HUD, eased cursor, click ripples, field-note cards, and reading progress",
+  "theme": "espresso, warm white, and chlorophyll green",
+  "chapters": [
+    {
+      "title": "Intelligence, with a proof",
+      "start": 0,
+      "end": 12.002
+    },
+    {
+      "title": "Explore the four-agent pipeline",
+      "start": 12.002,
+      "end": 24.001
+    },
+    {
+      "title": "Change a word. Leave a trace.",
+      "start": 24.002,
+      "end": 33.999
+    },
+    {
+      "title": "Your project workspace",
+      "start": 34,
+      "end": 42.001
+    },
+    {
+      "title": "Create a project",
+      "start": 42.001,
+      "end": 57.318
+    },
+    {
+      "title": "Launch a real research run",
+      "start": 57.318,
+      "end": 76.001
+    },
+    {
+      "title": "Follow live agent activity",
+      "start": 76.001,
+      "end": 102
+    },
+    {
+      "title": "Read the final report",
+      "start": 102.001,
+      "end": 118.004
+    },
+    {
+      "title": "Compare agent performance",
+      "start": 118.005,
+      "end": 130.001
+    },
+    {
+      "title": "Search and export the audit trail",
+      "start": 130.001,
+      "end": 146.001
+    },
+    {
+      "title": "Inspect confirmed transactions",
+      "start": 146.001,
+      "end": 158
+    },
+    {
+      "title": "Retrieve a confirmed Merkle proof",
+      "start": 158.001,
+      "end": 178.002
+    },
+    {
+      "title": "Verify the whole run",
+      "start": 178.003,
+      "end": 192.001
+    },
+    {
+      "title": "Create a scoped SDK key",
+      "start": 192.001,
+      "end": 209.891
+    },
+    {
+      "title": "Send activity through the real SDK",
+      "start": 209.891,
+      "end": 228.001
+    },
+    {
+      "title": "Check the registered fingerprint",
+      "start": 228.001,
+      "end": 245.125
+    },
+    {
+      "title": "Check the original content",
+      "start": 245.125,
+      "end": 257.533
+    },
+    {
+      "title": "Investigate and resolve identity drift",
+      "start": 257.534,
+      "end": 286.435
+    },
+    {
+      "title": "Invite teammates and set preferences",
+      "start": 286.435,
+      "end": 307.521
+    },
+    {
+      "title": "Revoke the integration key",
+      "start": 307.522,
+      "end": 317.803
+    },
+    {
+      "title": "Return to the project overview",
+      "start": 317.803,
+      "end": 325.713
+    }
+  ],
+  "verified_events": [
+    {
+      "type": "landing_pipeline_and_hash_demo"
+    },
+    {
+      "type": "project_created_and_selected",
+      "project": "Research Lab"
+    },
+    {
+      "type": "pipeline_started",
+      "runId": "run_20261114_121055_c4f828d4"
+    },
+    {
+      "type": "pipeline_completed",
+      "runId": "run_20261114_121055_c4f828d4",
+      "score": 80,
+      "reportCharacters": 1776
+    },
+    {
+      "type": "all_steps_confirmed",
+      "count": 10
+    },
+    {
+      "type": "run_verification_passed",
+      "runId": "run_20261114_121055_c4f828d4"
+    },
+    {
+      "type": "sdk_registered_and_logged",
+      "agentId": "support-assistant",
+      "stepId": 114
+    },
+    {
+      "type": "intentional_sdk_identity_drift"
+    },
+    {
+      "type": "content_verification_passed",
+      "stepId": 114
+    },
+    {
+      "type": "alert_acknowledged_and_resolved"
+    },
+    {
+      "type": "viewer_invitation_and_preferences_saved"
+    },
+    {
+      "type": "key_revoked",
+      "status": 401
+    }
+  ],
+  "conditions": "Real local application, real model/search calls, Anvil chain 31337, console email. No fabricated application results.",
+  "editing": "Initial loading frames trimmed; real application actions play at original speed. Presentation overlays do not alter application results."
+}

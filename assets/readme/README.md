@@ -1,20 +1,33 @@
-# README media
+# README media — espresso, warm white, and green
 
-The hero and diagrams are original code-generated motion graphics and SVGs.
-Product screenshots and preview GIFs are extracted from the actual recorded
-TrustChain session. They do not replace application content with mock data.
-The top 1600×900 crop removes the recording’s chapter-caption overlay.
+The root README's hero, product screenshots, and preview GIFs come from the
+new **5:26 silent cinematic tour** in
+`artifacts/redesign/TrustChain-Cinematic-Product-Tour.mp4`. The primary video
+link is [the user-provided Drive upload](https://drive.google.com/file/d/1sM2GhKTrmnHkojWA4kJU5ybNCBuHza0F/view?usp=sharing).
 
-See [media-provenance.json](media-provenance.json) for the source file hash,
-screenshot timestamps, clip ranges, and processing details. Product previews
-run at 8 fps and 720 pixels wide to keep the repository README lightweight.
+The full video frame is preserved, including the animated chapter labels,
+field-note cards, cursor, and progress indicators. These are presentation
+overlays over real local application actions. Application data is not
+replaced. The local MP4 hash is checked against its verified metadata before
+extracting the product screenshots and previews.
 
-Regenerate from the repository root:
+The hero excerpt is 1100 pixels wide; product GIFs use 720 pixels at 8 fps.
+Screenshots use 1280 pixels. SVG diagrams are original code assets using the
+same brown, white, and green palette. The validation strip reports the dated
+November 14 results; it is not a live CI or dependency-security badge.
+
+`landing-desktop`, `landing-pipeline`, and `landing-integrity` show the actual
+public landing interactions. `mobile-overview` and `mobile-proofs` use explicit
+API fixtures for repeatable layout checks; the root README identifies those
+images separately from the real recorded product gallery.
+
+See [media-provenance.json](media-provenance.json) for the source hash, frame
+timestamps, excerpt ranges, and supporting-image origins. The new recording,
+report, scope, and verification evidence are documented in
+[artifacts/redesign](../../artifacts/redesign/README.md).
+
+Regenerate from the repository root with FFmpeg and the project Python:
 
 ```sh
 .venv/bin/python scripts/render_readme.py
 ```
-
-The generator uses Pillow, FFmpeg, and the locally installed Adwaita / Readex
-fonts named in the script. It reads the existing local demo MP4. The root
-README deliberately has no full-video link; a Drive URL can be added later.

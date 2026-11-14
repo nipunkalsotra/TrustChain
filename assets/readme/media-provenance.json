@@ -1,29 +1,67 @@
 {
-  "source": "artifacts/demo/q.mp4",
-  "sha256": "2279cda76d870031bb4c70fcb019238c223cd1b882e49b08d1df762bf6d58593",
+  "source": "artifacts/redesign/TrustChain-Cinematic-Product-Tour.mp4",
+  "sha256": "90c62ef2b94ad685717bb22168b7e8c5ffdda9d9c88a8f9466267fb894a77f63",
+  "drive_url": "https://drive.google.com/file/d/1sM2GhKTrmnHkojWA4kJU5ybNCBuHza0F/view?usp=sharing",
+  "duration_seconds": 325.7,
+  "theme": "espresso, warm white, and chlorophyll green",
+  "audio_tracks": 0,
   "screenshots_seconds": {
-    "overview": 255,
-    "completed-run": 114,
-    "trust-scores": 133,
-    "audit-trail": 142,
-    "proof": 157,
-    "agent-identity": 198,
-    "integrity-alert": 214,
-    "notifications": 237
+    "landing": 6,
+    "overview": 322,
+    "completed-run": 111,
+    "trust-scores": 125,
+    "audit-trail": 140,
+    "proof": 174,
+    "agent-identity": 234,
+    "fingerprint-mismatch": 244,
+    "integrity-alert": 284,
+    "notifications": 303,
+    "api-keys": 315
   },
   "clip_ranges_seconds": {
     "run-to-evidence": [
-      122,
-      131
+      110,
+      126
     ],
     "proof-in-action": [
-      154,
-      163
+      160,
+      177
     ],
     "identity-to-alert": [
-      202,
-      217
+      241,
+      267
     ]
   },
-  "processing": "Top 1600x900 crop removes recording chapter overlay; GIF previews downscaled to 720px at 8fps. Product content is not replaced."
+  "hero_clip": {
+    "range_seconds": [
+      1.5,
+      9.5
+    ],
+    "width": 1100,
+    "fps": 8
+  },
+  "supporting_images": {
+    "landing-desktop": {
+      "source": "artifacts/redesign/screenshots/landing-desktop.png",
+      "data": "actual public landing page; its local SHA-256 demonstration is labeled as an example"
+    },
+    "landing-pipeline": {
+      "source": "artifacts/redesign/screenshots/landing-pipeline.png",
+      "data": "actual public landing page; its local SHA-256 demonstration is labeled as an example"
+    },
+    "landing-integrity": {
+      "source": "artifacts/redesign/screenshots/landing-integrity.png",
+      "data": "actual public landing page; its local SHA-256 demonstration is labeled as an example"
+    },
+    "mobile-overview": {
+      "source": "artifacts/redesign/screenshots/mobile-overview.png",
+      "data": "explicit API fixtures for responsive layout"
+    },
+    "mobile-proofs": {
+      "source": "artifacts/redesign/screenshots/mobile-proofs.png",
+      "data": "explicit API fixtures for responsive layout"
+    }
+  },
+  "processing": "Full video frames preserved, including chapter labels and animated field-note overlays. Screenshots downscaled to 1280px; product GIFs to 720px at 8fps. No application data is replaced.",
+  "graphics": "Original code-generated SVG diagrams recolored to espresso brown, warm white, and green. The validation strip is a dated snapshot, not a live badge."
 }
