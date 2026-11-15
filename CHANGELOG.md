@@ -1,3 +1,11 @@
+## [1.0.1](https://github.com/nipunkalsotra/TrustChain/compare/v1.0.0...v1.0.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **deps:** preserve SQLAlchemy async greenlet dependency in grouped update ([1cbc5a0](https://github.com/nipunkalsotra/TrustChain/commit/1cbc5a0c61fb8aa1f9aabac3fba7af82c484019e))
+* **deps:** retain SQLAlchemy 2.0 type contract while upgrading other packages ([4a46c59](https://github.com/nipunkalsotra/TrustChain/commit/4a46c599fa0bf5b9ff1e404ba8b14a1cda470f31))
+
 # 1.0.0 (2026-11-15)
 
 
