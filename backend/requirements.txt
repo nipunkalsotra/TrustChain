@@ -10,7 +10,7 @@ argon2-cffi==25.1.0
 httpx==0.28.1
 
 # Database (Postgres, async)
-SQLAlchemy==2.0.52
+SQLAlchemy[asyncio]==2.0.52
 asyncpg==0.31.0
 alembic==1.19.1
 

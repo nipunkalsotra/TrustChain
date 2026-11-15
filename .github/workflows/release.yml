@@ -59,7 +59,8 @@ jobs:
         with:
           node-version: "22"
       - name: Install release tooling
-        run: npm install
+        # Use the same lockfile dependencies validated by the CI smoke test.
+        run: npm ci
       - name: Run semantic-release
         id: release
         run: |
