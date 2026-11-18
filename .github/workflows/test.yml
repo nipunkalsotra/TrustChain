@@ -90,7 +90,7 @@ jobs:
         # recompilation entirely. forge still verifies per-file content
         # hashes on top of this before treating anything as up to date, so
         # a coarse key match can't silently serve a stale build.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             contracts/cache
@@ -320,7 +320,7 @@ jobs:
         # recompilation entirely. forge still verifies per-file content
         # hashes on top of this before treating anything as up to date, so
         # a coarse key match can't silently serve a stale build.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             contracts/cache
@@ -641,7 +641,7 @@ jobs:
         # recompilation entirely. forge still verifies per-file content
         # hashes on top of this before treating anything as up to date, so
         # a coarse key match can't silently serve a stale build.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             contracts/cache
