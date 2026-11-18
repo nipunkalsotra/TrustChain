@@ -50,7 +50,7 @@ jobs:
       released: ${{ steps.release.outputs.released }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: true   # semantic-release needs to push the CHANGELOG commit + tag
           fetch-depth: 0              # full history — commit-analyzer walks it since the last tag
@@ -120,7 +120,7 @@ jobs:
           # URL), with its own git-integration-based deploy flow, not a
           # Docker image push.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
@@ -199,7 +199,7 @@ jobs:
     env:
       JWT_SECRET: ci-release-snapshot-secret-not-for-production-use-only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
@@ -238,7 +238,7 @@ jobs:
       # provenance, not "who's allowed to publish this package."
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}   # the tag semantic-release just created
@@ -295,7 +295,7 @@ jobs:
       id-token: write
     environment: pypi   # matches whatever environment name the PyPI trusted-publisher config (above) is scoped to
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: v${{ needs.release.outputs.version }}
