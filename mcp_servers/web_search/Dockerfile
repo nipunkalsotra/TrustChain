@@ -2,7 +2,7 @@
 # mcp_servers/blockchain (see that Dockerfile's comment on why its build
 # context has to be the repo root instead of just its own directory).
 
-FROM python:3.14-slim AS deps
+FROM python:3.15-slim AS deps
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 WORKDIR /app
 
