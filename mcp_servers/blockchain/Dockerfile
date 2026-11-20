@@ -11,7 +11,7 @@
 # it once covers both what this server needs directly and what the
 # backend/blockchain package it imports needs transitively.
 
-FROM python:3.14-slim AS deps
+FROM python:3.15-slim AS deps
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 WORKDIR /app
 
