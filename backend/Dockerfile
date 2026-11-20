@@ -4,7 +4,7 @@
 # "works on my machine" gap can't hide here. Separate stage for deps so
 # `docker compose up` rebuilds are fast when only application code changes.
 
-FROM python:3.14-slim AS deps
+FROM python:3.15-slim AS deps
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 WORKDIR /app
 
